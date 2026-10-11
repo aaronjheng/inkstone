@@ -1,0 +1,833 @@
+import AppKit
+import Foundation
+import UniformTypeIdentifiers
+
+/// Application delegate: menu bar, window lifecycle, and file handling.
+@MainActor
+public final class AppDelegate: NSObject, NSApplicationDelegate {
+    private let store = AppStore.shared
+    private var isTerminating = false
+    /// `applicationDidFinishLaunching` is entered three times in a normal launch:
+    /// `InkstoneApp.main` reaches it through `applicationWillFinishLaunching`, then
+    /// `run()` posts willFinish (which reaches it again) and finally didFinish.
+    /// Without this the app opened three identical scratch windows.
+    private var didPrepareUI = false
+
+    override public init() { super.init() }
+
+    public func applicationWillFinishLaunching(_ notification: Notification) {
+        // Re-apply the stored theme once the windows exist, so a launch always
+        // starts on the user's theme rather than the build default.
+        store.themeManager.apply()
+        applicationDidFinishLaunching(notification)
+    }
+
+    public func applicationDidFinishLaunching(_ notification: Notification) {
+        guard !didPrepareUI else { return }
+        didPrepareUI = true
+        NSApp.mainMenu = MenuBuilder.build(store: store, responder: self)
+        restoreRecentFiles()
+        restoreRecentFolders()
+        store.settings.onChange = { [weak self] in
+            MainActor.assumeIsolated { self?.pushSettingsToWindows() }
+        }
+        pushSettingsToWindows()
+        // Open whatever the Finder, `open -a` or the command line handed us *before*
+        // creating a scratch window: opening a file that then leaves an empty Untitled
+        // window behind is what made the tab bar read "Untitled" three times over.
+        let launched = launchFileURLs()
+        let recovered = recoverableDrafts()
+        if !launched.isEmpty {
+            // Handed files by the Finder: they win, drafts ride along.
+            open(launched)
+            store.recoverDrafts(recovered)
+        } else if store.settings.settings.launchOption == .openNewFile {
+            // The default option has no folder of its own to open, so the
+            // recovered documents are the launch.
+            store.recoverDrafts(recovered)
+            if recovered.isEmpty { store.newWindow() }
+        } else {
+            // A chosen launch option is the session-restore choice, so it runs
+            // *instead of* the drafts: a stale untitled draft used to shadow the
+            // option, opening an untitled window and leaving the tree empty.
+            // The drafts stay on disk and come back when the option is
+            // switched back to the default.
+            if !applyLaunchOption() {
+                store.newWindow()
+            }
+        }
+    }
+
+    /// What the "启动选项" (launch option) preference asks for, when the launch
+    /// handed over no files. Returns whether a window was opened.
+    private func applyLaunchOption() -> Bool {
+        switch store.settings.settings.launchOption {
+        case .openNewFile:
+            store.newWindow()
+            return true
+        case .reopenLastFolder:
+            let folder = store.recentFolders.first
+            if !reopenFolder(folder) {
+                AppLogger.warn("No usable folder in the recent list", category: "Document")
+                return false
+            }
+            return true
+        case .reopenLastFilesAndFolders:
+            var opened = false
+            for folder in store.recentFolders
+            where FileManager.default.fileExists(atPath: folder.path) {
+                if reopenFolder(folder) { opened = true }
+            }
+            for url in store.recentFiles
+            where FileManager.default.fileExists(atPath: url.path) {
+                store.open(url)
+                opened = true
+            }
+            if !opened {
+                AppLogger.warn("Nothing recent to reopen", category: "Document")
+            }
+            return opened
+        case .openSpecifiedFolder:
+            guard let folder = store.settings.settings.launchFolder else {
+                AppLogger.warn("Launch option is a folder, none is chosen", category: "Document")
+                return false
+            }
+            if !reopenFolder(folder) {
+                AppLogger.warn("Launch folder missing: \(folder.path)", category: "Document")
+                return false
+            }
+            return true
+        }
+    }
+
+    /// Opens a folder: its first document in a window whose file tree is rooted
+    /// there and shown. Returns whether a window was actually opened.
+    @discardableResult
+    private func reopenFolder(_ url: URL?) -> Bool {
+        guard let url, FileManager.default.fileExists(atPath: url.path) else { return false }
+        let files = markdownFiles(in: url)
+        guard let first = files.first else { return false }
+        let controller = store.newWindow(markdown: "", url: first, sidebarFolder: url)
+        do {
+            try controller.open(first)
+            store.noteRecentFolder(url)
+            controller.showFilesPanel()
+            return true
+        } catch {
+            present(error, for: controller)
+            return false
+        }
+    }
+
+    public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        true
+    }
+
+    public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard !isTerminating else { return .terminateNow }
+        let dirty = store.windows.filter(\.hasUnsavedChanges)
+        guard !dirty.isEmpty else { return .terminateNow }
+        let alert = NSAlert()
+        alert.messageText =
+            dirty.count == 1
+            ? "Save changes to “\(dirty[0].fileURL?.lastPathComponent ?? "Untitled")”?"
+            : "Save changes to \(dirty.count) documents?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            do {
+                for window in dirty { try window.save() }
+            } catch {
+                AppLogger.error("Save failed on quit: \(error)", category: "File")
+                return .terminateCancel
+            }
+            return .terminateNow
+        case .alertSecondButtonReturn:
+            return .terminateNow
+        default:
+            return .terminateCancel
+        }
+    }
+
+    /// LaunchServices delivery: "Open With", drag-to-dock and `open -a` arrive here
+    /// rather than on the command line once the app is already running. The reply is
+    /// what stops the Finder showing a spinning beachball.
+    public func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            open(urls)
+            NSApp.reply(toOpenOrPrint: .success)
+        }
+    }
+
+    // MARK: - Launch arguments
+
+    /// `open -a the original file.md` and the shell-integration form the original supports
+    /// both land here as plain paths.
+    /// Files named on the command line.
+    ///
+    /// `-psn_0_12345` is what the Finder passes to identify the process, and it is not
+    /// a path - which is why the arguments are filtered rather than taken wholesale.
+    private func launchFileURLs() -> [URL] {
+        CommandLine.arguments
+            .dropFirst()
+            .filter { $0.hasSuffix(".md") || $0.hasSuffix(".markdown") }
+            .map { URL(fileURLWithPath: $0) }
+    }
+
+    private func restoreRecentFiles() {
+        let paths = UserDefaults.standard.stringArray(forKey: "recentFiles") ?? []
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        store.restoreRecentFiles(
+            paths.map {
+                URL(fileURLWithPath: $0.replacingOccurrences(of: "~", with: home.path))
+            }
+        )
+    }
+
+    private func restoreRecentFolders() {
+        let paths = UserDefaults.standard.stringArray(forKey: "recentFolders") ?? []
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        store.restoreRecentFolders(
+            paths.map {
+                URL(fileURLWithPath: $0.replacingOccurrences(of: "~", with: home.path))
+            }
+        )
+    }
+
+    // Recent files and folders persist themselves inside `AppStore`; the
+    // restore hooks below are the only launch-time work left here.
+
+    // MARK: - File actions
+
+    @objc func newDocument(_ sender: Any?) {
+        store.newWindow()
+    }
+
+    /// A tab in the focused window's tab group.
+    ///
+    /// `⌘T`, as in every tabbed AppKit app: the system reserves `⌘Tab` for the
+    /// application switcher and never delivers it to an app. With tabbing off,
+    /// `addTabbedWindow` degrades to a plain second window, which is the same
+    /// thing the original does.
+    @objc func newTab(_ sender: Any?) {
+        guard let current = store.focusedWindow?.window else {
+            store.newWindow()
+            return
+        }
+        let controller = store.newWindow()
+        guard let window = controller.window else { return }
+        // Preserve the sidebar visibility of the tab the user is coming from,
+        // so a new tab doesn't silently hide the directory tree they were using.
+        if let focused = store.focusedWindow, focused != controller {
+            if focused.areFilesVisible {
+                controller.showFilesPanel()
+            } else {
+                controller.contentRoot?.setFilesVisible(false)
+            }
+        }
+        controller.showWindow(nil)
+        current.addTabbedWindow(window, ordered: .above)
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc func openDocument(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = true
+        panel.allowedContentTypes = [.plainText, .markdown]
+        guard panel.runModal() == .OK else { return }
+        open(panel.urls)
+    }
+
+    @objc func openFolder(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let files = markdownFiles(in: url)
+        // Opening a folder opens its first document, and shows the file tree
+        // rooted at the folder itself. The folder is not a window in this app;
+        // the hierarchy on the left *is* the folder, so leaving the panel hidden
+        // would make an open folder indistinguishable from opening one file.
+        guard let first = files.first else {
+            AppLogger.info("No Markdown files in \(url.lastPathComponent)", category: "Document")
+            return
+        }
+        if files.count > 1 {
+            AppLogger.info(
+                "Opened \(first.lastPathComponent); \(files.count - 1) more in the sidebar",
+                category: "Document"
+            )
+        }
+        reopenFolder(url)
+    }
+
+    func open(_ urls: [URL]) {
+        var files: [URL] = []
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+            if isDirectory.boolValue {
+                files.append(contentsOf: markdownFiles(in: url))
+            } else {
+                files.append(url)
+            }
+        }
+        guard !files.isEmpty else { return }
+        if files.count == 1, store.windows.count == 1,
+            store.focusedWindow?.fileURL == nil, store.focusedWindow?.hasUnsavedChanges == false
+        {
+            // Reuse the empty scratch window.
+            try? store.focusedWindow?.open(files[0])
+        } else {
+            for file in files { store.open(file) }
+        }
+        // A directory handed to `open` is a folder open: remember it so the
+        // reopen-last-folder launch option has something to reopen.
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+                isDirectory.boolValue
+            {
+                store.noteRecentFolder(url)
+            }
+        }
+    }
+
+    /// Markdown files inside a folder, recursively, in path order.
+    func markdownFiles(in folder: URL) -> [URL] {
+        let keys: [URLResourceKey] = [.isDirectoryKey]
+        guard
+            let enumerator = FileManager.default.enumerator(
+                at: folder, includingPropertiesForKeys: keys, options: [.skipsHiddenFiles]
+            )
+        else { return [] }
+        var files: [URL] = []
+        for case let url as URL in enumerator {
+            guard ["md", "markdown", "mdown", "txt"].contains(url.pathExtension.lowercased())
+            else { continue }
+            files.append(url)
+        }
+        return files.sorted { $0.path < $1.path }
+    }
+
+    @objc func saveDocument(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        do {
+            try window.save()
+        } catch {
+            present(error, for: window)
+        }
+    }
+
+    @objc func saveDocumentAs(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue = window.fileURL?.lastPathComponent ?? "Untitled.md"
+        panel.allowedContentTypes = [.plainText]
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try window.saveAs(url)
+            store.noteRecent(url)
+        } catch {
+            present(error, for: window)
+        }
+    }
+
+    /// The formats offered by Export.
+    private enum ExportFormat: CaseIterable {
+        case html
+        case opml
+        case markdown
+        case pdf
+
+        var title: String {
+            switch self {
+            case .html: return "HTML (styled)"
+            case .opml: return "OPML (outline)"
+            case .markdown: return "Markdown (GitHub)"
+            case .pdf: return "PDF"
+            }
+        }
+
+        var fileExtension: String {
+            switch self {
+            case .html: return "html"
+            case .opml: return "opml"
+            case .markdown: return "md"
+            case .pdf: return "pdf"
+            }
+        }
+
+        var contentType: UTType {
+            switch self {
+            case .html: return .html
+            case .opml: return UTType(filenameExtension: "opml") ?? .xml
+            case .markdown: return .plainText
+            case .pdf: return .pdf
+            }
+        }
+    }
+
+    @objc func exportDocument(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        let panel = NSSavePanel()
+        panel.nameFieldStringValue =
+            (window.fileURL?.deletingPathExtension().lastPathComponent ?? "Untitled") + ".html"
+        panel.allowedContentTypes = ExportFormat.allCases.map(\.contentType)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+
+        let format =
+            ExportFormat.allCases.first { $0.fileExtension == url.pathExtension.lowercased() }
+            ?? .html
+        let title = window.fileURL?.deletingPathExtension().lastPathComponent ?? "Untitled"
+        if format == .pdf {
+            do {
+                try PrintService.writePDF(
+                    of: window.editor,
+                    title: title,
+                    to: url
+                )
+            } catch {
+                present(error, for: window)
+            }
+            return
+        }
+        let text: String
+        switch format {
+        case .html:
+            text = HTMLWriter.write(
+                document: window.markdown,
+                title: title,
+                css: ExportCSS.styleSheet(for: store.themeManager.theme)
+            )
+        case .opml:
+            text = OPMLWriter.write(document: window.markdown, title: title)
+        case .markdown:
+            // The buffer *is* the Markdown, so this variant is a copy rather than a
+            // re-serialisation - which is the whole point of the source invariant.
+            text = window.editor.markdown
+        case .pdf:
+            return
+        }
+        do {
+            try text.write(to: url, atomically: true, encoding: .utf8)
+        } catch {
+            present(error, for: window)
+        }
+    }
+
+    /// Prints the focused document through the system print panel.
+    @objc func printDocument(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        let operation = PrintService.operation(
+            for: window.editor,
+            title: window.fileURL?.lastPathComponent ?? "Untitled"
+        )
+        guard let sheet = window.window else { return }
+        operation.runModal(for: sheet, delegate: nil, didRun: nil, contextInfo: nil)
+    }
+
+    /// Image actions: the image path resolves against the document's folder and the
+    /// operation is performed by the file manager rather than by rewriting the node.
+    /// The node is rebuilt from the result (new name or moved file), which is the same
+    /// principle as `tryResetTable` - the source is always the authority.
+
+    /// An `![alt](path)` syntax found in the buffer, addressed in buffer coordinates so
+    /// the action can edit exactly the path (or the whole syntax) and nothing else.
+    private struct ImageRef {
+        let path: String
+        let pathRange: NSRange
+        let syntaxRange: NSRange
+    }
+
+    /// The `![alt](path)` under the caret, falling back to the block's first image.
+    private func imageRef(in window: DocumentWindowController) -> ImageRef? {
+        guard let storage = window.editor.textStorage else { return nil }
+        let caret = window.editor.selectedRange().location
+        guard let blockRange = window.editor.layout.block(containing: caret)?.range else { return nil }
+        let full = storage.string as NSString
+        let block = full.substring(with: blockRange) as NSString
+        var found: ImageRef?
+        var cursor = 0
+        while cursor < block.length {
+            let bang = block.range(of: "![", options: [], range: NSRange(location: cursor, length: block.length - cursor))
+            guard bang.location != NSNotFound else { break }
+            let open = block.range(
+                of: "](", options: [], range: NSRange(location: bang.upperBound, length: block.length - bang.upperBound)
+            )
+            guard open.location != NSNotFound else {
+                cursor = bang.upperBound
+                continue
+            }
+            let close = block.range(
+                of: ")", options: [], range: NSRange(location: open.upperBound, length: block.length - open.upperBound)
+            )
+            guard close.location != NSNotFound else {
+                cursor = open.upperBound
+                continue
+            }
+            let pathRange = NSRange(
+                location: blockRange.location + open.upperBound, length: close.location - open.upperBound
+            )
+            let ref = ImageRef(
+                path: full.substring(with: pathRange),
+                pathRange: pathRange,
+                syntaxRange: NSRange(
+                    location: blockRange.location + bang.location, length: close.upperBound - bang.location
+                )
+            )
+            if NSLocationInRange(caret, ref.syntaxRange) { return ref }
+            if found == nil { found = ref }
+            cursor = close.upperBound
+        }
+        return found
+    }
+
+    /// Resolves the Markdown path the same way the painter does, so every image action
+    /// touches the file the editor is actually drawing.
+    private func imageURL(_ path: String, in window: DocumentWindowController) -> URL? {
+        window.editor.imagePainter.resolve(path)
+            ?? window.fileURL?.deletingLastPathComponent().appendingPathComponent(path)
+    }
+
+    /// Keeps the path in the buffer relative whenever the file stays under the document
+    /// folder, because that is what survives moving the document to another machine.
+    private func pathText(for url: URL, in window: DocumentWindowController) -> String {
+        let base = window.editor.imagePainter.baseDirectory ?? window.fileURL?.deletingLastPathComponent()
+        guard let base else { return url.path }
+        let basePath = base.standardizedFileURL.path
+        let path = url.standardizedFileURL.path
+        if path.hasPrefix(basePath + "/") { return String(path.dropFirst(basePath.count + 1)) }
+        return url.path
+    }
+
+    private func replaceImagePath(_ url: URL, in window: DocumentWindowController, ref: ImageRef) {
+        guard let storage = window.editor.textStorage else { return }
+        let text = pathText(for: url, in: window)
+        storage.beginEditing()
+        storage.replaceCharacters(in: ref.pathRange, with: text)
+        storage.endEditing()
+        window.editor.load(markdown: storage.string)
+    }
+
+    private func bitmapFileType(for url: URL) -> NSBitmapImageRep.FileType {
+        switch url.pathExtension.lowercased() {
+        case "png": return .png
+        case "jpg", "jpeg": return .jpeg
+        default: return .tiff
+        }
+    }
+
+    @objc func imageDelete(_ sender: Any?) {
+        guard let window = store.focusedWindow, let ref = imageRef(in: window) else { return }
+        guard let storage = window.editor.textStorage else { return }
+        if let url = imageURL(ref.path, in: window) {
+            try? FileManager.default.removeItem(at: url)
+        }
+        window.editor.imagePainter.invalidate()
+        storage.beginEditing()
+        storage.deleteCharacters(in: ref.syntaxRange)
+        storage.endEditing()
+        window.editor.load(markdown: storage.string)
+    }
+
+    @objc func imageRename(_ sender: Any?) {
+        guard let window = store.focusedWindow, let ref = imageRef(in: window), !ref.path.isEmpty else { return }
+        guard let url = imageURL(ref.path, in: window), let sheet = window.window else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png, .jpeg, .gif, .tiff]
+        panel.nameFieldStringValue = url.lastPathComponent
+        panel.beginSheetModal(for: sheet) { result in
+            guard result == .OK, let saveURL = panel.url else { return }
+            try? FileManager.default.removeItem(at: saveURL)
+            try? FileManager.default.moveItem(at: url, to: saveURL)
+            guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
+            window.editor.imagePainter.invalidate()
+            self.replaceImagePath(saveURL, in: window, ref: ref)
+        }
+    }
+
+    @objc func imageMove(_ sender: Any?) {
+        guard let window = store.focusedWindow, let ref = imageRef(in: window), !ref.path.isEmpty else { return }
+        guard let url = imageURL(ref.path, in: window), let sheet = window.window else { return }
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Move"
+        panel.beginSheetModal(for: sheet) { result in
+            guard result == .OK, let folder = panel.url else { return }
+            let destination = folder.appendingPathComponent(url.lastPathComponent)
+            if destination.standardizedFileURL.path != url.standardizedFileURL.path {
+                try? FileManager.default.removeItem(at: destination)
+                try? FileManager.default.moveItem(at: url, to: destination)
+            }
+            guard FileManager.default.fileExists(atPath: destination.path) else { return }
+            window.editor.imagePainter.invalidate()
+            self.replaceImagePath(destination, in: window, ref: ref)
+        }
+    }
+
+    @objc func imageScaleHalf(_ sender: Any?) {
+        guard let window = store.focusedWindow, let ref = imageRef(in: window), !ref.path.isEmpty else { return }
+        guard let url = imageURL(ref.path, in: window), let image = NSImage(contentsOf: url) else { return }
+        guard let tiff = image.tiffRepresentation, let source = NSBitmapImageRep(data: tiff) else { return }
+        // Halve the pixels rather than the point size, so the file really gets smaller
+        // instead of shipping a half-size image at double density.
+        let wide = max(Int((Double(source.pixelsWide) / 2).rounded()), 1)
+        let high = max(Int((Double(source.pixelsHigh) / 2).rounded()), 1)
+        guard
+            let canvas = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: wide, pixelsHigh: high, bitsPerSample: 8,
+                samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                bytesPerRow: 0, bitsPerPixel: 0
+            )
+        else { return }
+        NSGraphicsContext.saveGraphicsState()
+        if let context = NSGraphicsContext(bitmapImageRep: canvas) {
+            NSGraphicsContext.current = context
+        }
+        image.draw(in: NSRect(x: 0, y: 0, width: wide, height: high))
+        NSGraphicsContext.restoreGraphicsState()
+        guard let data = canvas.representation(using: bitmapFileType(for: url), properties: [:]) else { return }
+        try? data.write(to: url)
+        window.editor.imagePainter.invalidate()
+        window.editor.markDirty()
+    }
+
+    @objc func revertDocument(_ sender: Any?) {
+        guard let window = store.focusedWindow, let url = window.fileURL else { return }
+        do {
+            try window.open(url)
+        } catch {
+            present(error, for: window)
+        }
+    }
+
+    /// One action for every Format-menu entry.
+    ///
+    /// The command rides on the item's `representedObject` rather than needing a
+    /// selector per row: adding a command is then a `MenuBuilder` line and a
+    /// `FormatController` case, not three files.
+    @objc func applyFormatting(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
+            let raw = item.representedObject as? String,
+            let action = FormatAction(rawValue: raw)
+        else { return }
+        store.focusedWindow?.format(action)
+    }
+
+    @objc func closeDocument(_ sender: Any?) {
+        store.focusedWindow?.close()
+    }
+
+    private func present(_ error: Error, for window: DocumentWindowController?) {
+        AppLogger.error("\(error)", category: "File")
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not save the document."
+        alert.informativeText = error.localizedDescription
+        if let window {
+            alert.beginSheetModal(for: window.window ?? NSWindow(), completionHandler: nil)
+        } else {
+            alert.runModal()
+        }
+    }
+
+    // MARK: - View actions
+
+    /// Flips the checkmarks in the View menu to match the focused window.
+    ///
+    /// Sidebar and source mode are per-window in the original, so the menu tracks the
+    /// focused window rather than any global state.
+    private func refreshViewCheckmarks() {
+        guard
+            let viewMenu = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?
+                .submenu
+        else { return }
+        let window = store.focusedWindow
+        let states: [String: Bool] = [
+            "Source Code Mode": window?.isSourceModeActive ?? store.sourceMode,
+            "Sidebar": window?.isSidebarVisible ?? false,
+            "Files": window?.areFilesVisible ?? false,
+            "Outline": window?.isOutlineVisible ?? false,
+            "Focus Mode": store.focusMode,
+            "Typewriter Mode": store.typeWriterMode,
+            "Readonly Mode": store.readonlyMode,
+        ]
+        for item in viewMenu.items where states[item.title] != nil {
+            item.state = states[item.title] == true ? .on : .off
+        }
+    }
+
+    @objc func openSettings(_ sender: Any?) {
+        PreferencesController.shared.show()
+    }
+
+    @objc func quickOpen(_ sender: Any?) {
+        let remembered = store.settings.settings.sidebarFolder.map { [$0] } ?? []
+        let open = store.windows.compactMap { $0.fileURL?.deletingLastPathComponent() }
+        QuickOpenController.shared.setRoots(remembered + open)
+        QuickOpenController.shared.onOpen = { [weak self] url in
+            self?.openInFocusedWindow(url)
+        }
+        QuickOpenController.shared.show()
+    }
+
+    private func openInFocusedWindow(_ url: URL) {
+        guard let window = store.focusedWindow else { return }
+        do {
+            try window.open(url)
+        } catch {
+            AppLogger.error(
+                "Quick open failed for \(url.lastPathComponent): \(error)", category: "Document"
+            )
+        }
+    }
+
+    @objc func toggleSidebar(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.toggleSidebar(sender)
+        refreshViewCheckmarks()
+    }
+
+    @objc func toggleOutline(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.toggleOutline(sender)
+        refreshViewCheckmarks()
+    }
+
+    @objc func toggleFiles(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.toggleFiles(sender)
+        refreshViewCheckmarks()
+    }
+
+    @objc func toggleFind(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.toggleFind(sender)
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.findNext(sender)
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.findPrevious(sender)
+    }
+
+    @objc func toggleSourceMode(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        window.toggleSourceMode(sender)
+        store.sourceMode = window.isSourceModeActive
+        refreshViewCheckmarks()
+    }
+
+    /// Flips the checkmark on View -> Source Code Mode.
+    private func refreshSourceModeItem() {
+        guard
+            let viewMenu = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?
+                .submenu,
+            let item = viewMenu.items.first(where: { $0.title == "Source Code Mode" })
+        else { return }
+        item.state = store.sourceMode ? .on : .off
+    }
+
+    /// Drafts worth handing back at launch, each openable as its own window.
+    ///
+    /// Only drafts newer than the file they mirror are offered: the file on disk is
+    /// the last manual save and the draft holds everything typed since, so anything
+    /// older is content the user already saved elsewhere.
+    private func recoverableDrafts() -> [Draft] {
+        store.drafts.recoverable.filter { draft in
+            guard let url = draft.sourceURL else { return true }
+            return store.drafts.isNewer(draft, thanFileAt: url)
+        }
+    }
+
+    /// Pushes the preferences every open document window mirrors.
+    ///
+    /// Focus, typewriter and readonly live on `AppStore` rather than in the settings
+    /// file - they are view state a user flips for the session - so they are merged
+    /// with the stored preferences here rather than in either place.
+    private func pushSettingsToWindows() {
+        let view = mergedEditorSettings()
+        for window in store.windows {
+            window.applyEditorSettings(view)
+            window.applyParseOptions(store.settings.settings.parseOptions)
+            window.refreshFilesRoot()
+        }
+    }
+
+    private func mergedEditorSettings() -> EditorSettingsView {
+        var view = store.settings.editorView
+        view.focus = store.focusMode
+        view.typewriter = store.typeWriterMode
+        view.readonly = store.readonlyMode
+        return view
+    }
+
+    @objc func toggleFocusMode(_ sender: Any?) {
+        store.focusMode.toggle()
+        pushSettingsToWindows()
+    }
+
+    @objc func toggleTypewriterMode(_ sender: Any?) {
+        store.typeWriterMode.toggle()
+        pushSettingsToWindows()
+        for window in store.windows { window.editor.centerCaretIfNeeded() }
+    }
+
+    @objc func toggleReadonlyMode(_ sender: Any?) {
+        store.readonlyMode.toggle()
+        pushSettingsToWindows()
+    }
+
+    @objc func zoomIn(_ sender: Any?) {
+        applyZoom(1.1)
+    }
+
+    @objc func zoomOut(_ sender: Any?) {
+        applyZoom(1 / 1.1)
+    }
+
+    /// Zoom is expressed as a font scale so it composes with the theme's own font
+    /// size instead of fighting it.
+    private var zoomFactor: CGFloat { CGFloat(store.settings.settings.zoomFactor) }
+
+    private func applyZoom(_ factor: CGFloat) {
+        let next = max(0.5, min(zoomFactor * factor, 3))
+        store.settings.update { settings in
+            settings.zoomFactor = Double(next)
+            settings.useCustomFontSize = true
+            settings.customFontSize = 16 * Double(next)
+        }
+        store.themeManager.apply()
+    }
+
+    @objc func actualSize(_ sender: Any?) {
+        store.settings.update { $0.zoomFactor = 1 }
+        store.useThemeFontSize()
+    }
+
+    @objc func useThemeFontSize(_ sender: Any?) {
+        store.useThemeFontSize()
+    }
+
+    @objc func selectTheme(_ sender: NSMenuItem) {
+        guard let identifier = sender.representedObject as? String else { return }
+        store.setTheme(identifier: identifier)
+        UserDefaults.standard.set(identifier, forKey: "theme")
+    }
+}

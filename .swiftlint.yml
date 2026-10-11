@@ -1,0 +1,43 @@
+excluded:
+  - .build
+  - .swiftpm
+  - tools
+
+opt_in_rules:
+  - empty_count
+  - closure_spacing
+  - force_unwrapping
+  - implicitly_unwrapped_optional
+  - redundant_nil_coalescing
+
+disabled_rules:
+  # Formatting is owned by swift-format (`just format`). Two of its output shapes
+  # are violations here, and re-deriving them would mean two formatters
+  # disagreeing about the same file:
+  #   opening_brace              it puts `{` on its own line after a wrapped condition
+  #   closure_parameter_position it breaks multi-parameter closures across lines
+  - opening_brace
+  - closure_parameter_position
+  - trailing_comma
+  - nesting
+  - function_body_length
+  - type_body_length
+  - file_length
+  - cyclomatic_complexity
+
+line_length: 140
+type_name:
+  min_length: 2
+identifier_name:
+  min_length: 2
+  max_length: 50
+  excluded:
+    - id
+    - ok
+
+# The render pass threads one context (output, style, block, depth) through every
+# recursion level, so a few emitters legitimately take more than five parameters.
+# A follow-up is to bundle them into a single `RenderContext` value.
+function_parameter_count:
+  warning: 8
+  error: 10

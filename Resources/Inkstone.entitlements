@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!--
+      Sandbox is off on purpose: the editor manages arbitrary user folders
+      (file tree, drag-and-drop, image copying, folder watching). A sandboxed
+      build would need security-scoped bookmarks threaded through every read
+      and write path for no product benefit, since we do not ship to the App
+      Store. Recorded in DESIGN.md §1.3.
+    -->
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <key>com.apple.security.files.user-selected.read-write</key>
+    <true/>
+</dict>
+</plist>
