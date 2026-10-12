@@ -141,7 +141,8 @@ private struct Outline: View {
         Text("Outline")
             .font(.system(size: 16, weight: .medium))
             .foregroundStyle(model.secondary)
-            .frame(maxWidth: .infinity)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 20)
             .padding(.top, 10)
             .padding(.bottom, 8)
     }
@@ -154,7 +155,7 @@ private struct Outline: View {
         }
         .font(.system(size: 11))
         .foregroundStyle(model.secondary)
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 20)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
