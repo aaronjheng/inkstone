@@ -479,13 +479,19 @@ final class DocumentWindowController {
         return found
     }
 
-    /// Scrolls to a heading chosen in the outline and puts the caret on it.
+    /// Scrolls smoothly to a heading chosen in the outline and puts the caret on it.
     private func reveal(heading: MarkdownDocument.Heading) {
         guard let block = editor.document.blocks.first(where: { $0.id == heading.blockID }),
             let range = editor.bufferRange(forBlock: block.id)
         else { return }
         editor.setSelectedRange(range)
-        editor.scrollRangeToVisible(range)
+        if editor.keepsCaretInMiddle {
+            // Typewriter mode pins the caret to mid-viewport on the selection
+            // change; an animated scroll to the top would fight it.
+            editor.scrollRangeToVisible(range)
+        } else {
+            editor.smoothScrollRangeToVisible(range)
+        }
     }
 
     // MARK: - Status

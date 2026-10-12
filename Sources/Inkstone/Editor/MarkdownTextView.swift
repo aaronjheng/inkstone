@@ -162,6 +162,42 @@ final class MarkdownTextView: NSTextView {
         }
     }
 
+    /// Scrolls the given range to the top of the viewport with a short eased
+    /// animation, instead of the default jump. Outline navigation uses this so
+    /// moving between sections keeps the reader oriented.
+    func smoothScrollRangeToVisible(_ range: NSRange) {
+        guard let scrollView = enclosingScrollView, let layoutManager,
+            let container = textContainer
+        else {
+            scrollRangeToVisible(range)
+            return
+        }
+        // A far-away heading may live in text that is not laid out yet; measure
+        // only after forcing the layout for its range.
+        layoutManager.ensureLayout(forCharacterRange: range)
+        let glyphRange = layoutManager.glyphRange(
+            forCharacterRange: range, actualCharacterRange: nil
+        )
+        let lineRect = layoutManager.boundingRect(forGlyphRange: glyphRange, in: container)
+        guard lineRect.height > 0 else {
+            scrollRangeToVisible(range)
+            return
+        }
+        // Container coordinates -> view coordinates: a viewport-tall rect whose
+        // top edge is the heading's first line leaves the scroller exactly one
+        // legal position, the heading pinned at the top. AppKit clamps near the
+        // document end, where the pin cannot be honoured.
+        let top = lineRect.minY + textContainerOrigin.y
+        let viewport = scrollView.contentView.bounds.height
+        let pinRect = NSRect(x: 0, y: top, width: 1, height: viewport)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.3
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            context.allowsImplicitAnimation = true
+            scrollToVisible(pinRect)
+        }
+    }
+
     /// Forces a re-layout pass. Needed after the sidebar changes the measure.
     func markDirty() {
         rebuildLayout(replacingSelection: false)
