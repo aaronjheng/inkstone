@@ -10,8 +10,6 @@ import SwiftUI
 /// the whole list on every keystroke.
 final class OutlineViewController: NSViewController {
     var onSelect: ((MarkdownDocument.Heading) -> Void)?
-    /// The panel's own hamburger: hides the panel, like the original's sidebar toggle.
-    var onToggle: (() -> Void)?
 
     private let model = OutlineModel()
     private var hosting: NSHostingView<Outline>?
@@ -22,9 +20,6 @@ final class OutlineViewController: NSViewController {
                 model: model,
                 onSelect: { [weak self] heading in
                     self?.onSelect?(heading)
-                },
-                onToggle: { [weak self] in
-                    self?.onToggle?()
                 }
             )
         )
@@ -64,14 +59,12 @@ final class OutlineModel {
     var foreground: Color = .primary
     var secondary: Color = .secondary
     var background: Color = Color(nsColor: .textBackgroundColor)
-    var selectionBackground: Color = Color(nsColor: .selectedTextBackgroundColor)
 
     func apply(theme: EditorTheme) {
         accent = Color(nsColor: theme.link.nsColor)
         foreground = Color(nsColor: theme.text.nsColor)
         secondary = Color(nsColor: theme.syntax.comment.nsColor)
         background = Color(nsColor: theme.background.nsColor)
-        selectionBackground = Color(nsColor: theme.selection.nsColor)
     }
 
     /// The original nests by heading level rather than by source order: a level-3 under a
@@ -108,25 +101,31 @@ final class OutlineModel {
 private struct Outline: View {
     let model: OutlineModel
     let onSelect: (MarkdownDocument.Heading) -> Void
-    let onToggle: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
             header
             if model.entries.isEmpty {
                 Text("No headings")
-                    .font(.system(size: 12))
+                    .font(.system(size: 13))
                     .foregroundStyle(model.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 6)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 8)
                 Spacer(minLength: 0)
             } else {
                 ScrollView {
                     // `LazyVStack` keeps a 5,000-heading document cheap, which
                     // matters because the outline is rebuilt on every keystroke.
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(model.entries) { entry in row(entry) }
+                        ForEach(model.entries) { entry in
+                            OutlineRow(
+                                entry: entry,
+                                isActive: model.activeID == entry.blockID,
+                                foreground: model.foreground,
+                                onSelect: onSelect
+                            )
+                        }
                     }
                 }
             }
@@ -139,27 +138,12 @@ private struct Outline: View {
     /// root view without a `Spacer` gets centred in its hosting view, which
     /// left the whole panel floating in a void of background.
     private var header: some View {
-        ZStack {
-            Text("Outline")
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(model.secondary)
-            HStack {
-                Button(
-                    action: { onToggle?() },
-                    label: {
-                        Image(systemName: "line.3.horizontal")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(model.secondary)
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                )
-                .buttonStyle(.plain)
-                Spacer()
-            }
-            .padding(.leading, 6)
-        }
-        .padding(.vertical, 6)
+        Text("Outline")
+            .font(.system(size: 16, weight: .medium))
+            .foregroundStyle(model.secondary)
+            .frame(maxWidth: .infinity)
+            .padding(.top, 10)
+            .padding(.bottom, 8)
     }
 
     private var footer: some View {
@@ -175,27 +159,54 @@ private struct Outline: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func row(_ entry: OutlineModel.Entry) -> some View {
-        let isActive = model.activeID == entry.blockID
-        return Button {
-            onSelect(
-                MarkdownDocument.Heading(
-                    level: entry.level, text: entry.text, blockID: entry.blockID
+    /// Matches the reference design: airy rows, indented per nesting depth, the
+    /// active heading marked by weight rather than a background fill, and extra
+    /// head-room before every level-1 section.
+    private struct OutlineRow: View {
+        let entry: OutlineModel.Entry
+        let isActive: Bool
+        let foreground: Color
+        let onSelect: (MarkdownDocument.Heading) -> Void
+
+        @State private var isHovered = false
+
+        var body: some View {
+            Button {
+                onSelect(
+                    MarkdownDocument.Heading(
+                        level: entry.level, text: entry.text, blockID: entry.blockID
+                    )
                 )
-            )
-        } label: {
-            Text(entry.text)
-                .font(.system(size: 12, weight: entry.level == 1 ? .medium : .regular))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .foregroundStyle(model.foreground)
-                .padding(.leading, 12 + CGFloat(entry.depth) * 12)
-                .padding(.trailing, 8)
-                .padding(.vertical, 3)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(isActive ? model.selectionBackground : Color.clear)
-                .contentShape(Rectangle())
+            } label: {
+                Text(entry.text)
+                    .font(
+                        .system(
+                            size: entry.level == 1 ? 15 : 14,
+                            weight: isActive ? .semibold : .regular
+                        )
+                    )
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .foregroundStyle(foreground)
+                    .padding(.leading, 20 + CGFloat(entry.depth) * 14)
+                    .padding(.trailing, 8)
+                    .padding(.vertical, 6)
+                    .padding(.top, entry.level == 1 ? 8 : 0)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(hoverTint)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .onHover { isHovered = $0 }
+            .animation(.easeInOut(duration: 0.12), value: isHovered)
         }
-        .buttonStyle(.plain)
+
+        /// The active row is already marked by weight; the hover tint tracks the
+        /// theme's text colour at low opacity so it works on light and dark
+        /// backgrounds alike.
+        private var hoverTint: Color {
+            guard !isActive else { return .clear }
+            return isHovered ? foreground.opacity(0.06) : .clear
+        }
     }
 }

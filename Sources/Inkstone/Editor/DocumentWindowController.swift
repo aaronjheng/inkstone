@@ -166,9 +166,6 @@ final class DocumentWindowController {
         outlinePanel.onSelect = { [weak self] heading in
             self?.reveal(heading: heading)
         }
-        outlinePanel.onToggle = { [weak self] in
-            self?.toggleOutline(nil)
-        }
         findController.attach(editor: editor)
         findController.onReplace = { [weak self] in
             self?.markDirty()
