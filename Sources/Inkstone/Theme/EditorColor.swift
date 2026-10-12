@@ -57,27 +57,39 @@ extension NSColor {
 /// `base-control.css`, `window.css`), which is where the original engine keeps
 /// everything that is not a content rule.
 enum EditorColor {
-    /// `--bg-color` / `--text-color`
-    static let background = DynamicColor(0xFFFFFF, 0x333B44)
-    static let text = DynamicColor(0x333333, 0xCCCCCC)
+    /// `--bg-color` / `--text-color` — derived from the active palette.
+    static let background: DynamicColor = DynamicColor(
+        light: ThemePalette.systemLight.windowBackground,
+        dark: ThemePalette.neutralDark.windowBackground)
+    static let text: DynamicColor = DynamicColor(0x333333, 0xCCCCCC)
 
-    /// `--side-bar-bg-color`
-    static let sidebarBackground = DynamicColor(0xFAFAFA, 0x21252B)
+    /// `--side-bar-bg-color` — derived from the active palette.
+    static let sidebarBackground: DynamicColor = DynamicColor(
+        light: ThemePalette.systemLight.sidebarBackground,
+        dark: ThemePalette.neutralDark.sidebarBackground)
 
     /// `--select-text-bg-color`
     static let selection = DynamicColor(0xDAE3EA, 0x3E4451)
 
-    /// `--md-char-color` - syntax markers revealed when the caret is inside them.
-    static let marker = DynamicColor(0xC7C5C5, 0x5A6270)
+    /// `--md-char-color` — syntax markers derived from palette.
+    static let marker: DynamicColor = DynamicColor(
+        light: ThemePalette.systemLight.syntaxBool,
+        dark: ThemePalette.neutralDark.syntaxBool)
 
-    /// `--rawblock-edit-panel-bd` - the editing panel behind a raw block.
-    static let rawBlockEditingBackground = DynamicColor(0xF5F6F7, 0x2C313A)
+    /// `--rawblock-edit-panel-bd` — derived from palette.
+    static let rawBlockEditingBackground: DynamicColor = DynamicColor(
+        light: ThemePalette.systemLight.secondaryBackground,
+        dark: ThemePalette.neutralDark.secondaryBackground)
 
-    /// `--heading-char-color` - the `h3` chip drawn beside a focused heading.
-    static let headingChip = DynamicColor(0xDDDDDD, 0x4B5263)
+    /// `--heading-char-color` — derived from palette.
+    static let headingChip: DynamicColor = DynamicColor(
+        light: ThemePalette.systemLight.pillBackground,
+        dark: ThemePalette.neutralDark.pillBackground)
 
-    /// `--blur-text-color` - focus mode dims everything outside the caret's block.
-    static let focusBlur = DynamicColor(0xC8C8C8, 0x4A5058)
+    /// `--blur-text-color` — derived from palette.
+    static let focusBlur: DynamicColor = DynamicColor(
+        light: ThemePalette.systemLight.pillBackground,
+        dark: ThemePalette.neutralDark.pillBackground)
 
     static let link = DynamicColor(0x4183C4, 0x6CB6FF)
     static let quoteText = DynamicColor(0x777777, 0x9AA4B2)

@@ -41,6 +41,10 @@ struct EditorTheme: Sendable, Equatable {
     var alertBackground: DynamicColor
     var alertBorder: DynamicColor
 
+    /// The palette providing surfaces, washes, and syntax hues for this theme.
+    /// When `nil`, the theme falls back to the active system palette.
+    var palette: ThemePalette? = ThemePalette.systemLight
+
     var syntax: SyntaxPalette
 
     // MARK: Typography
@@ -256,6 +260,25 @@ struct SyntaxPalette: Sendable, Equatable {
         self.punctuation = punctuation
         self.plain = plain
         self.marker = marker
+    }
+
+    /// Creates the syntax palette from the active `ThemePalette`, resolving
+    /// light and dark syntax colours automatically.
+    init(palette: ThemePalette) {
+        self.init(
+            keyword: DynamicColor(light: ThemePalette.systemLight.syntaxKey, dark: ThemePalette.neutralDark.syntaxKey),
+            string: DynamicColor(light: ThemePalette.systemLight.syntaxString, dark: ThemePalette.neutralDark.syntaxString),
+            number: DynamicColor(light: ThemePalette.systemLight.syntaxNumber, dark: ThemePalette.neutralDark.syntaxNumber),
+            comment: DynamicColor(light: NSColor.systemGray, dark: NSColor.systemGray),
+            tag: DynamicColor(light: ThemePalette.systemLight.syntaxBuiltin, dark: ThemePalette.neutralDark.syntaxBuiltin),
+            attribute: DynamicColor(light: ThemePalette.systemLight.syntaxType, dark: ThemePalette.neutralDark.syntaxType),
+            function: DynamicColor(light: ThemePalette.systemLight.syntaxBuiltin, dark: ThemePalette.neutralDark.syntaxBuiltin),
+            type: DynamicColor(light: ThemePalette.systemLight.syntaxType, dark: ThemePalette.neutralDark.syntaxType),
+            operator: DynamicColor(light: ThemePalette.systemLight.syntaxKey, dark: ThemePalette.neutralDark.syntaxKey),
+            punctuation: DynamicColor(light: NSColor.systemGray, dark: NSColor.systemGray),
+            plain: DynamicColor(light: NSColor.labelColor, dark: NSColor.labelColor),
+            marker: DynamicColor(light: NSColor.systemGray, dark: NSColor.systemGray)
+        )
     }
 }
 

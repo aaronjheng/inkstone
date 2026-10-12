@@ -188,21 +188,74 @@ final class FileTreeModel {
     var accent: Color = .accentColor
     var foreground: Color = .primary
     var secondary: Color = .secondary
-    var background: Color = Color(nsColor: .textBackgroundColor)
-    var sidebarBackground: Color = Color(nsColor: NSColor(srgbRed: 249.0 / 255, green: 249.0 / 255, blue: 249.0 / 255, alpha: 1))
-    var selectionBackground: Color = Color(nsColor: .selectedTextBackgroundColor)
-    /// Neutral hover wash: adaptive, so no theme plumbing is needed for it.
-    var hover: Color = Color.primary.opacity(0.07)
-    /// Faint rail between nesting levels, as the explorer's indent guides.
-    var guide: Color = Color.primary.opacity(0.16)
+    var background: Color = Color(
+        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? ThemePalette.neutralDark.secondaryBackground
+                : ThemePalette.systemLight.secondaryBackground
+        }))
+    var sidebarBackground: Color = Color(
+        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? ThemePalette.neutralDark.sidebarBackground
+                : ThemePalette.systemLight.sidebarBackground
+        }))
+    var selectionBackground: Color = Color(
+        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                ? ThemePalette.neutralDark.secondaryBackground
+                : ThemePalette.systemLight.secondaryBackground
+        }))
+    /// Neutral hover wash: adaptive, using palette base.
+    var hover: Color = Color(
+        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return NSColor.labelColor.withAlphaComponent(isDark ? 0.08 : 0.06)
+        }))
+    /// Faint rail between nesting levels, using palette base.
+    var guide: Color = Color(
+        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            return NSColor.secondaryLabelColor.withAlphaComponent(isDark ? 0.15 : 0.12)
+        }))
 
     func apply(theme: EditorTheme) {
-        accent = Color(nsColor: theme.link.nsColor)
-        foreground = Color(nsColor: theme.text.nsColor)
-        secondary = Color(nsColor: theme.syntax.comment.nsColor)
-        background = Color(nsColor: theme.background.nsColor)
-        sidebarBackground = Color(nsColor: theme.sidebarBackground.nsColor)
-        selectionBackground = Color(nsColor: theme.selection.nsColor)
+        accent = Color(
+            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.syntaxKey
+                    : ThemePalette.systemLight.syntaxKey
+            }))
+        foreground = Color(
+            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? NSColor.labelColor
+                    : NSColor.labelColor
+            }))
+        secondary = Color(
+            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.syntaxBool
+                    : ThemePalette.systemLight.syntaxBool
+            }))
+        background = Color(
+            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.sidebarBackground
+                    : ThemePalette.systemLight.sidebarBackground
+            }))
+        sidebarBackground = Color(
+            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.sidebarBackground
+                    : ThemePalette.systemLight.sidebarBackground
+            }))
+        selectionBackground = Color(
+            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.secondaryBackground.withAlphaComponent(0.25)
+                    : ThemePalette.systemLight.secondaryBackground.withAlphaComponent(0.30)
+            }))
     }
 
     func replace(entries: [Entry], rootPath: String?, rootName: String, error: String?) {
