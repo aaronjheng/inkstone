@@ -1,10 +1,11 @@
 import AppKit
 import Foundation
+import SwiftUI
 import UniformTypeIdentifiers
 
 /// Application delegate: menu bar, window lifecycle, and file handling.
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let store = AppStore.shared
     private var isTerminating = false
     /// `applicationDidFinishLaunching` is entered three times in a normal launch:
@@ -671,6 +672,97 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings(_ sender: Any?) {
         PreferencesController.shared.show()
+    }
+
+    // MARK: - About & License panels
+
+    /// Small panels whose content is pure SwiftUI (About, License): one window
+    /// per panel, brought forward when already open and disposed on close by
+    /// `windowWillClose` so no hidden zombie survives.
+    private enum UtilityPanel: Hashable {
+        case about
+        case license
+    }
+
+    private var utilityWindows: [UtilityPanel: NSWindow] = [:]
+
+    @objc func openAbout(_ sender: Any?) {
+        openUtilityWindow(
+            .about,
+            title: "About \(MenuBuilder.applicationName)",
+            contentSize: AboutMetrics.panelSize,
+            resizable: false
+        ) {
+            AboutView { [weak self] in self?.openLicense() }
+        }
+    }
+
+    private func openLicense() {
+        openUtilityWindow(
+            .license,
+            title: "\(MenuBuilder.applicationName) License",
+            contentSize: AboutMetrics.licenseMinSize,
+            resizable: true
+        ) {
+            LicenseView()
+        }
+    }
+
+    private func openUtilityWindow<Content: View>(
+        _ panel: UtilityPanel,
+        title: String,
+        contentSize: NSSize,
+        resizable: Bool,
+        @ViewBuilder content: () -> Content
+    ) {
+        if let window = utilityWindows[panel] {
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate()
+            return
+        }
+        var styleMask: NSWindow.StyleMask = [.titled, .closable, .fullSizeContentView]
+        if resizable {
+            styleMask.insert([.miniaturizable, .resizable])
+        }
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: contentSize),
+            styleMask: styleMask,
+            backing: .buffered,
+            defer: false
+        )
+        window.title = title
+        window.backgroundColor = .controlBackgroundColor
+        window.titlebarAppearsTransparent = true
+        window.contentView = NSHostingView(rootView: content())
+        window.tabbingMode = .disallowed
+        // ARC owns the window (see windowWillClose).
+        window.isReleasedWhenClosed = false
+        window.minSize = contentSize
+        window.center()
+        window.delegate = self
+        utilityWindows[panel] = window
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate()
+    }
+
+    /// Releases a closed About/License panel instead of holding a hidden
+    /// zombie: reopening builds a fresh window.
+    ///
+    /// The release is deferred past the close call: `windowWillClose` runs
+    /// inside `-[NSWindow close]`, so dropping ARC's last reference there
+    /// can deallocate the window mid-close while AppKit still holds its own
+    /// close-time reference.
+    public func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow,
+            let panel = utilityWindows.first(where: { $0.value === window })?.key
+        else { return }
+        DispatchQueue.main.async { [weak self, weak window] in
+            guard let self, let window, !window.isVisible else { return }
+            // Identity: a reopen could have replaced the state already.
+            if self.utilityWindows[panel] === window {
+                self.utilityWindows[panel] = nil
+            }
+        }
     }
 
     @objc func quickOpen(_ sender: Any?) {

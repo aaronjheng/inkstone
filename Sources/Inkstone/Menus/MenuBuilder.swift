@@ -23,7 +23,7 @@ enum MenuBuilder {
 
     /// Read from the bundle rather than written out: a literal here is how the
     /// menu ends up saying "About <旧名>" after the app is renamed.
-    private static var applicationName: String {
+    static var applicationName: String {
         Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "Inkstone"
     }
 
@@ -34,7 +34,7 @@ enum MenuBuilder {
         let item = NSMenuItem()
         let menu = NSMenu(title: applicationName)
         menu.addItem(
-            withTitle: "About \(applicationName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: ""
+            withTitle: "About \(applicationName)", action: #selector(AppDelegate.openAbout(_:)), keyEquivalent: ""
         )
         menu.addItem(.separator())
         menu.addItem(

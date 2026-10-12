@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		A1000000000000000000005B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005A /* Assets.xcassets */; };
+		A1000000000000000000005F /* LICENSE in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005E /* LICENSE */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -15,6 +16,7 @@
 		A1000000000000000000005A /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A1000000000000000000005C /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A1000000000000000000005D /* Inkstone.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Inkstone.entitlements; sourceTree = "<group>"; };
+		A1000000000000000000005E /* LICENSE */ = {isa = PBXFileReference; lastKnownFileType = text; path = LICENSE; sourceTree = SOURCE_ROOT; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -38,6 +40,7 @@
 				A10000000000000000000002 /* Inkstone */,
 				A10000000000000000000006 /* Resources */,
 				A1000000000000000000005A /* Assets.xcassets */,
+				A1000000000000000000005E /* LICENSE */,
 				A10000000000000000000007 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -122,6 +125,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1000000000000000000005B /* Assets.xcassets in Resources */,
+				A1000000000000000000005F /* LICENSE in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
