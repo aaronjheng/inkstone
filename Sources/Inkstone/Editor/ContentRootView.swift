@@ -26,6 +26,7 @@ final class ContentRootView: NSView {
         self.tabArea = tabArea
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
         wantsLayer = true
+        setAccessibilityLabel("Editor Window — Main window with file sidebar, tab strip, and document editor")
         titleLabel.alignment = .center
         titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
         titleLabel.textColor = .labelColor

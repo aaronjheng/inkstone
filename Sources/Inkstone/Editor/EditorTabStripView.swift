@@ -43,6 +43,8 @@ struct EditorTabStripView: View {
         }
         .padding(.horizontal, EditorTabStripLayout.stripInset)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .accessibilityLabel("Tab Strip")
+        .accessibilityHint("Switch between open document tabs")
     }
 
     private var track: some View {

@@ -49,6 +49,7 @@ final class FindReplaceController: NSViewController {
         bar.translatesAutoresizingMaskIntoConstraints = false
 
         queryField.placeholderString = "Find"
+        queryField.setAccessibilityLabel("Find — Search text in the document")
         queryField.target = self
         queryField.action = #selector(queryChanged)
         queryField.sendsWholeSearchString = false
@@ -56,6 +57,7 @@ final class FindReplaceController: NSViewController {
         queryField.focusRingType = .none
 
         replaceField.placeholderString = "Replace"
+        replaceField.setAccessibilityLabel("Replace text in the document")
         replaceField.target = self
         replaceField.action = #selector(replaceCurrent)
 

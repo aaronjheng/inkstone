@@ -105,6 +105,8 @@ private struct Outline: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            .accessibilityAddTraits(.isHeader)
+            .accessibilityLabel("Outline Header")
             if model.entries.isEmpty {
                 Text("No headings")
                     .font(.system(size: 13))

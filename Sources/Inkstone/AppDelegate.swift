@@ -76,7 +76,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Deduplicate: LaunchServices can deliver the same file multiple times
         // (cold-launch replay plus the queued Apple Event), and opening
         // duplicates creates extra windows.
-        var allFiles = launchFileURLs() + earlyOpenURLs
+        let allFiles = launchFileURLs() + earlyOpenURLs
         earlyOpenURLs.removeAll()
         var seenPaths = Set<String>()
         var launched: [URL] = []

@@ -471,10 +471,25 @@ private struct FileTree: View {
     private let indentStep: CGFloat = 16
     private let chevronSlot: CGFloat = 11
 
-    /// The "+" creates a file in the folder and the folder name fills the middle,
-    /// like the original's toolbar. No dead buttons: every control here acts.
+    /// A "New File" button that creates a file in the current folder.
     private var toolbar: some View {
-        EmptyView()
+        HStack {
+            Spacer(minLength: 0)
+            Button {
+                onCreateFile?()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help("New File")
+            .accessibilityLabel("New File")
+            .accessibilityHint("Creates a new Markdown file in the current folder")
+        }
+        .padding(.top, 4)
+        .padding(.horizontal, 10)
     }
 
 }

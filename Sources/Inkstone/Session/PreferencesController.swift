@@ -58,7 +58,7 @@ private final class PreferencesTabController: NSTabViewController {
     }
 
     private func addPane<V: View>(_ title: String, icon: String, view: @escaping () -> V) {
-        let hosting = NSHostingController(rootView: view().frame(width: 480))
+        let hosting = NSHostingController(rootView: view().frame(width: 480, alignment: .topLeading))
         hosting.sizingOptions = .preferredContentSize
         let item = NSTabViewItem(viewController: hosting)
         item.label = title

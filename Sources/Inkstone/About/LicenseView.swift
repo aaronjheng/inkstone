@@ -22,6 +22,8 @@ struct LicenseView: View {
         // Window root: SwiftUI's focus chrome would flash on the scroll view
         // taking focus.
         .focusEffectDisabled()
+        .accessibilityLabel("License")
+        .accessibilityHint("Inkstone software license text")
     }
 
     // MARK: - Text

@@ -98,6 +98,7 @@ final class MarkdownTextView: NSTextView {
             width: theme.contentPadding, height: theme.contentPadding / 2
         )
         delegate = self
+        setAccessibilityLabel("Markdown Editor — Live preview with syntax highlighting and focus mode")
     }
 
     @available(*, unavailable)

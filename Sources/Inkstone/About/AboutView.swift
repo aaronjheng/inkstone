@@ -68,6 +68,8 @@ struct AboutView: View {
         // Window root: kill SwiftUI's focus chrome (the panel's only control
         // is the License button).
         .focusEffectDisabled()
+        .accessibilityLabel("About Inkstone")
+        .accessibilityHint("Application information and version details")
     }
 
     /// `Version 1.0.0 (1.0.0)`, matching the system panel's wording, so a

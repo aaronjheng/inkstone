@@ -17,6 +17,7 @@ final class DocumentContentView: NSView {
         self.outline = outline
         super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
         wantsLayer = true
+        setAccessibilityLabel("Document Content — Editor and optional outline panel")
         outline.isHidden = true
         outlineDivider.isHidden = true
         outlineDivider.onDrag = { [weak self] delta in
