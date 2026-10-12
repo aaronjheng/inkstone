@@ -12,8 +12,6 @@ import SwiftUI
 /// files by hand have to ask for `refresh()`.
 final class FileTreeController: NSViewController {
     var onSelect: ((URL) -> Void)?
-    /// The panel's own hamburger: hides the panel, like the original's sidebar toggle.
-    var onToggle: (() -> Void)?
     /// The toolbar's "+": creates a file in the tree's folder.
     var onCreateFile: (() -> Void)?
 
@@ -54,7 +52,6 @@ final class FileTreeController: NSViewController {
         let root = FileTree(
             model: model,
             onSelect: { [weak self] url in self?.onSelect?(url) },
-            onToggle: { [weak self] in self?.onToggle?() },
             onCreateFile: { [weak self] in self?.onCreateFile?() }
         )
         let hosted = NSHostingView(rootView: root)
@@ -287,7 +284,6 @@ final class FileTreeModel {
 private struct FileTree: View {
     let model: FileTreeModel
     let onSelect: (URL) -> Void
-    let onToggle: (() -> Void)?
     let onCreateFile: (() -> Void)?
 
     var body: some View {
@@ -320,30 +316,13 @@ private struct FileTree: View {
         .background(model.sidebarBackground)
     }
 
-    /// ☰ hides the panel; the title sits centred above it, the way the original's
-    /// sidebar header does.
+    /// The title sits centred above the tree, the way the original's sidebar
+    /// header does.
     private var header: some View {
-        ZStack {
-            Text("Files")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(model.secondary)
-            HStack {
-                Button(
-                    action: { onToggle?() },
-                    label: {
-                        Image(systemName: "line.3.horizontal")
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(model.secondary)
-                            .frame(width: 22, height: 22)
-                            .contentShape(Rectangle())
-                    }
-                )
-                .buttonStyle(.plain)
-                Spacer()
-            }
-            .padding(.leading, 6)
-        }
-        .padding(.vertical, 6)
+        Text("Files")
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundStyle(model.secondary)
+            .padding(.vertical, 6)
     }
 
     private var folderRow: some View {

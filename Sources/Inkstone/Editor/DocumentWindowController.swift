@@ -150,6 +150,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         contentRoot = ContentRootView(
             files: filesPanel.view, editor: scrollView, outline: outlinePanel.view
         )
+        contentRoot?.apply(theme: theme)
         window.contentView = contentRoot
         window.tabbingMode = .preferred
         window.minSize = NSSize(width: 520, height: 380)
@@ -191,9 +192,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
             } catch {
                 AppLogger.error("Failed to open \(url.lastPathComponent): \(error)", category: "Document")
             }
-        }
-        filesPanel.onToggle = { [weak self] in
-            self?.toggleFiles(nil)
         }
         filesPanel.onCreateFile = { [weak self] in
             self?.createFileInFolder()
@@ -418,6 +416,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         sourceController?.apply(theme: theme)
         filesPanel.apply(theme: theme)
         outlinePanel.apply(theme: theme)
+        contentRoot?.apply(theme: theme)
         updateStatus()
     }
 
@@ -682,6 +681,18 @@ final class ContentRootView: NSView {
         needsLayout = true
     }
 
+    /// The dividers straddle the panel edge, so each paints its panel's
+    /// background over the grab strip; without it the band beside the hairline
+    /// falls through to the window and reads as a gap.
+    func apply(theme: EditorTheme) {
+        filesDivider.panelBackground = theme.sidebarBackground.nsColor
+        filesDivider.panelEdge = .minX
+        outlineDivider.panelBackground = theme.background.nsColor
+        outlineDivider.panelEdge = .maxX
+        filesDivider.needsDisplay = true
+        outlineDivider.needsDisplay = true
+    }
+
     /// Keeps one panel between its minimum and whatever the editor floor allows.
     ///
     /// `other` is the width the opposite panel currently holds: with both panels
@@ -767,6 +778,11 @@ final class ContentRootView: NSView {
 private final class PanelDivider: NSView {
     /// The drag distance since the previous event, in points (mouse x).
     var onDrag: ((CGFloat) -> Void)?
+    /// The panel's own background, painted over the grab area's panel-side half
+    /// so the unpainted band beside the hairline matches the panel, not the window.
+    var panelBackground: NSColor?
+    /// Which half of the grab strip belongs to the panel.
+    var panelEdge: NSRectEdge = .minX
     private var lastLocation: CGFloat?
 
     override var mouseDownCanMoveWindow: Bool { false }
@@ -783,6 +799,13 @@ private final class PanelDivider: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
+        if let panelBackground {
+            panelBackground.setFill()
+            NSRect(
+                x: panelEdge == .minX ? 0 : bounds.midX,
+                y: 0, width: bounds.width / 2, height: bounds.height
+            ).fill()
+        }
         NSColor.separatorColor.setFill()
         NSRect(x: bounds.midX - 0.5, y: 0, width: 1, height: bounds.height).fill()
     }
