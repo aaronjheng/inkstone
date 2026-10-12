@@ -8,11 +8,15 @@ import UniformTypeIdentifiers
 public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let store = AppStore.shared
     private var isTerminating = false
-    /// `applicationDidFinishLaunching` is entered three times in a normal launch:
-    /// `InkstoneApp.main` reaches it through `applicationWillFinishLaunching`, then
-    /// `run()` posts willFinish (which reaches it again) and finally didFinish.
-    /// Without this the app opened three identical scratch windows.
+    /// Set once `prepareUI` has run. `applicationDidFinishLaunching` is posted
+    /// more than once in a normal launch (`run()` posts it, and the app can be
+    /// re-launched into an existing instance), and each pass would otherwise
+    /// open another window.
     private var didPrepareUI = false
+    /// Files delivered by `application(_:open:)` before `prepareUI` ran, flushed
+    /// by it. A Finder "Open With" delivers its file as an Apple Event that can
+    /// land before the launch is prepared.
+    private var earlyOpenURLs: [URL] = []
 
     override public init() { super.init() }
 
@@ -20,10 +24,43 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Re-apply the stored theme once the windows exist, so a launch always
         // starts on the user's theme rather than the build default.
         store.themeManager.apply()
-        applicationDidFinishLaunching(notification)
     }
 
     public func applicationDidFinishLaunching(_ notification: Notification) {
+        // Deferred by a turn: `InkstoneApp.main` calls `applicationWillFinishLaunching`
+        // by hand before `run()`, and a document handed over by LaunchServices can
+        // arrive as an Apple Event in between. One turn is enough for it to land in
+        // `earlyOpenURLs`, after which the handed files take precedence over the
+        // launch option.
+        DispatchQueue.main.async { [self] in
+            prepareUI()
+        }
+    }
+
+    /// LaunchServices delivery: "Open With", drag-to-dock and `open -a` arrive here
+    /// rather than on the command line once the app is already running. The reply is
+    /// what stops the Finder showing a spinning beachball.
+    public func application(_ application: NSApplication, open urls: [URL]) {
+        MainActor.assumeIsolated {
+            // LaunchServices can deliver the Open event before the launch option
+            // has run; holding those URLs keeps them from being lost in a window
+            // that does not exist yet.
+            if !didPrepareUI {
+                earlyOpenURLs.append(contentsOf: urls)
+            } else {
+                open(urls)
+            }
+            NSApp.reply(toOpenOrPrint: .success)
+        }
+    }
+
+    /// Builds the menu and opens the launch's documents.
+    ///
+    /// Deferred to the first run-loop turn by `applicationDidFinishLaunching`:
+    /// a Finder "Open With" delivers its files as an Apple Event that can land
+    /// before this passes, and running the launch option first would open the
+    /// tree's first document over the file the user actually asked for.
+    func prepareUI() {
         guard !didPrepareUI else { return }
         didPrepareUI = true
         NSApp.mainMenu = MenuBuilder.build(store: store, responder: self)
@@ -36,12 +73,27 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         // Open whatever the Finder, `open -a` or the command line handed us *before*
         // creating a scratch window: opening a file that then leaves an empty Untitled
         // window behind is what made the tab bar read "Untitled" three times over.
-        let launched = launchFileURLs()
+        // Deduplicate: LaunchServices can deliver the same file multiple times
+        // (cold-launch replay plus the queued Apple Event), and opening
+        // duplicates creates extra windows.
+        var allFiles = launchFileURLs() + earlyOpenURLs
+        earlyOpenURLs.removeAll()
+        var seenPaths = Set<String>()
+        var launched: [URL] = []
+        for file in allFiles {
+            if !seenPaths.contains(file.path) {
+                seenPaths.insert(file.path)
+                launched.append(file)
+            }
+        }
         let recovered = recoverableDrafts()
         if !launched.isEmpty {
             // Handed files by the Finder: they win, drafts ride along.
-            open(launched)
+            let files = open(launched)
             store.recoverDrafts(recovered)
+            // Draft tabs are appended after the handed files, so end with the
+            // handed files selected instead of a stale draft.
+            for file in files { _ = store.focus(file) }
         } else if store.settings.settings.launchOption == .openNewFile {
             // The default option has no folder of its own to open, so the
             // recovered documents are the launch.
@@ -154,16 +206,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    /// LaunchServices delivery: "Open With", drag-to-dock and `open -a` arrive here
-    /// rather than on the command line once the app is already running. The reply is
-    /// what stops the Finder showing a spinning beachball.
-    public func application(_ application: NSApplication, open urls: [URL]) {
-        MainActor.assumeIsolated {
-            open(urls)
-            NSApp.reply(toOpenOrPrint: .success)
-        }
-    }
-
     // MARK: - Launch arguments
 
     /// `open -a the original file.md` and the shell-integration form the original supports
@@ -255,7 +297,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         reopenFolder(url)
     }
 
-    func open(_ urls: [URL]) {
+    @discardableResult
+    func open(_ urls: [URL]) -> [URL] {
         var files: [URL] = []
         for url in urls {
             var isDirectory: ObjCBool = false
@@ -266,7 +309,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 files.append(url)
             }
         }
-        guard !files.isEmpty else { return }
+        guard !files.isEmpty else { return [] }
         // The store reuses the focused window's empty scratch tab, so an app
         // launched on one file never leaves an empty Untitled behind.
         for file in files { store.open(file) }
@@ -280,6 +323,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                 store.noteRecentFolder(url)
             }
         }
+        return files
     }
 
     /// Markdown files inside a folder, recursively, in path order.
@@ -750,7 +794,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func quickOpen(_ sender: Any?) {
         let remembered = store.settings.settings.sidebarFolder.map { [$0] } ?? []
-        let open = store.documents.compactMap { $0.fileURL?.deletingLastPathComponent() }
+        // Single-root: search the windows' fixed roots, not each tab's folder.
+        let open = store.hosts.compactMap { $0.rootURL }
         QuickOpenController.shared.setRoots(remembered + open)
         QuickOpenController.shared.onOpen = { [weak self] url in
             self?.openInFocusedWindow(url)
@@ -842,8 +887,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             document.applyEditorSettings(view)
             document.applyParseOptions(store.settings.settings.parseOptions)
         }
+        // Single-root: a preference change re-resolves each window's fixed root
+        // (pinned folders stay put) and refreshes the environment new tabs copy.
+        let environment = EditorEnvironment(
+            parseOptions: store.settings.settings.parseOptions,
+            sidebarFolder: store.settings.settings.sidebarFolder,
+            wordsPerMinute: store.settings.settings.wordsPerMinute
+        )
         for host in store.hosts {
             host.showHiddenFiles = view.showHiddenFiles
+            host.refreshForPreferences(
+                preference: store.settings.settings.sidebarFolder,
+                environment: environment
+            )
         }
     }
 

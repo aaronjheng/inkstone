@@ -173,6 +173,9 @@ final class DocumentWindowController {
         findController.onReplace = { [weak self] in
             self?.markDirty()
         }
+        findController.onClose = { [weak self] in
+            self?.findVisible = false
+        }
         // The outline and the word count come from `updateStatus`; a fresh
         // document never edits anything, so without this the sidebar would sit
         // at "No headings · 0 words" until the first keystroke.
@@ -245,6 +248,11 @@ final class DocumentWindowController {
     /// Filled in by `AppStore`: `Editor/` may not reach into `Session/`.
     var onWriteDraft: ((DraftSnapshot) -> Void)?
     var onSaveCommitted: ((URL?) -> Void)?
+    /// Set once `AppStore` attaches autosave/draft wiring. Tabs are built on
+    /// both the new-document and the file-open paths, so the store funnels
+    /// both through one attach point instead of nil-checking the closures.
+    private(set) var hasSessionWiring = false
+    func markSessionWired() { hasSessionWiring = true }
 
     private func markDirty() {
         isDirty = true
@@ -306,10 +314,12 @@ final class DocumentWindowController {
         onContentChange?()
     }
 
-    /// Invalidates the timers; called when the tab is closed.
+    /// Tears down tab state; called when the tab is closed.
     func close() {
         autosaveTimer?.invalidate()
         autosizeTimer?.invalidate()
+        // A closing tab must not leave its find bar floating in the host window.
+        if findVisible { findController.hide() }
     }
 
     // MARK: - Format commands
@@ -343,6 +353,18 @@ final class DocumentWindowController {
         } else {
             findController.dismiss()
         }
+    }
+
+    /// Hides the bar but remembers the toggle, so a tab switch never leaks one
+    /// document's bar into another tab.
+    func suspendFindBar() {
+        findController.hide()
+    }
+
+    /// Re-shows this document's bar after a tab switch, without moving focus.
+    func restoreFindBarIfNeeded() {
+        guard findVisible, let hostWindow else { return }
+        findController.show(in: hostWindow)
     }
 
     @objc func findNext(_ sender: Any?) {

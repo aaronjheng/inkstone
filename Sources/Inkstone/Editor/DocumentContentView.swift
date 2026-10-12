@@ -72,6 +72,12 @@ final class DocumentContentView: NSView {
             outlineDivider.isHidden = true
             editor.frame = bounds
         }
+        // Overlays this layout doesn't own (source mode) always fill the tab,
+        // so resizes and outline toggles can't leave them mis-sized.
+        for subview in subviews
+        where subview !== editor && subview !== outline && !(subview is PanelDivider) {
+            subview.frame = bounds
+        }
     }
 
     /// The original's sidebar is 220pt out of the box, and resizes by dragging the rule.

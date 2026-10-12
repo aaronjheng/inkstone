@@ -4,6 +4,11 @@ import SwiftUI
 /// One window: the global Files panel on the left and an `NSTabView` of
 /// documents on the right, VSCode-style.
 ///
+/// Single-window single-root: the tree's root is fixed when the window is
+/// created (explicit folder, else the preference, else latched once from the
+/// first document with a path) and never follows tab switches. A tab whose
+/// file lives outside the root still opens - it just shows no highlight.
+///
 /// Native window tabbing is deliberately off (`tabbingMode = .disallowed`):
 /// it merges whole windows, which would drag the sidebar into the tab strip.
 /// Documents are `DocumentWindowController`s whose own windows are never
@@ -18,6 +23,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     private var contentRoot: ContentRootView?
     private var theme: EditorTheme
     private var environment: EditorEnvironment
+    /// Explicit folder this window was opened on (Open Folder / relaunch).
+    /// Never changes for the life of the window.
+    private let pinnedRoot: URL?
+    /// Adopted once from the first document with a path when there is neither
+    /// a pinned folder nor a preference. After that it is fixed like a pin.
+    private var latchedRoot: URL?
 
     private(set) var documents: [DocumentWindowController] = []
 
@@ -35,9 +46,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     /// Fired when the window closes, so the session layer can drop the host.
     var onClosed: (() -> Void)?
 
-    init(theme: EditorTheme, environment: EditorEnvironment) {
+    init(theme: EditorTheme, environment: EditorEnvironment, pinnedRoot: URL? = nil) {
         self.theme = theme
         self.environment = environment
+        self.pinnedRoot = pinnedRoot
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
@@ -101,21 +113,26 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         item.toolTip = document.fileURL?.path
         tabView.addTabViewItem(item)
         tabView.selectTabViewItem(item)
+        latchRootIfNeeded(for: document)
         syncTabStrip()
-        syncSidebar()
+        refreshTitleAndHighlight()
         onDocumentsChange?()
         return document
     }
 
     private func syncTabStrip() {
         tabStripModel.items = documents.map {
-            EditorTabStripModel.Item(id: ObjectIdentifier($0), title: $0.titleText)
+            EditorTabStripModel.Item(
+                id: ObjectIdentifier($0), title: $0.titleText,
+                isEdited: $0.hasUnsavedChanges, toolTip: $0.fileURL?.path
+            )
         }
         if let document = selectedDocument {
             tabStripModel.selectedIndex = documents.firstIndex(where: { $0 === document })
         } else {
             tabStripModel.selectedIndex = nil
         }
+        contentRoot?.setTabStripVisible(documents.count > 1)
     }
 
     func select(document: DocumentWindowController) {
@@ -146,7 +163,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         } else {
             tabView.selectTabViewItem(at: min(index, documents.count - 1))
             syncTabStrip()
-            syncSidebar()
+            refreshTitleAndHighlight()
         }
     }
 
@@ -157,6 +174,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         tabView.removeTabViewItem(tabView.tabViewItem(at: index))
         document.close()
         syncTabStrip()
+        refreshTitleAndHighlight()
         onDocumentsChange?()
     }
 
@@ -169,23 +187,56 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         item.toolTip = document.fileURL?.path
         if tabStripModel.items.indices.contains(index) {
             tabStripModel.items[index].title = document.titleText
+            tabStripModel.items[index].isEdited = document.hasUnsavedChanges
+            tabStripModel.items[index].toolTip = document.fileURL?.path
         }
+        // Opening or saving into a path can establish the latched root, but it
+        // never moves an existing root.
+        latchRootIfNeeded(for: document)
         guard document === selectedDocument else { return }
-        window?.title = document.titleText
-        window?.isDocumentEdited = document.hasUnsavedChanges
-        contentRoot?.setTitleText(document.titleText)
-        syncSidebar()
+        refreshTitleAndHighlight()
     }
 
-    /// The tree follows the focused tab: its folder is the root, its file is
-    /// marked. The preference's folder wins over the document's own, exactly
-    /// as it did when each window owned its tree.
-    func syncSidebar() {
+    // MARK: - Single-root sidebar
+
+    /// The tree's fixed root. Only explicit window actions and preference
+    /// changes move it - never a tab switch.
+    var rootURL: URL? { filesPanel.rootURL }
+
+    private func effectiveRoot(preference: URL?) -> URL? {
+        pinnedRoot ?? preference ?? latchedRoot
+    }
+
+    /// Sets the initial root once, right after the host is created.
+    func setInitialRoot(preference: URL?) {
+        filesPanel.setRoot(effectiveRoot(preference: preference), fallback: nil)
+        refreshTitleAndHighlight()
+    }
+
+    /// Re-resolves the root after a preference change. A set root only reloads
+    /// on this path (or the one-time latch below), so switching tabs never
+    /// makes the tree jump.
+    func refreshForPreferences(preference: URL?, environment: EditorEnvironment) {
+        self.environment = environment
+        filesPanel.setRoot(effectiveRoot(preference: preference), fallback: nil)
+        refreshTitleAndHighlight()
+    }
+
+    /// Adopts the first document's folder when the window has no root yet. One
+    /// way: once set it never follows later tabs.
+    private func latchRootIfNeeded(for document: DocumentWindowController) {
+        guard filesPanel.rootURL == nil else { return }
+        guard pinnedRoot == nil else { return }
+        guard let folder = document.fileURL?.deletingLastPathComponent() else { return }
+        latchedRoot = folder
+        filesPanel.setRoot(folder, fallback: nil)
+    }
+
+    /// Highlights the selected document and updates the window title.
+    /// Deliberately never touches the root: a file outside the root simply
+    /// shows no highlight.
+    func refreshTitleAndHighlight() {
         let document = selectedDocument
-        filesPanel.setRoot(
-            environment.sidebarFolder ?? document?.fileURL?.deletingLastPathComponent(),
-            fallback: nil
-        )
         filesPanel.current(url: document?.fileURL)
         if let document {
             window?.title = document.titleText
@@ -242,18 +293,30 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         window?.backgroundColor = theme.background.nsColor
         filesPanel.apply(theme: theme)
         contentRoot?.apply(theme: theme)
+        for document in documents {
+            document.apply(theme: theme)
+        }
     }
 
     // MARK: - NSTabViewDelegate
 
     func tabView(_ tabView: NSTabView, didSelect tabViewItem: NSTabViewItem?) {
+        let selected = selectedDocument
         // A fresh tab moves first responder into its editor; AppKit leaves it
-        // wherever the previous tab had it.
-        if let document = selectedDocument {
-            window?.makeFirstResponder(document.editor)
+        // wherever the previous tab had it. Only for the key window and never
+        // out of source mode, so background opens and mode switches keep focus.
+        if let selected, window?.isKeyWindow == true,
+            !selected.isSourceModeActive
+        {
+            window?.makeFirstResponder(selected.editor)
         }
+        // Each tab owns its find bar: park the others, restore this one's.
+        for document in documents where document !== selected {
+            document.suspendFindBar()
+        }
+        selected?.restoreFindBarIfNeeded()
         syncTabStrip()
-        syncSidebar()
+        refreshTitleAndHighlight()
         onSelectionChange?()
     }
 

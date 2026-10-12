@@ -34,6 +34,9 @@ final class FindReplaceController: NSViewController {
 
     /// Reported so the caller can refresh anything derived from the text.
     var onReplace: (() -> Void)?
+    /// Reported when the bar's own close button hides it, so the owner can drop
+    /// its toggle state instead of going stale.
+    var onClose: (() -> Void)?
 
     override func loadView() {
         view = NSView(frame: NSRect(x: 0, y: 0, width: 600, height: Self.barHeight))
@@ -148,20 +151,18 @@ final class FindReplaceController: NSViewController {
         self.editor = editor
     }
 
+    /// Shows the bar without moving focus or re-running the search. Tab switches
+    /// use this to restore the selected tab's bar as it was, without yanking
+    /// focus out of its editor or jumping the caret to the first match.
+    func show(in window: NSWindow) {
+        insert(into: window)
+        view.isHidden = false
+    }
+
     /// The bar is inserted above the editor scroll view inside the window's content
     /// view, so it overlays the document exactly as the original's does.
     func present(in window: NSWindow) {
-        guard let content = window.contentView else { return }
-        view.translatesAutoresizingMaskIntoConstraints = false
-        if view.superview == nil {
-            content.addSubview(view, positioned: .above, relativeTo: nil)
-            NSLayoutConstraint.activate([
-                view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-                view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-                view.bottomAnchor.constraint(equalTo: content.topAnchor),
-                view.heightAnchor.constraint(equalToConstant: Self.barHeight),
-            ])
-        }
+        insert(into: window)
         view.isHidden = false
         let editor = self.editor
         view.window?.makeFirstResponder(queryField)
@@ -175,8 +176,30 @@ final class FindReplaceController: NSViewController {
         }
     }
 
-    func dismiss() {
+    private func insert(into window: NSWindow) {
+        guard let content = window.contentView else { return }
+        view.translatesAutoresizingMaskIntoConstraints = false
+        if view.superview == nil {
+            content.addSubview(view, positioned: .above, relativeTo: nil)
+            NSLayoutConstraint.activate([
+                view.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+                view.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+                view.bottomAnchor.constraint(equalTo: content.topAnchor),
+                view.heightAnchor.constraint(equalToConstant: Self.barHeight),
+            ])
+        }
+    }
+
+    /// Hides the bar without touching first responder. Tab switches use this so
+    /// one document's bar never leaks into another tab. Must not trigger
+    /// `loadView()` before the bar has been presented at least once.
+    func hide() {
+        guard isViewLoaded else { return }
         view.isHidden = true
+    }
+
+    func dismiss() {
+        hide()
         editor?.window?.makeFirstResponder(editor)
     }
 
@@ -299,6 +322,7 @@ final class FindReplaceController: NSViewController {
 
     @objc private func close() {
         dismiss()
+        onClose?()
     }
 
     // MARK: - Actions

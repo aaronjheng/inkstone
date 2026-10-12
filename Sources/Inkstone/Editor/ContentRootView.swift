@@ -17,6 +17,8 @@ final class ContentRootView: NSView {
     private let titleLabel = NSTextField(labelWithString: "")
     /// Live sidebar width, moved by dragging the divider it owns.
     private var filesWidth: CGFloat = ContentRootView.preferredWidth
+    /// The strip only earns its 36pt once there are two tabs to switch between.
+    private var isTabStripVisible = false
 
     init(files: NSView, tabStrip: NSView, tabArea: NSView) {
         self.files = files
@@ -42,6 +44,7 @@ final class ContentRootView: NSView {
         addSubview(tabArea)
         files.isHidden = true
         filesDivider.isHidden = true
+        tabStrip.isHidden = true
     }
 
     @available(*, unavailable)
@@ -54,6 +57,15 @@ final class ContentRootView: NSView {
     func setFilesVisible(_ visible: Bool) {
         files.isHidden = !visible
         filesDivider.isHidden = !visible
+        needsLayout = true
+    }
+
+    /// Shows the strip only for two or more tabs; a lone tab gets the full
+    /// height back instead of a strip with nothing to switch to.
+    func setTabStripVisible(_ visible: Bool) {
+        guard visible != isTabStripVisible else { return }
+        isTabStripVisible = visible
+        tabStrip.isHidden = !visible
         needsLayout = true
     }
 
@@ -82,10 +94,15 @@ final class ContentRootView: NSView {
             left = width + Self.dividerWidth
         }
         let bodyTop = bounds.height - safeAreaInsets.top
-        let stripHeight: CGFloat = 36
-        tabStrip.frame = NSRect(
-            x: left, y: bodyTop - stripHeight, width: max(0, bounds.width - left), height: stripHeight
-        )
+        let stripHeight: CGFloat = isTabStripVisible ? 36 : 0
+        if isTabStripVisible {
+            tabStrip.frame = NSRect(
+                x: left, y: bodyTop - stripHeight, width: max(0, bounds.width - left),
+                height: stripHeight
+            )
+        } else {
+            tabStrip.frame = .zero
+        }
         tabArea.frame = NSRect(
             x: left, y: 0, width: max(0, bounds.width - left), height: bodyTop - stripHeight
         )

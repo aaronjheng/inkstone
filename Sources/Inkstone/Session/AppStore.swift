@@ -85,8 +85,9 @@ final class AppStore {
 
     /// A new window with the Files panel rooted where the caller asks.
     ///
-    /// `sidebarFolder` pins the tree for that window; without it the preference
-    /// decides, and without that the focused document's folder does.
+    /// Single-window single-root: `sidebarFolder` pins the tree for that window
+    /// for life; without it the preference decides, and without that the first
+    /// document's folder is latched once. Tab switches never move the root.
     @discardableResult
     func newHost(sidebarFolder: URL? = nil) -> EditorWindowController {
         let settings = settings.settings
@@ -95,10 +96,13 @@ final class AppStore {
             sidebarFolder: sidebarFolder ?? settings.sidebarFolder,
             wordsPerMinute: settings.wordsPerMinute
         )
-        let host = EditorWindowController(theme: theme, environment: environment)
+        let host = EditorWindowController(
+            theme: theme, environment: environment, pinnedRoot: sidebarFolder
+        )
+        // Tree clicks land in the current tab rather than spawning new ones.
         host.onSelectFile = { [weak self, weak host] url in
             guard let self, let host else { return }
-            self.open(url, in: host)
+            self.openInCurrentTab(url, in: host)
         }
         host.onSelectionChange = { [weak self] in
             self?.onWindowsChange?()
@@ -126,6 +130,7 @@ final class AppStore {
             }
         }
         hosts.append(host)
+        host.setInitialRoot(preference: self.settings.settings.sidebarFolder)
         host.showWindow(nil)
         onWindowsChange?()
         return host
@@ -139,16 +144,7 @@ final class AppStore {
     ) -> DocumentWindowController {
         let host = host ?? focusedHost ?? newHost()
         let document = host.addTab(markdown: markdown, url: url)
-        // Autosave and the crash-recovery draft both live here, so the tab only
-        // has to report what changed and let the store decide what to do about it.
-        document.autosaveInterval = autosaveInterval
-        document.onWriteDraft = { [weak self] snapshot in
-            guard let self else { return }
-            self.drafts.write(self.draft(from: snapshot))
-        }
-        document.onSaveCommitted = { [weak self] url in
-            self?.drafts.clear(for: url)
-        }
+        attachSessionWiring(document)
         return document
     }
 
@@ -158,15 +154,44 @@ final class AppStore {
         newDocument(in: newHost())
     }
 
-    /// Reopens the last session's unsaved drafts, each as its own tab, already dirty.
+    /// Reopens the last session's unsaved drafts, already dirty.
     ///
     /// No prompt on purpose: asking on every launch - clean quit included - trains the
-    /// user to dismiss the alert blind. A draft arrives as an unsaved tab instead,
-    /// so the content is one glance away and quitting asks about it the usual way.
+    /// user to dismiss the alert blind. Drafts sharing a folder share a window, so
+    /// each window keeps a single root; unrelated folders never land in one tree.
+    ///
+    /// A draft whose file is already open (the Finder handed it over on this
+    /// launch) is restored *into* that tab rather than duplicated: the draft is
+    /// the newer content, and a second tab for the same file would leave the
+    /// user saving the wrong one.
     func recoverDrafts(_ drafts: [Draft]) {
+        guard !drafts.isEmpty else { return }
+        var pending: [(draft: Draft, folder: URL?)] = []
         for draft in drafts {
-            let document = newDocument(markdown: draft.markdown, url: draft.sourceURL)
-            document.restoreDraft(markdown: draft.markdown)
+            if let existing = documents.first(where: { $0.fileURL == draft.sourceURL }) {
+                existing.restoreDraft(markdown: draft.markdown)
+            } else {
+                pending.append((draft, draft.sourceURL?.deletingLastPathComponent()))
+            }
+        }
+        guard !pending.isEmpty else { return }
+        var groups: [[Draft]] = []
+        var indexByKey: [String: Int] = [:]
+        for entry in pending {
+            let key = entry.folder?.path ?? "scratch"
+            if let index = indexByKey[key] {
+                groups[index].append(entry.draft)
+            } else {
+                indexByKey[key] = groups.count
+                groups.append([entry.draft])
+            }
+        }
+        for group in groups {
+            let host = newHost()
+            for draft in group {
+                let document = newDocument(markdown: draft.markdown, url: draft.sourceURL, in: host)
+                document.restoreDraft(markdown: draft.markdown)
+            }
         }
     }
 
@@ -243,26 +268,58 @@ final class AppStore {
     }
 
     /// Opens a file in a window: focuses its tab when it is already open, reuses
-    /// the lone empty scratch tab, and adds a tab otherwise.
+    /// the lone empty scratch tab, and adds a tab otherwise. The window's root
+    /// never moves: a file outside the root opens as a tab with no highlight.
     func open(_ url: URL, in host: EditorWindowController) {
-        if let existing = documents.first(where: { $0.fileURL == url }) {
-            if let owner = hosts.first(where: { host in
-                host.documents.contains { $0 === existing }
-            }) {
-                owner.window?.makeKeyAndOrderFront(nil)
-                owner.select(document: existing)
-            }
-            return
-        }
+        if focus(url) { return }
         do {
             let document = reuseScratchTab(in: host) ?? host.addTab(markdown: "", url: url)
-            wire(document)
+            attachSessionWiring(document)
             try document.open(url)
             noteRecent(url)
             noteRecentFolder(url.deletingLastPathComponent())
         } catch {
             AppLogger.error("Failed to open \(url.lastPathComponent): \(error)", category: "File")
         }
+    }
+
+    /// Tree clicks reuse the selected tab instead of spawning tabs, so browsing
+    /// the tree never explodes the tab bar. A dirty selected tab is left alone
+    /// (a new tab opens instead) so unsaved work is never swapped out without
+    /// a say; with no selected tab this is just `open`.
+    func openInCurrentTab(_ url: URL, in host: EditorWindowController) {
+        if focus(url) { return }
+        if let current = host.selectedDocument, !current.hasUnsavedChanges {
+            do {
+                try current.open(url)
+                noteRecent(url)
+                noteRecentFolder(url.deletingLastPathComponent())
+                return
+            } catch {
+                AppLogger.error(
+                    "Current-tab open failed (falling back to new tab) for \(url.lastPathComponent): \(error)",
+                    category: "File"
+                )
+                // The file must be visible somewhere: fall back to a new tab.
+                open(url, in: host)
+                return
+            }
+        }
+        open(url, in: host)
+    }
+
+    /// Focuses the tab already showing `url`, wherever it lives. Returns whether
+    /// there was one, so both open paths share the dedupe.
+    @discardableResult
+    func focus(_ url: URL) -> Bool {
+        guard let existing = documents.first(where: { $0.fileURL == url }) else { return false }
+        if let owner = hosts.first(where: { host in
+            host.documents.contains { $0 === existing }
+        }) {
+            owner.window?.makeKeyAndOrderFront(nil)
+            owner.select(document: existing)
+        }
+        return true
     }
 
     /// The window's single empty, clean tab, if that is all it holds: opening a
@@ -274,9 +331,10 @@ final class AppStore {
         return scratch
     }
 
-    /// Draft snapshots and autosave wiring for a tab built outside `newDocument`.
-    private func wire(_ document: DocumentWindowController) {
-        guard document.onWriteDraft == nil else { return }
+    /// Autosave and crash-recovery wiring, shared by the new-document and
+    /// file-open paths so neither can leave a tab unwired.
+    private func attachSessionWiring(_ document: DocumentWindowController) {
+        guard !document.hasSessionWiring else { return }
         document.autosaveInterval = autosaveInterval
         document.onWriteDraft = { [weak self] snapshot in
             guard let self else { return }
@@ -285,5 +343,6 @@ final class AppStore {
         document.onSaveCommitted = { [weak self] url in
             self?.drafts.clear(for: url)
         }
+        document.markSessionWired()
     }
 }

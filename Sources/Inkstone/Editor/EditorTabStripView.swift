@@ -5,6 +5,8 @@ final class EditorTabStripModel: ObservableObject {
     struct Item: Identifiable {
         let id: ObjectIdentifier
         var title: String
+        var isEdited = false
+        var toolTip: String?
     }
 
     @Published var items: [Item] = []
@@ -44,12 +46,14 @@ struct EditorTabStripView: View {
     }
 
     private var track: some View {
-        HStack(spacing: 0) {
-            ForEach(Array(model.items.enumerated()), id: \.element.id) { index, item in
-                itemRow(item, at: index)
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 0) {
+                ForEach(Array(model.items.enumerated()), id: \.element.id) { index, item in
+                    itemRow(item, at: index)
+                }
             }
+            .padding(EditorTabStripLayout.trackPadding)
         }
-        .padding(EditorTabStripLayout.trackPadding)
         .frame(height: EditorTabStripLayout.trackHeight)
         .frame(maxWidth: .infinity)
         .background(
@@ -83,6 +87,9 @@ struct EditorTabStripView: View {
                 title(item, isSelected: isSelected)
             }
             .buttonStyle(.plain)
+            .help(item.toolTip ?? item.title)
+            .accessibilityLabel(item.title)
+            .accessibilityAddTraits(isSelected ? .isSelected : [])
 
             if isSelected || (isHovered && controlActiveState != .inactive) {
                 HStack {
@@ -91,9 +98,21 @@ struct EditorTabStripView: View {
                     Spacer(minLength: 0)
                 }
                 .padding(.leading, EditorTabStripLayout.accessoryInset)
+            } else if item.isEdited {
+                HStack {
+                    Circle()
+                        .fill(Color(nsColor: .tertiaryLabelColor))
+                        .frame(width: 6, height: 6)
+                        .frame(
+                            width: EditorTabStripLayout.accessoryWidth,
+                            height: EditorTabStripLayout.accessoryWidth
+                        )
+                    Spacer(minLength: 0)
+                }
+                .padding(.leading, EditorTabStripLayout.accessoryInset)
             }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .frame(minWidth: 96, maxWidth: 220, maxHeight: .infinity)
         .background(surface(isSelected: isSelected, isHovered: isHovered))
         .contentShape(Rectangle())
         .onHover { hovering in
