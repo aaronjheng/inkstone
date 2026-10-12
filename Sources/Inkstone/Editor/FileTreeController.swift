@@ -336,7 +336,10 @@ private struct FileTree: View {
         }
         .font(.system(size: 13, weight: .semibold))
         .foregroundStyle(model.secondary)
-        .padding(.horizontal, 12)
+        // Lined up with the depth-0 chevron below, so the root folder sits in
+        // the same column as the branches it contains.
+        .padding(.leading, indentOffset(0))
+        .padding(.trailing, 10)
         .padding(.vertical, 7)
     }
 
