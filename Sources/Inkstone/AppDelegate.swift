@@ -108,14 +108,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let url, FileManager.default.fileExists(atPath: url.path) else { return false }
         let files = markdownFiles(in: url)
         guard let first = files.first else { return false }
-        let controller = store.newWindow(markdown: "", url: first, sidebarFolder: url)
+        let host = store.newHost(sidebarFolder: url)
+        let document = store.newDocument(markdown: "", url: first, in: host)
         do {
-            try controller.open(first)
+            try document.open(first)
             store.noteRecentFolder(url)
-            controller.showFilesPanel()
+            host.showFilesPanel()
             return true
         } catch {
-            present(error, for: controller)
+            present(error, for: document)
             return false
         }
     }
@@ -126,7 +127,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateNow }
-        let dirty = store.windows.filter(\.hasUnsavedChanges)
+        let dirty = store.documents.filter(\.hasUnsavedChanges)
         guard !dirty.isEmpty else { return .terminateNow }
         let alert = NSAlert()
         alert.messageText =
@@ -140,7 +141,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             do {
-                for window in dirty { try window.save() }
+                for document in dirty { try document.save() }
             } catch {
                 AppLogger.error("Save failed on quit: \(error)", category: "File")
                 return .terminateCancel
@@ -204,34 +205,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     // MARK: - File actions
 
     @objc func newDocument(_ sender: Any?) {
-        store.newWindow()
+        store.newDocument()
     }
 
-    /// A tab in the focused window's tab group.
-    ///
-    /// `⌘T`, as in every tabbed AppKit app: the system reserves `⌘Tab` for the
-    /// application switcher and never delivers it to an app. With tabbing off,
-    /// `addTabbedWindow` degrades to a plain second window, which is the same
-    /// thing the original does.
+    /// A tab in the focused window, as `⌘T` in every tabbed app: the system
+    /// reserves `⌘Tab` for the application switcher and never delivers it.
     @objc func newTab(_ sender: Any?) {
-        guard let current = store.focusedWindow?.window else {
-            store.newWindow()
-            return
-        }
-        let controller = store.newWindow()
-        guard let window = controller.window else { return }
-        // Preserve the sidebar visibility of the tab the user is coming from,
-        // so a new tab doesn't silently hide the directory tree they were using.
-        if let focused = store.focusedWindow, focused != controller {
-            if focused.areFilesVisible {
-                controller.showFilesPanel()
-            } else {
-                controller.contentRoot?.setFilesVisible(false)
-            }
-        }
-        controller.showWindow(nil)
-        current.addTabbedWindow(window, ordered: .above)
-        window.makeKeyAndOrderFront(nil)
+        store.newDocument()
+    }
+
+    /// A whole new window with one scratch tab - `⌘⌥N`, for when the Files
+    /// panel should start over on another folder.
+    @objc func newWindow(_ sender: Any?) {
+        store.newWindow()
     }
 
     @objc func openDocument(_ sender: Any?) {
@@ -281,14 +267,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             }
         }
         guard !files.isEmpty else { return }
-        if files.count == 1, store.windows.count == 1,
-            store.focusedWindow?.fileURL == nil, store.focusedWindow?.hasUnsavedChanges == false
-        {
-            // Reuse the empty scratch window.
-            try? store.focusedWindow?.open(files[0])
-        } else {
-            for file in files { store.open(file) }
-        }
+        // The store reuses the focused window's empty scratch tab, so an app
+        // launched on one file never leaves an empty Untitled behind.
+        for file in files { store.open(file) }
         // A directory handed to `open` is a folder open: remember it so the
         // reopen-last-folder launch option has something to reopen.
         for url in urls {
@@ -431,7 +412,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             for: window.editor,
             title: window.fileURL?.lastPathComponent ?? "Untitled"
         )
-        guard let sheet = window.window else { return }
+        guard let sheet = window.hostWindow else { return }
         operation.runModal(for: sheet, delegate: nil, didRun: nil, contextInfo: nil)
     }
 
@@ -541,7 +522,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func imageRename(_ sender: Any?) {
         guard let window = store.focusedWindow, let ref = imageRef(in: window), !ref.path.isEmpty else { return }
-        guard let url = imageURL(ref.path, in: window), let sheet = window.window else { return }
+        guard let url = imageURL(ref.path, in: window), let sheet = window.hostWindow else { return }
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let panel = NSSavePanel()
         panel.allowedContentTypes = [.png, .jpeg, .gif, .tiff]
@@ -558,7 +539,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func imageMove(_ sender: Any?) {
         guard let window = store.focusedWindow, let ref = imageRef(in: window), !ref.path.isEmpty else { return }
-        guard let url = imageURL(ref.path, in: window), let sheet = window.window else { return }
+        guard let url = imageURL(ref.path, in: window), let sheet = window.hostWindow else { return }
         guard FileManager.default.fileExists(atPath: url.path) else { return }
         let panel = NSOpenPanel()
         panel.canChooseDirectories = true
@@ -627,8 +608,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         store.focusedWindow?.format(action)
     }
 
+    /// ⌘W: the focused tab; the window closes when it was the last tab.
     @objc func closeDocument(_ sender: Any?) {
-        store.focusedWindow?.close()
+        store.closeFocusedDocument()
     }
 
     private func present(_ error: Error, for window: DocumentWindowController?) {
@@ -637,8 +619,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         alert.alertStyle = .warning
         alert.messageText = "Could not save the document."
         alert.informativeText = error.localizedDescription
-        if let window {
-            alert.beginSheetModal(for: window.window ?? NSWindow(), completionHandler: nil)
+        if let sheet = window?.hostWindow {
+            alert.beginSheetModal(for: sheet, completionHandler: nil)
         } else {
             alert.runModal()
         }
@@ -648,19 +630,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     /// Flips the checkmarks in the View menu to match the focused window.
     ///
-    /// Sidebar and source mode are per-window in the original, so the menu tracks the
-    /// focused window rather than any global state.
+    /// Files is the window's panel and Outline is the document's, so "Sidebar"
+    /// - which drives both - is on when either is showing.
     private func refreshViewCheckmarks() {
         guard
             let viewMenu = NSApp.mainMenu?.items.first(where: { $0.title == "View" })?
                 .submenu
         else { return }
-        let window = store.focusedWindow
+        let host = store.focusedHost
+        let document = host?.selectedDocument
         let states: [String: Bool] = [
-            "Source Code Mode": window?.isSourceModeActive ?? store.sourceMode,
-            "Sidebar": window?.isSidebarVisible ?? false,
-            "Files": window?.areFilesVisible ?? false,
-            "Outline": window?.isOutlineVisible ?? false,
+            "Source Code Mode": document?.isSourceModeActive ?? store.sourceMode,
+            "Sidebar": (host?.areFilesVisible ?? false) || (document?.isOutlineVisible ?? false),
+            "Files": host?.areFilesVisible ?? false,
+            "Outline": document?.isOutlineVisible ?? false,
             "Focus Mode": store.focusMode,
             "Typewriter Mode": store.typeWriterMode,
             "Readonly Mode": store.readonlyMode,
@@ -767,7 +750,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     @objc func quickOpen(_ sender: Any?) {
         let remembered = store.settings.settings.sidebarFolder.map { [$0] } ?? []
-        let open = store.windows.compactMap { $0.fileURL?.deletingLastPathComponent() }
+        let open = store.documents.compactMap { $0.fileURL?.deletingLastPathComponent() }
         QuickOpenController.shared.setRoots(remembered + open)
         QuickOpenController.shared.onOpen = { [weak self] url in
             self?.openInFocusedWindow(url)
@@ -775,32 +758,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         QuickOpenController.shared.show()
     }
 
+    /// Quick open lands as a tab in the focused window, the same as ⌘O.
     private func openInFocusedWindow(_ url: URL) {
-        guard let window = store.focusedWindow else { return }
-        do {
-            try window.open(url)
-        } catch {
-            AppLogger.error(
-                "Quick open failed for \(url.lastPathComponent): \(error)", category: "Document"
-            )
-        }
+        guard let host = store.focusedHost else { return }
+        store.open(url, in: host)
     }
 
+    /// Sidebar is the window's Files panel plus the document's outline; each
+    /// toggle still drives its own half so the two can be shown independently.
     @objc func toggleSidebar(_ sender: Any?) {
-        guard let window = store.focusedWindow else { return }
-        window.toggleSidebar(sender)
+        guard let host = store.focusedHost else { return }
+        let document = host.selectedDocument
+        let show = !(host.areFilesVisible || (document?.isOutlineVisible ?? false))
+        host.setFilesVisible(show)
+        document?.setOutlineVisible(show)
         refreshViewCheckmarks()
     }
 
     @objc func toggleOutline(_ sender: Any?) {
-        guard let window = store.focusedWindow else { return }
-        window.toggleOutline(sender)
+        guard let document = store.focusedWindow else { return }
+        document.toggleOutline(sender)
         refreshViewCheckmarks()
     }
 
     @objc func toggleFiles(_ sender: Any?) {
-        guard let window = store.focusedWindow else { return }
-        window.toggleFiles(sender)
+        guard let host = store.focusedHost else { return }
+        host.toggleFiles(sender)
         refreshViewCheckmarks()
     }
 
@@ -848,17 +831,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
-    /// Pushes the preferences every open document window mirrors.
+    /// Pushes the preferences every open document tab and window panel mirrors.
     ///
     /// Focus, typewriter and readonly live on `AppStore` rather than in the settings
     /// file - they are view state a user flips for the session - so they are merged
     /// with the stored preferences here rather than in either place.
     private func pushSettingsToWindows() {
         let view = mergedEditorSettings()
-        for window in store.windows {
-            window.applyEditorSettings(view)
-            window.applyParseOptions(store.settings.settings.parseOptions)
-            window.refreshFilesRoot()
+        for document in store.documents {
+            document.applyEditorSettings(view)
+            document.applyParseOptions(store.settings.settings.parseOptions)
+        }
+        for host in store.hosts {
+            host.showHiddenFiles = view.showHiddenFiles
         }
     }
 
@@ -878,7 +863,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func toggleTypewriterMode(_ sender: Any?) {
         store.typeWriterMode.toggle()
         pushSettingsToWindows()
-        for window in store.windows { window.editor.centerCaretIfNeeded() }
+        for document in store.documents { document.editor.centerCaretIfNeeded() }
     }
 
     @objc func toggleReadonlyMode(_ sender: Any?) {

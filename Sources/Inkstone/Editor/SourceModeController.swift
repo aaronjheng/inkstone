@@ -20,7 +20,6 @@ import Foundation
 final class SourceModeController: NSObject {
     private let textView: NSTextView
     private let scrollView: NSScrollView
-    private weak var window: NSWindow?
     private var theme: EditorTheme
     private var document: MarkdownDocument
     private var parseOptions: BlockParser.Options
@@ -86,24 +85,23 @@ final class SourceModeController: NSObject {
 
     var isVisible: Bool { isActive }
 
-    /// Shows or hides the source view inside `window`, replacing the editor's
-    /// scroll view. Returns the markdown if the mode was just left, so the caller
-    /// can push the result into the document view.
+    /// Shows or hides the source view inside `container`, covering the document's
+    /// content (the document lives in a host tab, not a window of its own).
+    /// Returns the markdown if the mode was just left, so the caller can push the
+    /// result into the document view.
     @discardableResult
-    func toggle(in window: NSWindow, markdown: String, parseOptions: BlockParser.Options)
+    func toggle(in container: NSView, markdown: String, parseOptions: BlockParser.Options)
         -> String?
     {
-        self.window = window
-        guard let contentView = window.contentView else { return nil }
         isActive.toggle()
         if isActive {
             document = BlockParser.parse(markdown, options: parseOptions)
             setText(document.source)
-            contentView.addSubview(scrollView, positioned: .below, relativeTo: nil)
-            scrollView.frame = contentView.bounds
+            container.addSubview(scrollView)
+            scrollView.frame = container.bounds
             scrollView.autoresizingMask = [.width, .height]
             scrollView.isHidden = false
-            window.makeFirstResponder(textView)
+            container.window?.makeFirstResponder(textView)
             return nil
         }
         scrollView.isHidden = true

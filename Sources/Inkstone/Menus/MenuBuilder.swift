@@ -77,7 +77,7 @@ enum MenuBuilder {
             withTitle: "New Tab", action: #selector(AppDelegate.newTab(_:)), keyEquivalent: "t"
         ).target = responder
         menu.addItem(
-            withTitle: "New Window", action: #selector(AppDelegate.newDocument(_:)), keyEquivalent: "n"
+            withTitle: "New Window", action: #selector(AppDelegate.newWindow(_:)), keyEquivalent: "n"
         ).keyEquivalentModifierMask = [.command, .option]
         menu.items.last?.target = responder
         menu.addItem(

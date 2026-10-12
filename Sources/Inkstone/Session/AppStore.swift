@@ -5,6 +5,10 @@ import Foundation
 ///
 /// One coordinator rather than a store per concern, so the menu's enable state and
 /// the windows can never disagree about "the current document".
+///
+/// A window (`EditorWindowController`) owns the Files panel and an `NSTabView` of
+/// documents; a document (`DocumentWindowController`) is a tab's content. The
+/// store holds the windows and derives the document list from them.
 @MainActor
 final class AppStore {
     static let shared = AppStore()
@@ -15,7 +19,7 @@ final class AppStore {
     private(set) lazy var themeManager = ThemeManager(store: settings)
     private(set) lazy var drafts = DraftStore()
     private(set) var theme: EditorTheme = SettingsStore.shared.resolvedTheme()
-    private(set) var windows: [DocumentWindowController] = []
+    private(set) var hosts: [EditorWindowController] = []
     private(set) var recentFiles: [URL] = []
     /// Folders the user opened, newest first; the reopen-last-folder launch
     /// option reads the head. Persisted through the app delegate like the files.
@@ -36,9 +40,19 @@ final class AppStore {
         }
     }
 
-    var focusedWindow: DocumentWindowController? {
-        windows.first { $0.window?.isKeyWindow == true } ?? windows.last
+    /// Every open document, across every window.
+    var documents: [DocumentWindowController] { hosts.flatMap(\.documents) }
+
+    /// The key window, or the most recently created one when none has focus.
+    var focusedHost: EditorWindowController? {
+        hosts.first { $0.window?.isKeyWindow == true } ?? hosts.last
     }
+
+    /// The focused window's selected document - the menu's "current document".
+    ///
+    /// Still called `focusedWindow`: every call site means "the document the
+    /// commands act on", which is now a tab, not a window.
+    var focusedWindow: DocumentWindowController? { focusedHost?.selectedDocument }
 
     // MARK: - Theme
 
@@ -53,8 +67,8 @@ final class AppStore {
     /// Called by `ThemeManager`; fans the change out to every open window.
     func apply(theme: EditorTheme) {
         self.theme = theme
-        for window in windows {
-            window.apply(theme: theme)
+        for host in hosts {
+            host.apply(theme: theme)
         }
         onThemeChange?(theme)
     }
@@ -67,38 +81,43 @@ final class AppStore {
         themeManager.useThemeFontSize()
     }
 
-    // MARK: - Windows
+    // MARK: - Windows and tabs
 
+    /// A new window with the Files panel rooted where the caller asks.
+    ///
+    /// `sidebarFolder` pins the tree for that window; without it the preference
+    /// decides, and without that the focused document's folder does.
     @discardableResult
-    func newWindow(
-        markdown: String = SampleDocument.text, url: URL? = nil, sidebarFolder: URL? = nil
-    )
-        -> DocumentWindowController
-    {
+    func newHost(sidebarFolder: URL? = nil) -> EditorWindowController {
         let settings = settings.settings
         let environment = EditorEnvironment(
             parseOptions: settings.parseOptions,
             sidebarFolder: sidebarFolder ?? settings.sidebarFolder,
             wordsPerMinute: settings.wordsPerMinute
         )
-        let controller = DocumentWindowController(
-            theme: theme, markdown: markdown, url: url, environment: environment
-        )
-        // Autosave and the crash-recovery draft both live here, so the window only has
-        // to report what changed and let the store decide what to do about it.
-        controller.autosaveInterval = autosaveInterval
-        controller.onWriteDraft = { [weak self] snapshot in
-            guard let self else { return }
-            self.drafts.write(self.draft(from: snapshot))
+        let host = EditorWindowController(theme: theme, environment: environment)
+        host.onSelectFile = { [weak self, weak host] url in
+            guard let self, let host else { return }
+            self.open(url, in: host)
         }
-        controller.onSaveCommitted = { [weak self] url in
-            self?.drafts.clear(for: url)
+        host.onSelectionChange = { [weak self] in
+            self?.onWindowsChange?()
         }
+        host.onDocumentsChange = { [weak self] in
+            self?.onWindowsChange?()
+        }
+        host.onClosed = { [weak self, weak host] in
+            self?.remove(host)
+        }
+        host.onNewTab = { [weak self, weak host] in
+            self?.newDocument(in: host)
+        }
+        host.showHiddenFiles = self.settings.editorView.showHiddenFiles
         // A window built with a (0, 0) content rect lands wherever AppKit's
         // cascade happens to leave it, which can push the sidebar off-screen.
         // Centre the first window and step the rest down-right, TextEdit-style.
-        if let window = controller.window {
-            if let previous = windows.last?.window, previous.isVisible {
+        if let window = host.window {
+            if let previous = hosts.last?.window, previous.isVisible {
                 window.setFrameTopLeftPoint(
                     NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)
                 )
@@ -106,21 +125,48 @@ final class AppStore {
                 window.center()
             }
         }
-        controller.showWindow(nil)
-        windows.append(controller)
+        hosts.append(host)
+        host.showWindow(nil)
         onWindowsChange?()
-        return controller
+        return host
     }
 
-    /// Reopens the last session's unsaved drafts, each in its own window, already dirty.
+    /// A new document tab, in the given window or the focused one.
+    @discardableResult
+    func newDocument(
+        markdown: String = SampleDocument.text, url: URL? = nil,
+        in host: EditorWindowController? = nil
+    ) -> DocumentWindowController {
+        let host = host ?? focusedHost ?? newHost()
+        let document = host.addTab(markdown: markdown, url: url)
+        // Autosave and the crash-recovery draft both live here, so the tab only
+        // has to report what changed and let the store decide what to do about it.
+        document.autosaveInterval = autosaveInterval
+        document.onWriteDraft = { [weak self] snapshot in
+            guard let self else { return }
+            self.drafts.write(self.draft(from: snapshot))
+        }
+        document.onSaveCommitted = { [weak self] url in
+            self?.drafts.clear(for: url)
+        }
+        return document
+    }
+
+    /// A new window with one untitled scratch tab, as "New Window" asks for.
+    @discardableResult
+    func newWindow() -> DocumentWindowController {
+        newDocument(in: newHost())
+    }
+
+    /// Reopens the last session's unsaved drafts, each as its own tab, already dirty.
     ///
     /// No prompt on purpose: asking on every launch - clean quit included - trains the
-    /// user to dismiss the alert blind. A draft arrives as an unsaved window instead,
+    /// user to dismiss the alert blind. A draft arrives as an unsaved tab instead,
     /// so the content is one glance away and quitting asks about it the usual way.
     func recoverDrafts(_ drafts: [Draft]) {
         for draft in drafts {
-            let controller = newWindow(markdown: draft.markdown, url: draft.sourceURL)
-            controller.restoreDraft(markdown: draft.markdown)
+            let document = newDocument(markdown: draft.markdown, url: draft.sourceURL)
+            document.restoreDraft(markdown: draft.markdown)
         }
     }
 
@@ -139,8 +185,26 @@ final class AppStore {
         )
     }
 
-    func close(_ controller: DocumentWindowController) {
-        windows.removeAll { $0 === controller }
+    /// Closes a document's tab, and its window when that was the last tab.
+    func close(_ document: DocumentWindowController) {
+        guard let host = hosts.first(where: { host in
+            host.documents.contains { $0 === document }
+        }) else { return }
+        host.removeDocument(document)
+        if host.documents.isEmpty {
+            host.close()
+        }
+    }
+
+    /// ⌘W: the focused tab, or the window when the tab list is empty.
+    func closeFocusedDocument() {
+        guard let host = focusedHost else { return }
+        host.closeSelectedTab()
+    }
+
+    private func remove(_ host: EditorWindowController?) {
+        guard let host, let index = hosts.firstIndex(where: { $0 === host }) else { return }
+        hosts.remove(at: index)
         onWindowsChange?()
     }
 
@@ -174,20 +238,52 @@ final class AppStore {
     }
 
     func open(_ url: URL) {
-        // A file already open in another window focuses that window instead of
-        // opening a second copy - the behaviour a tabbed-window user expects.
-        if let existing = windows.first(where: { $0.fileURL == url }) {
-            existing.showWindow(nil)
-            existing.window?.makeKeyAndOrderFront(nil)
+        let host = focusedHost ?? newHost()
+        open(url, in: host)
+    }
+
+    /// Opens a file in a window: focuses its tab when it is already open, reuses
+    /// the lone empty scratch tab, and adds a tab otherwise.
+    func open(_ url: URL, in host: EditorWindowController) {
+        if let existing = documents.first(where: { $0.fileURL == url }) {
+            if let owner = hosts.first(where: { host in
+                host.documents.contains { $0 === existing }
+            }) {
+                owner.window?.makeKeyAndOrderFront(nil)
+                owner.select(document: existing)
+            }
             return
         }
         do {
-            let controller = newWindow(markdown: "", url: url)
-            try controller.open(url)
+            let document = reuseScratchTab(in: host) ?? host.addTab(markdown: "", url: url)
+            wire(document)
+            try document.open(url)
             noteRecent(url)
             noteRecentFolder(url.deletingLastPathComponent())
         } catch {
             AppLogger.error("Failed to open \(url.lastPathComponent): \(error)", category: "File")
+        }
+    }
+
+    /// The window's single empty, clean tab, if that is all it holds: opening a
+    /// file into it keeps a fresh window from leaving an empty Untitled behind.
+    private func reuseScratchTab(in host: EditorWindowController) -> DocumentWindowController? {
+        guard host.documents.count == 1, let scratch = host.documents.first,
+            scratch.fileURL == nil, !scratch.hasUnsavedChanges
+        else { return nil }
+        return scratch
+    }
+
+    /// Draft snapshots and autosave wiring for a tab built outside `newDocument`.
+    private func wire(_ document: DocumentWindowController) {
+        guard document.onWriteDraft == nil else { return }
+        document.autosaveInterval = autosaveInterval
+        document.onWriteDraft = { [weak self] snapshot in
+            guard let self else { return }
+            self.drafts.write(self.draft(from: snapshot))
+        }
+        document.onSaveCommitted = { [weak self] url in
+            self?.drafts.clear(for: url)
         }
     }
 }

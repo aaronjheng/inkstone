@@ -2,7 +2,7 @@ import AppKit
 import Foundation
 import UniformTypeIdentifiers
 
-/// The preferences a document window mirrors.
+/// The preferences a document mirrors.
 ///
 /// `Editor/` may not read `Session/`, and passing eight separate booleans through
 /// every call site is how one of them ends up unset. This is the whole contract, in
@@ -65,7 +65,8 @@ final class DocumentScrollView: NSScrollView {
         super.layout()
         // With `.fullSizeContentView`, the scroll view extends under the title
         // bar; the safe-area inset gives the clearance the traffic lights need
-        // so the first heading is not clipped.
+        // so the first heading is not clipped. Inside a host tab there is no
+        // title bar of its own, so the inset is just the theme's padding.
         let theme = (documentView as? MarkdownTextView)?.theme
         contentInsets.top = (theme?.contentPadding ?? 30) + safeAreaInsets.top
         centreContentColumn()
@@ -95,13 +96,13 @@ final class DocumentScrollView: NSScrollView {
     }
 }
 
-/// One document window.
+/// One open document: its buffer, editor, outline and draft bookkeeping.
 ///
-/// One window per document, like the original. Multi-document is native window tabbing
-/// rather than an in-app tab strip, which is both what the original does and less code
-/// to keep correct.
+/// A document no longer owns a window - it is mounted as a tab inside an
+/// `EditorWindowController`, which owns the window, the title strip and the
+/// window-global Files panel. Everything here is the document's own content.
 @MainActor
-final class DocumentWindowController: NSWindowController, NSWindowDelegate {
+final class DocumentWindowController {
     let editor: MarkdownTextView
     private let scrollView: DocumentScrollView
     private var theme: EditorTheme
@@ -115,15 +116,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
     private var parseOptions: BlockParser.Options = .standard
 
     private(set) var statusText = ""
-    /// Files docked left, outline docked right - the original keeps one panel and
-    /// swaps its contents, but the two answers ("where am I", "what's nearby")
-    /// are read side by side here, so they dock independently.
-    private let filesPanel: FileTreeController
+    /// Outline docked right of the editor; the Files panel is the host's.
     private let outlinePanel: OutlineViewController
     private let findController = FindReplaceController()
     private var findVisible = false
-    internal var contentRoot: ContentRootView?
     private let environment: EditorEnvironment
+    /// What a tab shows: the editor with the outline beside it.
+    private(set) var documentContent: DocumentContentView
+
+    /// The window hosting this document's tab, set by the host when the tab
+    /// is added. Sheets, the find bar and first responder all go here - the
+    /// document itself has no window.
+    weak var hostWindow: NSWindow?
+    /// Fired when the title, file URL or edited state changes, so the host can
+    /// refresh the tab label and title strip.
+    var onContentChange: (() -> Void)?
 
     init(
         theme: EditorTheme, markdown: String = SampleDocument.text, url: URL? = nil,
@@ -134,28 +141,9 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         self.environment = environment
         editor = MarkdownTextView(theme: theme)
         scrollView = DocumentScrollView(textView: editor, theme: theme)
-        filesPanel = FileTreeController()
         outlinePanel = OutlineViewController()
-
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-            backing: .buffered,
-            defer: false
-        )
-        window.titlebarAppearsTransparent = true
-        window.titleVisibility = .hidden
-        window.isMovableByWindowBackground = true
-        window.backgroundColor = theme.background.nsColor
-        contentRoot = ContentRootView(
-            files: filesPanel.view, editor: scrollView, outline: outlinePanel.view
-        )
-        contentRoot?.apply(theme: theme)
-        window.contentView = contentRoot
-        window.tabbingMode = .preferred
-        window.minSize = NSSize(width: 520, height: 380)
-        super.init(window: window)
-        window.delegate = self
+        documentContent = DocumentContentView(editor: scrollView, outline: outlinePanel.view)
+        documentContent.apply(theme: theme)
 
         parseOptions = environment.parseOptions
         editor.load(markdown: markdown)
@@ -185,27 +173,14 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         findController.onReplace = { [weak self] in
             self?.markDirty()
         }
-        filesPanel.onSelect = { [weak self] url in
-            guard let self else { return }
-            do {
-                try self.open(url)
-            } catch {
-                AppLogger.error("Failed to open \(url.lastPathComponent): \(error)", category: "Document")
-            }
-        }
-        filesPanel.onCreateFile = { [weak self] in
-            self?.createFileInFolder()
-        }
-        syncFilesRoot(forDocument: url)
-        setWindowTitle()
-        // The outline and the word count come from `updateStatus`; a fresh window
-        // never edits anything, so without this the sidebar would sit at
-        // "No headings · 0 words" until the first keystroke.
+        // The outline and the word count come from `updateStatus`; a fresh
+        // document never edits anything, so without this the sidebar would sit
+        // at "No headings · 0 words" until the first keystroke.
         updateStatus()
     }
 
     @available(*, unavailable)
-    required init?(coder: NSCoder) {
+    convenience init?(coder: NSCoder) {
         fatalError("DocumentWindowController is created in code")
     }
 
@@ -213,20 +188,22 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
 
     var fileURL: URL? { documentURL }
 
+    /// The name the tab label and title strip show.
+    var titleText: String { documentURL?.lastPathComponent ?? "Untitled" }
+
     func open(_ url: URL) throws {
         let text = try String(contentsOf: url, encoding: .utf8)
         documentURL = url
         editor.load(markdown: text)
         sourceController?.load(markdown: text)
-        // A document opened into a scratch window brings its folder with it: the
-        // file tree, path completion and relative images all resolve against it,
-        // and none of those were bound when the empty window was created.
+        // A document opened into a scratch tab brings its folder with it: path
+        // completion and relative images resolve against it, and neither was
+        // bound when the empty tab was created.
         let folder = url.deletingLastPathComponent()
         editor.completionDirectory = folder
         editor.imagePainter.baseDirectory = folder
-        syncFilesRoot(forDocument: url)
         isDirty = false
-        setWindowTitle()
+        notifyHost()
         updateStatus()
     }
 
@@ -240,7 +217,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         editor.load(markdown: markdown)
         sourceController?.load(markdown: markdown)
         isDirty = true
-        setWindowTitle()
+        notifyHost()
         updateStatus()
     }
 
@@ -250,7 +227,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         onSaveCommitted?(documentURL)
         isDirty = false
         autosaveTimer?.invalidate()
-        setWindowTitle()
+        notifyHost()
     }
 
     func saveAs(_ url: URL) throws {
@@ -260,7 +237,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         onSaveCommitted?(url)
         isDirty = false
         autosaveTimer?.invalidate()
-        setWindowTitle()
+        notifyHost()
     }
 
     /// Autosave interval in seconds; `0` means off.
@@ -271,7 +248,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
 
     private func markDirty() {
         isDirty = true
-        setWindowTitle()
+        notifyHost()
         updateStatus()
         scheduleAutosave()
     }
@@ -318,17 +295,21 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         writeDraft()
     }
 
-    private func setWindowTitle() {
-        // The original centres the bare file name in the titlebar, and the edited
-        // state lives in the close button rather than in a suffix. The system
-        // title stays set for Mission Control and accessibility; the visible
-        // one is drawn by `ContentRootView`, because AppKit offers no centred
-        // title on a full-size-content window.
-        let name = documentURL?.lastPathComponent ?? "Untitled"
-        window?.title = name
-        window?.subtitle = ""
-        window?.isDocumentEdited = isDirty
-        contentRoot?.setTitleText(name)
+    /// Tells the host to refresh the tab label, title strip and edited dot.
+    ///
+    /// The original centred the bare file name in the titlebar, and the edited
+    /// state lives in the close button rather than in a suffix; the system title
+    /// stays set for Mission Control and accessibility.
+    private func notifyHost() {
+        hostWindow?.title = titleText
+        hostWindow?.isDocumentEdited = isDirty
+        onContentChange?()
+    }
+
+    /// Invalidates the timers; called when the tab is closed.
+    func close() {
+        autosaveTimer?.invalidate()
+        autosizeTimer?.invalidate()
     }
 
     // MARK: - Format commands
@@ -354,11 +335,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
 
     // MARK: - Find and replace
 
-    /// Slides the find bar down from the top of the window, as the original does.
+    /// Slides the find bar down from the top of the host window, as the original does.
     @objc func toggleFind(_ sender: Any?) {
         findVisible.toggle()
-        if findVisible, let window {
-            findController.present(in: window)
+        if findVisible, let hostWindow {
+            findController.present(in: hostWindow)
         } else {
             findController.dismiss()
         }
@@ -377,19 +358,16 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
     // MARK: - Source mode
 
     var isSourceModeActive: Bool { sourceController?.isVisible ?? false }
-    var isSidebarVisible: Bool { areFilesVisible || isOutlineVisible }
-    var isOutlineVisible: Bool { contentRoot?.isOutlineVisible ?? false }
-    var areFilesVisible: Bool { contentRoot?.isFilesVisible ?? false }
+    var isOutlineVisible: Bool { documentContent.isOutlineVisible }
 
     /// Toggles source mode and keeps the two views in step.
     ///
-    /// The original mounts source mode in a second container over the same window; the
-    /// markdown comes from the node tree, so attachment-rendered blocks show their
-    /// real source rather than the `U+FFFC` the buffer holds for them.
+    /// Source mode mounts over the tab's content; the markdown comes from the
+    /// node tree, so attachment-rendered blocks show their real source rather
+    /// than the `U+FFFC` the buffer holds for them.
     @objc func toggleSourceMode(_ sender: Any?) {
-        guard let window else { return }
         let result = sourceController?.toggle(
-            in: window, markdown: editor.markdown, parseOptions: parseOptions
+            in: documentContent, markdown: editor.markdown, parseOptions: parseOptions
         )
         if let result {
             pushFromSource(result)
@@ -410,13 +388,11 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
 
     func apply(theme: EditorTheme) {
         self.theme = theme
-        window?.backgroundColor = theme.background.nsColor
         scrollView.apply(theme: theme)
         editor.apply(theme: theme)
         sourceController?.apply(theme: theme)
-        filesPanel.apply(theme: theme)
         outlinePanel.apply(theme: theme)
-        contentRoot?.apply(theme: theme)
+        documentContent.apply(theme: theme)
         updateStatus()
     }
 
@@ -445,63 +421,30 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
         editor.isFocusModeEnabled = settings.focus
         editor.isReadonly = settings.readonly
         editor.showsInvisibleCharacters = settings.showInvisibleCharacters
-        filesPanel.showsHiddenFiles = settings.showHiddenFiles
         editor.needsDisplay = true
         updateStatus()
     }
 
     // MARK: - Panels
 
-    /// "Files" docks left and "Outline" docks right, independently; "Sidebar"
-    /// drives both together. Every change re-lays the content root and re-measures
-    /// the editor, since the text column centres in whatever space is left.
-    @objc func toggleSidebar(_ sender: Any?) {
-        let show = !isSidebarVisible
-        contentRoot?.setFilesVisible(show)
-        contentRoot?.setOutlineVisible(show)
-        editor.markDirty()
-    }
-
+    /// Outline is per-document; the Files panel belongs to the window, so
+    /// "Sidebar" drives both through the host and here together.
     @objc func toggleOutline(_ sender: Any?) {
-        contentRoot?.setOutlineVisible(!isOutlineVisible)
+        documentContent.setOutlineVisible(!isOutlineVisible)
         editor.markDirty()
     }
 
-    @objc func toggleFiles(_ sender: Any?) {
-        contentRoot?.setFilesVisible(!areFilesVisible)
+    func setOutlineVisible(_ visible: Bool) {
+        guard visible != isOutlineVisible else { return }
+        documentContent.setOutlineVisible(visible)
         editor.markDirty()
-    }
-
-    /// Shows the file tree without toggling it away when it is already up.
-    ///
-    /// Opening a folder is this app's only "show me the hierarchy" moment: the
-    /// tree starts hidden (the original's default) and a folder open that left
-    /// it hidden would render itself invisible.
-    func showFilesPanel() {
-        guard !areFilesVisible else { return }
-        contentRoot?.setFilesVisible(true)
-        editor.markDirty()
-    }
-
-    /// Re-points the files tree when the sidebar-folder preference changes.
-    func refreshFilesRoot() {
-        syncFilesRoot(forDocument: documentURL)
     }
 
     /// Re-parses the document when a Markdown syntax preference changes, so an
-    /// open window follows the setting instead of waiting for a reopen.
+    /// open tab follows the setting instead of waiting for a reopen.
     func applyParseOptions(_ options: BlockParser.Options) {
         parseOptions = options
         editor.load(markdown: editor.markdown)
-    }
-
-    /// Points the file tree at its folder: the preference wins over the
-    /// document's own folder.
-    private func syncFilesRoot(forDocument url: URL?) {
-        filesPanel.setRoot(
-            environment.sidebarFolder ?? url?.deletingLastPathComponent(), fallback: nil
-        )
-        filesPanel.current(path: url?.path)
     }
 
     /// The last heading at or before the caret, so the outline highlights the
@@ -515,25 +458,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
             found = heading
         }
         return found
-    }
-
-    /// The files panel's "+": a new Markdown file in the tree's folder, opened
-    /// once it exists on disk. The tree refreshes itself afterwards, because
-    /// nothing watches the folder for changes made outside the app.
-    private func createFileInFolder() {
-        guard let window, let folder = filesPanel.rootURL else { return }
-        let panel = NSSavePanel()
-        panel.directoryURL = folder
-        panel.allowedContentTypes = [.plainText, .markdown]
-        panel.nameFieldStringValue = "Untitled.md"
-        panel.beginSheetModal(for: window) { [weak self] response in
-            guard response == .OK, let url = panel.url, let self else { return }
-            if !FileManager.default.fileExists(atPath: url.path) {
-                try? Data().write(to: url)
-            }
-            try? self.open(url)
-            self.filesPanel.refresh()
-        }
     }
 
     /// Scrolls to a heading chosen in the outline and puts the caret on it.
@@ -564,12 +488,6 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate {
             counts: (words: total.words, characters: total.characters),
             scrollTo: currentHeading()
         )
-    }
-
-    // MARK: - NSWindowDelegate
-
-    func windowWillClose(_ notification: Notification) {
-        autosaveTimer?.invalidate()
     }
 }
 
@@ -605,215 +523,12 @@ struct EditorEnvironment {
 
 }
 
-/// What a window tells the session layer about its unsaved content.
+/// What a document tells the session layer about its unsaved content.
 struct DraftSnapshot {
     var sourceURL: URL?
     var title: String
     var markdown: String
     var savedAt: Date
-}
-
-/// The window's root view: files docked left, outline docked right, editor between.
-///
-/// Both panels are created hidden so a fresh window matches the original's default of
-/// no sidebars, and toggling one never disturbs the other's frame - the layout
-/// only ever moves the dividers. Widths are draggable: the original's rule drags,
-/// and a sidebar that cannot be resized makes a narrow file name indistinguishable.
-final class ContentRootView: NSView {
-    private let files: NSView
-    private let outline: NSView
-    private let editor: NSView
-    private let filesDivider = PanelDivider()
-    private let outlineDivider = PanelDivider()
-    /// The document name, drawn centred in the title strip like the original's.
-    private let titleLabel = NSTextField(labelWithString: "")
-    /// Live panel widths, moved by dragging the divider each one owns.
-    private var filesWidth: CGFloat = ContentRootView.preferredWidth
-    private var outlineWidth: CGFloat = ContentRootView.preferredWidth
-
-    init(files: NSView, editor: NSView, outline: NSView) {
-        self.files = files
-        self.editor = editor
-        self.outline = outline
-        super.init(frame: NSRect(x: 0, y: 0, width: 900, height: 700))
-        wantsLayer = true
-        titleLabel.alignment = .center
-        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
-        titleLabel.textColor = .labelColor
-        addSubview(titleLabel)
-        filesDivider.onDrag = { [weak self] delta in
-            guard let self else { return }
-            self.filesWidth = self.clampedWidth(self.filesWidth + delta, other: self.outlineWidth)
-            self.needsLayout = true
-        }
-        outlineDivider.onDrag = { [weak self] delta in
-            guard let self else { return }
-            self.outlineWidth = self.clampedWidth(self.outlineWidth - delta, other: self.filesWidth)
-            self.needsLayout = true
-        }
-        addSubview(files)
-        addSubview(filesDivider)
-        addSubview(editor)
-        addSubview(outlineDivider)
-        addSubview(outline)
-        files.isHidden = true
-        outline.isHidden = true
-        filesDivider.isHidden = true
-        outlineDivider.isHidden = true
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) is not supported")
-    }
-
-    var isFilesVisible: Bool { !files.isHidden }
-
-    var isOutlineVisible: Bool { !outline.isHidden }
-
-    func setFilesVisible(_ visible: Bool) {
-        files.isHidden = !visible
-        needsLayout = true
-    }
-
-    func setOutlineVisible(_ visible: Bool) {
-        outline.isHidden = !visible
-        needsLayout = true
-    }
-
-    /// The dividers straddle the panel edge, so each paints its panel's
-    /// background over the grab strip; without it the band beside the hairline
-    /// falls through to the window and reads as a gap.
-    func apply(theme: EditorTheme) {
-        filesDivider.panelBackground = theme.sidebarBackground.nsColor
-        filesDivider.panelEdge = .minX
-        outlineDivider.panelBackground = theme.background.nsColor
-        outlineDivider.panelEdge = .maxX
-        filesDivider.needsDisplay = true
-        outlineDivider.needsDisplay = true
-    }
-
-    /// Keeps one panel between its minimum and whatever the editor floor allows.
-    ///
-    /// `other` is the width the opposite panel currently holds: with both panels
-    /// open each one shrinks so the editor never drops below `editorFloor`, which
-    /// is what a drag past the floor should do - stop, not squeeze the editor to
-    /// nothing and lose the trailing divider off-screen.
-    private func clampedWidth(_ proposed: CGFloat, other: CGFloat) -> CGFloat {
-        let ceiling = bounds.width - Self.editorFloor - other - Self.dividerWidth * 2
-        return min(
-            max(proposed, Self.minimumPanelWidth),
-            max(Self.minimumPanelWidth, ceiling)
-        )
-    }
-
-    override func layout() {
-        super.layout()
-        let bounds = self.bounds
-        positionTitle(in: bounds)
-        let panelCount = CGFloat((isFilesVisible ? 1 : 0) + (isOutlineVisible ? 1 : 0))
-        guard panelCount > 0 else {
-            filesDivider.isHidden = true
-            outlineDivider.isHidden = true
-            editor.frame = bounds
-            return
-        }
-        var left = CGFloat(0)
-        if isFilesVisible {
-            let width = min(
-                filesWidth,
-                max(Self.minimumPanelWidth, bounds.width - Self.editorFloor - Self.dividerWidth)
-            )
-            files.frame = NSRect(x: 0, y: 0, width: width, height: bounds.height)
-            filesDivider.isHidden = false
-            filesDivider.frame = NSRect(
-                x: width, y: 0, width: Self.dividerWidth, height: bounds.height
-            )
-            left = width + Self.dividerWidth
-        } else {
-            filesDivider.isHidden = true
-        }
-        var right = bounds.width
-        if isOutlineVisible {
-            let width = min(
-                outlineWidth,
-                max(Self.minimumPanelWidth, bounds.width - Self.editorFloor - Self.dividerWidth)
-            )
-            outline.frame = NSRect(x: right - width, y: 0, width: width, height: bounds.height)
-            outlineDivider.isHidden = false
-            outlineDivider.frame = NSRect(
-                x: right - width - Self.dividerWidth, y: 0,
-                width: Self.dividerWidth, height: bounds.height
-            )
-            right -= width + Self.dividerWidth
-        } else {
-            outlineDivider.isHidden = true
-        }
-        editor.frame = NSRect(x: left, y: 0, width: max(0, right - left), height: bounds.height)
-    }
-
-    /// The original's sidebar is 220pt out of the box, and resizes by dragging the rule.
-    private static let preferredWidth: CGFloat = 220
-    private static let minimumPanelWidth: CGFloat = 150
-    private static let editorFloor: CGFloat = 340
-    /// The grab area: a one-point target is a coin toss with a trackpad, so the
-    /// view is wider than the hairline it draws.
-    private static let dividerWidth: CGFloat = 5
-
-    /// Sits centred in the strip the traffic lights occupy, which is always the
-    /// editor's span: the side panels dock to the edges, never the middle.
-    private func positionTitle(in bounds: NSRect) {
-        titleLabel.frame = NSRect(x: 0, y: bounds.height - 30, width: bounds.width, height: 22)
-    }
-
-    func setTitleText(_ text: String) {
-        titleLabel.stringValue = text
-    }
-}
-
-/// The hairline between a panel and the editor.
-///
-/// Dragging reports to the root view, which owns the widths; the line itself is
-/// drawn a point wide over the wider grab area.
-private final class PanelDivider: NSView {
-    /// The drag distance since the previous event, in points (mouse x).
-    var onDrag: ((CGFloat) -> Void)?
-    /// The panel's own background, painted over the grab area's panel-side half
-    /// so the unpainted band beside the hairline matches the panel, not the window.
-    var panelBackground: NSColor?
-    /// Which half of the grab strip belongs to the panel.
-    var panelEdge: NSRectEdge = .minX
-    private var lastLocation: CGFloat?
-
-    override var mouseDownCanMoveWindow: Bool { false }
-
-    override func mouseDown(with event: NSEvent) {
-        lastLocation = event.locationInWindow.x
-    }
-
-    override func mouseDragged(with event: NSEvent) {
-        guard let last = lastLocation else { return }
-        let location = event.locationInWindow.x
-        lastLocation = location
-        onDrag?(location - last)
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        if let panelBackground {
-            panelBackground.setFill()
-            NSRect(
-                x: panelEdge == .minX ? 0 : bounds.midX,
-                y: 0, width: bounds.width / 2, height: bounds.height
-            ).fill()
-        }
-        NSColor.separatorColor.setFill()
-        NSRect(x: bounds.midX - 0.5, y: 0, width: 1, height: bounds.height).fill()
-    }
-
-    override func resetCursorRects() {
-        super.resetCursorRects()
-        addCursorRect(bounds, cursor: .resizeLeftRight)
-    }
 }
 
 /// The document shown on first launch.
