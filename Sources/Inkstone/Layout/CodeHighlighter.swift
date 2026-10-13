@@ -1,373 +1,215 @@
 import AppKit
 import Foundation
+import SwiftTreeSitter
+import TreeSitterBash
+import TreeSitterC
+import TreeSitterCPP
+import TreeSitterGo
+import TreeSitterHTML
+import TreeSitterJSON
+import TreeSitterJava
+import TreeSitterRust
+import TreeSitterSwift
+import TreeSitterTSX
+import TreeSitterTypeScript
 
-/// Applies token colours to fenced code.
+/// Applies token colours to fenced code with tree-sitter.
 ///
-/// Registry-based rather than a single hand-rolled highlighter: a small
-/// line-oriented tokeniser per language family, resolved by name, alias or MIME
-/// type. Unregistered languages fall through to the theme's plain colour, which is
-/// the documented behaviour difference from the original (DESIGN.md §7).
-final class CodeHighlighter: @unchecked Sendable {
+/// One bundled grammar per supported language, selected by the fence's info
+/// string; a language with no bundled grammar renders in the theme's plain
+/// colour. The whole block is parsed rather than each line, so a construct that
+/// spans lines - a block comment, a multi-line string - colours across all of
+/// them.
+///
+/// Callers run on the main thread (the layout pass), which lets the parsers be
+/// cached without locking.
+@MainActor
+final class CodeHighlighter {
     static let shared = CodeHighlighter()
+
+    /// The bundled grammars. The raw value is the cache key.
+    private enum Grammar: String {
+        case swift, typescript, tsx, cLanguage, cpp, java, go, rust, html, json, bash
+
+        /// The resource bundle SwiftPM builds for a grammar package. The
+        /// pattern is `<Package>_<Target>`; TypeScript's TSX parser is the
+        /// second target of its package, so it is named explicitly.
+        var bundleName: String {
+            self == .tsx
+                ? "TreeSitterTypeScript_TreeSitterTSX"
+                : "TreeSitter\(packageName)_TreeSitter\(packageName)"
+        }
+
+        private var packageName: String {
+            switch self {
+            case .swift: "Swift"
+            case .typescript: "TypeScript"
+            case .tsx: "TSX"
+            case .cLanguage: "C"
+            case .cpp: "CPP"
+            case .java: "Java"
+            case .go: "Go"
+            case .rust: "Rust"
+            case .html: "HTML"
+            case .json: "JSON"
+            case .bash: "Bash"
+            }
+        }
+    }
+
+    /// Fence info strings → grammar. Only spellings a bundled grammar actually
+    /// covers are listed; everything else renders plain.
+    private static let aliases: [String: Grammar] = [
+        "swift": .swift,
+        "typescript": .typescript, "ts": .typescript,
+        "tsx": .tsx,
+        "c": .cLanguage, "h": .cLanguage,
+        "cpp": .cpp, "c++": .cpp, "cc": .cpp, "cxx": .cpp,
+        "hpp": .cpp, "hxx": .cpp, "hh": .cpp,
+        "java": .java,
+        "go": .go, "golang": .go,
+        "rust": .rust, "rs": .rust,
+        "html": .html, "xhtml": .html,
+        "json": .json, "jsonc": .json,
+        "bash": .bash, "sh": .bash, "shell": .bash, "zsh": .bash, "console": .bash,
+    ]
+
+    /// A grammar's language object and the highlight query that colours it.
+    private struct Highlighting {
+        let language: Language
+        let query: Query
+    }
+
+    private var highlighters: [Grammar: Highlighting] = [:]
+    private var parsers: [Grammar: Parser] = [:]
 
     private init() {}
 
-    /// Applies syntax attributes to `result` starting at `offset`.
-    ///
-    /// `result` already holds the code line; this only adds colours, so it is safe
-    /// to call during a layout pass.
-    func apply(
-        to result: NSMutableAttributedString,
-        text: String,
-        language: String,
-        palette: SyntaxPalette,
-        offset: Int
-    ) {
-        guard let family = CodeLanguage(family: language),
-            let range = result.length > offset
-                ? NSRange(location: offset, length: result.length - offset) : nil
-        else { return }
-        result.addAttribute(.foregroundColor, value: palette.plain.nsColor, range: range)
-        for token in CodeTokenizer.tokenize(text, family: family) {
-            let tokenRange = NSRange(location: offset + token.range.location, length: token.range.length)
-            guard NSMaxRange(tokenRange) <= NSMaxRange(range) else { continue }
-            result.addAttribute(.foregroundColor, value: token.color(palette).nsColor, range: tokenRange)
-        }
+    /// The highlight ranges for one fenced block's body, as offsets into
+    /// `source`. Empty when the info string names no bundled grammar.
+    func highlights(in source: String, language: String) -> [NamedRange] {
+        guard let grammar = Self.aliases[language.lowercased()],
+            let highlighting = highlighting(for: grammar),
+            let parser = parser(for: grammar, highlighting: highlighting),
+            let tree = parser.parse(source)
+        else { return [] }
+        let cursor = highlighting.query.execute(in: tree)
+        return cursor.resolve(with: Predicate.Context(string: source)).highlights()
     }
-}
 
-/// The tokeniser families. Chosen so the common cases stay small: one family per
-/// punctuation style rather than one per language.
-enum CodeLanguage: String, CaseIterable {
-    case clike
-    case hash
-    case shell
-    case sql
-    case markup
-    case css
-    case yaml
-    case ini
-    case plain
-
-    init?(family: String) {
-        switch family.lowercased() {
-        case "swift", "javascript", "js", "jsx", "typescript", "ts", "tsx", "c", "h",
-            "objective-c", "objc", "cpp", "c++", "cc", "hpp", "java", "kotlin", "scala",
-            "go", "rust", "rs", "csharp", "c#", "php", "dart", "groovy":
-            self = .clike
-        case "python", "py", "ruby", "rb", "perl", "r":
-            self = .hash
-        case "sh", "bash", "zsh", "shell", "console", "fish":
-            self = .shell
-        case "sql":
-            self = .sql
-        case "html", "xml", "svg", "vue", "svelte":
-            self = .markup
-        case "css", "scss", "less":
-            self = .css
-        case "yaml", "yml", "toml":
-            self = .yaml
-        case "ini", "cfg", "conf", "properties", "gitconfig", "dockerfile":
-            self = .ini
-        case "", "text", "plain", "plaintext":
-            self = .plain
+    /// The theme colour for a tree-sitter capture name.
+    ///
+    /// The grammars agree on the base components (`keyword`, `string`,
+    /// `function`, ...) and differ on the sub-components, so the base decides
+    /// and only the spellings the grammars disagree on (`@escape`, `@boolean`,
+    /// `@embedded`, `@delimiter`) are named explicitly. A capture with no
+    /// palette token stays plain.
+    func color(for capture: String, palette: SyntaxPalette) -> DynamicColor? {
+        let components = capture.split(separator: ".")
+        guard let base = components.first else { return nil }
+        let sub = components.count > 1 ? components[1] : nil
+        switch base {
+        case "keyword":
+            return sub == "operator" ? palette.operator : palette.keyword
+        case "string", "embedded":
+            return palette.string
+        case "number", "constant", "boolean":
+            return palette.number
+        case "comment":
+            return palette.comment
+        case "tag":
+            return palette.tag
+        case "attribute", "property", "label":
+            return palette.attribute
+        case "function":
+            return palette.function
+        case "constructor", "type":
+            return palette.type
+        case "operator", "escape":
+            return palette.operator
+        case "punctuation", "delimiter":
+            return palette.punctuation
+        case "variable":
+            // `self`, `this`, `$!` read as keywords; ordinary variables are the
+            // body of the code and keep the plain colour.
+            return sub == "builtin" ? palette.keyword : nil
         default:
-            // Unregistered languages fall through to plain, per the documented
-            // behaviour difference from the original (DESIGN.md §7) - tokenising
-            // prose-like input as C-like sprayed keywords over text the user
-            // never asked to highlight.
-            self = .plain
+            return nil
         }
     }
-}
 
-struct CodeToken {
-    enum Kind {
-        case keyword, string, number, comment, tag, attribute, function, type
-        case `operator`, punctuation, plain
-    }
-
-    let kind: Kind
-    let range: NSRange
-
-    func color(_ palette: SyntaxPalette) -> DynamicColor {
-        switch kind {
-        case .keyword: return palette.keyword
-        case .string: return palette.string
-        case .number: return palette.number
-        case .comment: return palette.comment
-        case .tag: return palette.tag
-        case .attribute: return palette.attribute
-        case .function: return palette.function
-        case .type: return palette.type
-        case .`operator`: return palette.operator
-        case .punctuation: return palette.punctuation
-        case .plain: return palette.plain
-        }
-    }
-}
-
-/// A compact tokeniser. Not a full grammar: it recognises comments, strings,
-/// numbers, keywords, types and punctuation, which is what makes code blocks
-/// readable. Anything it cannot classify stays plain.
-enum CodeTokenizer {
-    private static let keywords: Set<String> = [
-        "abstract", "actor", "any", "as", "associatedtype", "async", "await", "break",
-        "case", "catch", "class", "continue", "convenience", "default", "defer", "deinit",
-        "didSet", "do", "dynamic", "else", "enum", "extension", "fallthrough", "false",
-        "final", "fileprivate", "for", "func", "get", "guard", "if", "import", "in",
-        "indirect", "init", "inout", "internal", "is", "lazy", "let", "mutating", "nil",
-        "nonmutating", "open", "operator", "optional", "override", "package", "postfix",
-        "precedence", "prefix", "private", "protocol", "public", "repeat", "required",
-        "rethrows", "return", "self", "Self", "set", "some", "static", "struct", "subscript",
-        "super", "switch", "throw", "throws", "true", "try", "typealias", "unowned",
-        "var", "weak", "where", "while", "willSet",
-        "break", "case", "catch", "class", "const", "continue", "debugger", "default",
-        "delete", "do", "else", "export", "extends", "finally", "for", "function", "if",
-        "import", "in", "instanceof", "interface", "let", "new", "of", "return", "super",
-        "switch", "this", "throw", "try", "typeof", "var", "void", "while", "with", "yield",
-        "abstract", "assert", "boolean", "break", "byte", "case", "catch", "char", "class",
-        "const", "continue", "default", "do", "double", "else", "enum", "extends", "final",
-        "finally", "float", "for", "goto", "if", "implements", "import", "instanceof", "int",
-        "interface", "long", "native", "new", "package", "private", "protected", "public",
-        "return", "short", "static", "strictfp", "super", "switch", "synchronized", "this",
-        "throw", "throws", "transient", "try", "void", "volatile", "while",
-        "chan", "defer", "fallthrough", "func", "go", "map", "range", "select", "struct",
-        "type", "var", "const", "interface", "namespace", "template", "public", "private",
-        "protected", "static", "extern", "enum", "struct", "typedef", "union", "goto",
-    ]
-
-    private static let types: Set<String> = [
-        "Int", "String", "Bool", "Double", "Float", "Array", "Dictionary", "Set",
-        "Optional", "Result", "Error", "Character", "UInt", "Data", "URL", "Date",
-        "CGFloat", "NSColor", "NSFont", "NSView", "NSViewController", "Color", "Font",
-        "int", "long", "short", "byte", "char", "float", "double", "boolean", "void",
-        "string", "auto", "size_t", "uint8_t", "uint32_t", "int64_t",
-    ]
-
-    static func tokenize(_ text: String, family: CodeLanguage) -> [CodeToken] {
-        guard family != .plain else { return [] }
-        let characters = Array(text)
-        var tokens: [CodeToken] = []
-        var index = 0
-        // Tokens are found over `[Character]` but consumed as NSString ranges
-        // (UTF-16 offsets): an emoji in a comment used to shift every later token
-        // one unit per astral character and silently miscolour the line.
-        var utf16Offsets = [Int](repeating: 0, count: characters.count + 1)
-        for (position, character) in characters.enumerated() {
-            utf16Offsets[position + 1] = utf16Offsets[position] + String(character).utf16.count
-        }
-
-        func emit(_ kind: CodeToken.Kind, from start: Int, to end: Int) {
-            guard end > start else { return }
-            let location = utf16Offsets[min(max(start, 0), characters.count)]
-            let limit = utf16Offsets[min(max(end, 0), characters.count)]
-            tokens.append(CodeToken(kind: kind, range: NSRange(location: location, length: limit - location)))
-        }
-
-        while index < characters.count {
-            let character = characters[index]
-
-            // Line comment.
-            if character == "/", index + 1 < characters.count {
-                let next = characters[index + 1]
-                let isComment =
-                    (next == "/" && family != .shell)
-                    || (next == "*" && family != .shell)
-                if isComment {
-                    if next == "*" {
-                        // Block comment.
-                        var end = index + 2
-                        while end + 1 < characters.count,
-                            !(characters[end] == "*" && characters[end + 1] == "/")
-                        {
-                            end += 1
-                        }
-                        end = min(end + 2, characters.count)
-                        emit(.comment, from: index, to: end)
-                        index = end
-                        continue
-                    }
-                    var end = index + 2
-                    while end < characters.count, characters[end] != "\n" { end += 1 }
-                    emit(.comment, from: index, to: end)
-                    index = end
-                    continue
-                }
-            }
-            if family == .hash, character == "#" {
-                var end = index + 1
-                while end < characters.count, characters[end] != "\n" { end += 1 }
-                emit(.comment, from: index, to: end)
-                index = end
-                continue
-            }
-            if family == .shell, character == "#" {
-                var end = index + 1
-                while end < characters.count, characters[end] != "\n" { end += 1 }
-                emit(.comment, from: index, to: end)
-                index = end
-                continue
-            }
-            if family == .ini, character == ";" || character == "#" {
-                var end = index + 1
-                while end < characters.count, characters[end] != "\n" { end += 1 }
-                emit(.comment, from: index, to: end)
-                index = end
-                continue
-            }
-            if family == .yaml, character == ";" || character == "#" {
-                var end = index + 1
-                while end < characters.count, characters[end] != "\n" { end += 1 }
-                emit(.comment, from: index, to: end)
-                index = end
-                continue
-            }
-
-            // Strings.
-            if character == "\"" || character == "'" || (family == .shell && character == "\"") {
-                let quote = character
-                var end = index + 1
-                while end < characters.count {
-                    if characters[end] == "\\" {
-                        end += 2
-                        continue
-                    }
-                    if characters[end] == quote {
-                        end += 1
-                        break
-                    }
-                    end += 1
-                }
-                emit(.string, from: index, to: min(end, characters.count))
-                index = min(end, characters.count)
-                continue
-            }
-            if family == .hash && character == "`" {
-                var end = index + 1
-                while end < characters.count, characters[end] != "`" { end += 1 }
-                end = min(end + 1, characters.count)
-                emit(.string, from: index, to: end)
-                index = end
-                continue
-            }
-
-            // Markup tags and attributes.
-            if family == .markup, character == "<" {
-                var end = index + 1
-                while end < characters.count, characters[end] != ">" { end += 1 }
-                end = min(end + 1, characters.count)
-                let body = String(characters[(index + 1)..<max(end - 1, index + 1)])
-                if body.hasPrefix("/") || body.hasPrefix("!") {
-                    emit(.comment, from: index, to: end)
-                } else {
-                    let nameEnd =
-                        body.firstIndex(where: {
-                            $0 == " " || $0 == "\t" || $0 == "/"
-                                || $0 == "\n"
-                        }) ?? body.endIndex
-                    // A Character offset into `body`, not a UTF-16 one: the tag name
-                    // length lands back on the same index space the tokenizer uses.
-                    let nameLength = body.distance(from: body.startIndex, to: nameEnd)
-                    emit(.tag, from: index, to: index + 1 + nameLength)
-                    emit(.attribute, from: index + 1 + nameLength, to: end)
-                }
-                index = end
-                continue
-            }
-
-            // YAML keys.
-            if family == .yaml, character.isLetter || character == "_" {
-                let start = index
-                var end = index
-                while end < characters.count,
-                    characters[end].isLetter || characters[end].isNumber
-                        || characters[end] == "_" || characters[end] == "-"
-                {
-                    end += 1
-                }
-                // A key is followed by a colon.
-                if end < characters.count, characters[end] == ":" {
-                    emit(.attribute, from: start, to: end)
-                    index = end
-                    continue
-                }
-                index = end
-                continue
-            }
-
-            // Numbers.
-            if character.isNumber {
-                let start = index
-                var end = index
-                while end < characters.count,
-                    characters[end].isNumber || characters[end] == "." || characters[end] == "x"
-                        || characters[end] == "e" || characters[end] == "_"
-                {
-                    end += 1
-                }
-                emit(.number, from: start, to: end)
-                index = end
-                continue
-            }
-
-            // Identifiers.
-            if character.isLetter || character == "_" || character == "$" || character == "@" {
-                let start = index
-                var end = index
-                while end < characters.count,
-                    characters[end].isLetter || characters[end].isNumber
-                        || characters[end] == "_" || characters[end] == "$"
-                        || characters[end] == "@"
-                {
-                    end += 1
-                }
-                // A tokenizer must always advance. `@` passes the *start* test but
-                // was missing from the *continuation* set, so `end` stayed at `start`,
-                // `index = end` never moved, and any fenced block whose info string
-                // selected this family and contained a bare `@` hung the process.
-                if end == start { end = min(start + 1, characters.count) }
-                let word = String(characters[start..<end])
-                var lookahead = end
-                while lookahead < characters.count, characters[lookahead] == " " {
-                    lookahead += 1
-                }
-                if keywords.contains(word) {
-                    emit(.keyword, from: start, to: end)
-                } else if types.contains(word) {
-                    emit(.type, from: start, to: end)
-                } else if lookahead < characters.count, characters[lookahead] == "(" {
-                    emit(.function, from: start, to: end)
-                } else if word.first?.isUppercase == true {
-                    emit(.type, from: start, to: end)
-                }
-                index = end
-                continue
-            }
-
-            // Operators and punctuation.
-            if "+-*/%=<>!&|^~?:".contains(character) {
-                emit(.`operator`, from: index, to: index + 1)
-            } else if "()[]{},;.".contains(character) {
-                emit(.punctuation, from: index, to: index + 1)
-            }
-            index += 1
-        }
-        return tokens
-    }
-}
-
-extension String.Index {
-    /// Number of UTF-16 units between the string's start and this index.
+    /// Builds (once) and caches the grammar's language and highlight query.
     ///
-    /// Returns 0 for an index that does not belong to `string`, which every call
-    /// site reads as "no token here" rather than as a crash.
-    fileprivate func utf16Offset(in string: String) -> Int {
-        guard let offset = self.samePosition(in: string) else { return 0 }
-        return string.utf16.distance(
-            from: string.utf16.startIndex,
-            to: offset.samePosition(in: string.utf16)
-                ?? string.utf16.endIndex
+    /// Only `highlights.scm` is read: the packages also ship locals, injections,
+    /// folds and outline queries, none of which this editor uses, and loading
+    /// them all would let one unparseable file take a whole language down to
+    /// plain. A missing bundle or query is a packaging bug rather than user
+    /// error, so it is logged once and the language falls back.
+    private func highlighting(for grammar: Grammar) -> Highlighting? {
+        if let cached = highlighters[grammar] { return cached }
+        guard let language = Self.language(for: grammar),
+            let query = Self.highlightQuery(for: grammar, language: language)
+        else {
+            AppLogger.warn(
+                "tree-sitter grammar unavailable", category: "Editor",
+                fields: ["language": grammar.rawValue]
+            )
+            return nil
+        }
+        let highlighting = Highlighting(language: language, query: query)
+        highlighters[grammar] = highlighting
+        return highlighting
+    }
+
+    private static func language(for grammar: Grammar) -> Language? {
+        switch grammar {
+        case .swift: Language(tree_sitter_swift())
+        case .typescript: Language(tree_sitter_typescript())
+        case .tsx: Language(tree_sitter_tsx())
+        case .cLanguage: Language(tree_sitter_c())
+        case .cpp: Language(tree_sitter_cpp())
+        case .java: Language(tree_sitter_java())
+        case .go: Language(tree_sitter_go())
+        case .rust: Language(tree_sitter_rust())
+        case .html: Language(tree_sitter_html())
+        case .json: Language(tree_sitter_json())
+        case .bash: Language(tree_sitter_bash())
+        }
+    }
+
+    /// Loads the packaged `highlights.scm`.
+    ///
+    /// The queries sit either directly inside the bundle or under
+    /// `Contents/Resources`, depending on how the bundle was built, so both
+    /// layouts are tried.
+    private static func highlightQuery(for grammar: Grammar, language: Language) -> Query? {
+        guard let bundle = Bundle.main.url(forResource: grammar.bundleName, withExtension: "bundle")
+        else { return nil }
+        let direct = bundle.appendingPathComponent("queries", isDirectory: true)
+        let nested = bundle.appendingPathComponent(
+            "Contents/Resources/queries", isDirectory: true
         )
+        let directory = FileManager.default.fileExists(atPath: direct.path) ? direct : nested
+        return try? Query(
+            language: language, url: directory.appendingPathComponent("highlights.scm")
+        )
+    }
+
+    /// A parser is reusable across parses; one per grammar keeps the language
+    /// set once instead of on every block.
+    private func parser(for grammar: Grammar, highlighting: Highlighting) -> Parser? {
+        if let cached = parsers[grammar] { return cached }
+        let parser = Parser()
+        do {
+            try parser.setLanguage(highlighting.language)
+        } catch {
+            AppLogger.warn(
+                "tree-sitter rejected the language", category: "Editor",
+                fields: ["language": grammar.rawValue]
+            )
+            return nil
+        }
+        parsers[grammar] = parser
+        return parser
     }
 }

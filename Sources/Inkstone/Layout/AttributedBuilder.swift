@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftTreeSitter
 
 /// Compiles a `MarkdownDocument` into an attributed string the editor can display.
 ///
@@ -19,6 +20,7 @@ import Foundation
 /// Block markers (`#`, `- `, `|`, fences) and inline markers (`**`, `[`, `` ` ``)
 /// are emitted with `md.hidden = true`; `MarkerHider` turns that into zero
 /// advance, which reproduces the original's clean reading surface.
+@MainActor
 struct AttributedBuilder {
     private let theme: EditorTheme
     private let context: LayoutContext
@@ -74,6 +76,10 @@ struct AttributedBuilder {
     }
 
     /// Mutable state threaded through the recursion.
+    ///
+    /// Isolated like the builder itself: it calls into the tree-sitter
+    /// highlighter, which caches parsers and is therefore main-actor only.
+    @MainActor
     private final class BuildState {
         let theme: EditorTheme
         let context: LayoutContext
@@ -486,12 +492,25 @@ struct AttributedBuilder {
             let body = BlockStyle.codeFence(theme: theme)
             let collapsed = BlockStyle.collapsed(from: body, theme: theme)
             register(body.decoration, for: block.id)
+
+            func isFenceLine(_ line: Substring) -> Bool {
+                let text = String(line)
+                return Fence.opening(in: text, baseIndent: 0) != nil
+                    || Fence.closing(text, for: block.opening) != nil
+            }
+
+            // The body is parsed once, so a construct that spans lines colours
+            // across all of them; the ranges come back relative to `bodyText`
+            // and are clipped to each line as it is emitted.
+            let bodyText = lines.filter { !isFenceLine($0) }.joined(separator: "\n")
+            let highlights = CodeHighlighter.shared.highlights(
+                in: bodyText, language: block.attributes.language
+            )
+            var highlightCursor = 0
+            var bodyOffset = 0
             for (index, line) in lines.enumerated() {
                 if index > 0 { result.append(NSMutableAttributedString(string: "\n")) }
-                let isFenceLine =
-                    Fence.opening(in: String(line), baseIndent: 0) != nil
-                    || Fence.closing(String(line), for: block.opening) != nil
-                if isFenceLine {
+                if isFenceLine(line) {
                     appendHiddenRun(
                         String(line), role: .fenceDelimiter, into: result,
                         style: collapsed, block: block, depth: depth
@@ -499,18 +518,52 @@ struct AttributedBuilder {
                 } else {
                     let start = result.length
                     emitPlain(String(line), into: result, style: body, block: block, depth: depth)
-                    if block.attributes.language.isEmpty {
-                        result.addAttribute(
-                            .foregroundColor, value: theme.syntax.plain.nsColor,
-                            range: NSRange(location: start, length: result.length - start)
+                    let lineRange = NSRange(location: start, length: result.length - start)
+                    // The plain colour goes down first; token colours override it.
+                    result.addAttribute(
+                        .foregroundColor, value: theme.syntax.plain.nsColor, range: lineRange
+                    )
+                    applyHighlights(
+                        highlights, from: &highlightCursor,
+                        line: NSRange(location: bodyOffset, length: line.utf16.count),
+                        shift: start - bodyOffset, into: result
+                    )
+                    bodyOffset += line.utf16.count + 1
+                }
+            }
+        }
+
+        /// Applies every highlight range that overlaps `line`.
+        ///
+        /// `ranges` are body-relative and sorted by location; `cursor` only
+        /// moves forward because lines are emitted in order. A range that spills
+        /// into the next line stays at the cursor for it.
+        private func applyHighlights(
+            _ ranges: [NamedRange], from cursor: inout Int, line: NSRange,
+            shift: Int, into result: NSMutableAttributedString
+        ) {
+            var index = cursor
+            while index < ranges.count, ranges[index].range.location < NSMaxRange(line) {
+                let range = ranges[index].range
+                if NSMaxRange(range) > line.location {
+                    let clipped = NSIntersectionRange(range, line)
+                    if clipped.length > 0,
+                        let color = CodeHighlighter.shared.color(
+                            for: ranges[index].name, palette: theme.syntax
                         )
-                    } else {
-                        CodeHighlighter.shared.apply(
-                            to: result, text: String(line), language: block.attributes.language,
-                            palette: theme.syntax, offset: start
+                    {
+                        result.addAttribute(
+                            .foregroundColor, value: color.nsColor,
+                            range: NSRange(
+                                location: clipped.location + shift, length: clipped.length
+                            )
                         )
                     }
                 }
+                index += 1
+            }
+            while cursor < index, NSMaxRange(ranges[cursor].range) <= NSMaxRange(line) {
+                cursor += 1
             }
         }
 
