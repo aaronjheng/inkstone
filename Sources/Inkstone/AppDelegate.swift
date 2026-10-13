@@ -262,6 +262,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         store.newWindow()
     }
 
+    @objc func showPreviousTab(_ sender: Any?) {
+        store.focusedHost?.selectPreviousTab()
+    }
+
+    @objc func showNextTab(_ sender: Any?) {
+        store.focusedHost?.selectNextTab()
+    }
+
+    @objc func showTab(_ sender: Any?) {
+        guard let number = (sender as? NSMenuItem)?.representedObject as? Int else { return }
+        store.focusedHost?.selectTabNumber(number)
+    }
+
     @objc func openDocument(_ sender: Any?) {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true

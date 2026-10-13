@@ -350,6 +350,27 @@ enum MenuBuilder {
         )
         menu.addItem(.separator())
         menu.addItem(
+            withTitle: "Show Previous Tab",
+            action: #selector(AppDelegate.showPreviousTab(_:)),
+            keyEquivalent: "["
+        ).keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(
+            withTitle: "Show Next Tab",
+            action: #selector(AppDelegate.showNextTab(_:)),
+            keyEquivalent: "]"
+        ).keyEquivalentModifierMask = [.command, .shift]
+        menu.addItem(.separator())
+        for number in 1...9 {
+            let tabItem = menu.addItem(
+                withTitle: "Show Tab \(number)",
+                action: #selector(AppDelegate.showTab(_:)),
+                keyEquivalent: "\(number)"
+            )
+            tabItem.keyEquivalentModifierMask = [.command]
+            tabItem.representedObject = number
+        }
+        menu.addItem(.separator())
+        menu.addItem(
             withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""
         )
         item.submenu = menu

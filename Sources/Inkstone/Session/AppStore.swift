@@ -116,6 +116,14 @@ final class AppStore {
         host.onNewTab = { [weak self, weak host] in
             self?.newDocument(in: host)
         }
+        host.onMoveToNewWindow = { [weak self, weak host] index in
+            guard let self, let host else { return }
+            self.moveTabToNewWindow(from: host, at: index, followCursor: false)
+        }
+        host.onTearOff = { [weak self, weak host] index in
+            guard let self, let host else { return }
+            self.moveTabToNewWindow(from: host, at: index, followCursor: true)
+        }
         host.showHiddenFiles = self.settings.editorView.showHiddenFiles
         // A window built with a (0, 0) content rect lands wherever AppKit's
         // cascade happens to leave it, which can push the sidebar off-screen.
@@ -212,9 +220,11 @@ final class AppStore {
 
     /// Closes a document's tab, and its window when that was the last tab.
     func close(_ document: DocumentWindowController) {
-        guard let host = hosts.first(where: { host in
-            host.documents.contains { $0 === document }
-        }) else { return }
+        guard
+            let host = hosts.first(where: { host in
+                host.documents.contains { $0 === document }
+            })
+        else { return }
         host.removeDocument(document)
         if host.documents.isEmpty {
             host.close()
@@ -225,6 +235,38 @@ final class AppStore {
     func closeFocusedDocument() {
         guard let host = focusedHost else { return }
         host.closeSelectedTab()
+    }
+
+    /// Sends one tab to a fresh window: the context menu's Move to New Window
+    /// and the drag-tear path. Follow-cursor puts the new window where the
+    /// pointer let go; otherwise it cascades like any other window.
+    private func moveTabToNewWindow(
+        from host: EditorWindowController, at index: Int, followCursor: Bool
+    ) {
+        guard let document = host.detachTab(at: index) else { return }
+        let destination = newHost()
+        destination.window?.makeKeyAndOrderFront(nil)
+        destination.attachTab(document)
+        if followCursor {
+            positionAtCursor(destination.window)
+        }
+        if host.documents.isEmpty {
+            host.close()
+        }
+        onWindowsChange?()
+    }
+
+    /// Top-left of the new window at the cursor, clamped to that screen.
+    private func positionAtCursor(_ window: NSWindow?) {
+        guard let window else { return }
+        let cursor = NSEvent.mouseLocation
+        let screen =
+            NSScreen.screens.first { NSMouseInRect(cursor, $0.frame, false) } ?? NSScreen.main
+        guard let screen else { return }
+        var origin = NSPoint(x: cursor.x, y: cursor.y - window.frame.height)
+        origin.x = min(max(origin.x, screen.frame.minX), screen.frame.maxX - window.frame.width)
+        origin.y = min(max(origin.y, screen.frame.minY), screen.frame.maxY - window.frame.height)
+        window.setFrameOrigin(origin)
     }
 
     private func remove(_ host: EditorWindowController?) {
