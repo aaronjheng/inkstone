@@ -15,8 +15,10 @@ final class ContentRootView: NSView {
     private let filesDivider = PanelDivider()
     /// The document name, drawn centred in the title strip like the original's.
     private let titleLabel = NSTextField(labelWithString: "")
-    /// Live sidebar width, moved by dragging the divider it owns.
-    private var filesWidth: CGFloat = ContentRootView.preferredWidth
+    /// Live sidebar width, moved by dragging the divider it owns. Persisted at
+    /// drag end, so a relaunch (or a new window) starts where the last drag left
+    /// off.
+    private var filesWidth: CGFloat = ContentRootView.restoredSidebarWidth
     /// The strip only earns its 36pt once there are two tabs to switch between.
     private var isTabStripVisible = false
 
@@ -38,6 +40,10 @@ final class ContentRootView: NSView {
                 max(Self.minimumPanelWidth, self.bounds.width - Self.editorFloor - Self.dividerWidth)
             )
             self.needsLayout = true
+        }
+        filesDivider.onDragEnd = { [weak self] in
+            guard let self else { return }
+            Self.persist(sidebarWidth: self.filesWidth)
         }
         addSubview(files)
         addSubview(filesDivider)
@@ -125,4 +131,16 @@ final class ContentRootView: NSView {
     /// The grab area: a one-point target is a coin toss with a trackpad, so the
     /// view is wider than the hairline it draws.
     private static let dividerWidth: CGFloat = 5
+
+    /// Sidebar width persistence, keyed like `recentFiles` / `recentFolders`.
+    private static let sidebarWidthKey = "sidebarWidth"
+    /// The saved width, floored at the panel minimum; the 220pt default wins
+    /// when nothing was saved yet (or the value predates this persistence).
+    private static var restoredSidebarWidth: CGFloat {
+        let stored = UserDefaults.standard.double(forKey: sidebarWidthKey)
+        return stored >= minimumPanelWidth ? CGFloat(stored) : preferredWidth
+    }
+    private static func persist(sidebarWidth width: CGFloat) {
+        UserDefaults.standard.set(Double(width), forKey: sidebarWidthKey)
+    }
 }

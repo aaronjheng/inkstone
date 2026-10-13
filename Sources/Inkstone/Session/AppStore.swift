@@ -125,15 +125,19 @@ final class AppStore {
             self.moveTabToNewWindow(from: host, at: index, followCursor: true)
         }
         host.showHiddenFiles = self.settings.editorView.showHiddenFiles
-        // A window built with a (0, 0) content rect lands wherever AppKit's
-        // cascade happens to leave it, which can push the sidebar off-screen.
-        // Centre the first window and step the rest down-right, TextEdit-style.
+        // Adopt the frame the user left behind: the first window of a session
+        // reopens at the last saved size and position, and further windows keep
+        // that size but cascade from the previous one, TextEdit-style. Nothing
+        // saved yet (fresh install) falls back to centre-and-cascade.
         if let window = host.window {
+            let restored = window.setFrameUsingName(
+                EditorWindowController.windowFrameAutosaveName
+            )
             if let previous = hosts.last?.window, previous.isVisible {
                 window.setFrameTopLeftPoint(
                     NSPoint(x: previous.frame.minX + 24, y: previous.frame.maxY - 24)
                 )
-            } else {
+            } else if !restored {
                 window.center()
             }
         }

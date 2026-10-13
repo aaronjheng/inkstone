@@ -35,6 +35,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
 
     private(set) var documents: [DocumentWindowController] = []
 
+    /// The frame autosave key shared by every window: AppKit saves the frame
+    /// under "NSWindow Frame EditorWindowFrame" on move, resize and close.
+    static let windowFrameAutosaveName = "EditorWindowFrame"
+
     /// Routed upward: opening a file is a session decision (focus an existing
     /// tab elsewhere, reuse the scratch tab, add a tab).
     var onSelectFile: ((URL) -> Void)?
@@ -58,7 +62,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         self.environment = environment
         self.pinnedRoot = pinnedRoot
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -78,6 +82,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         // Never merged into a native tab group: the sidebar must stay put.
         window.tabbingMode = .disallowed
         window.minSize = NSSize(width: 520, height: 380)
+        // Frames persist across launches; AppStore decides when a new window
+        // adopts the saved one (first window restores it, later ones cascade).
+        window.setFrameAutosaveName(Self.windowFrameAutosaveName)
         super.init(window: window)
         self.tabStripHost = tabStripHost
         window.delegate = self

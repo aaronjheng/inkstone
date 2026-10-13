@@ -9,8 +9,10 @@ final class DocumentContentView: NSView {
     private let editor: NSView
     private let outline: NSView
     private let outlineDivider = PanelDivider()
-    /// Live outline width, moved by dragging the divider it owns.
-    private var outlineWidth: CGFloat = DocumentContentView.preferredWidth
+    /// Live outline width, moved by dragging the divider it owns. Persisted at
+    /// drag end and shared by every open tab: one drag re-widths them all, so a
+    /// tab switch never shows a different outline than the one just dragged.
+    private var outlineWidth: CGFloat = DocumentContentView.restoredOutlineWidth
 
     init(editor: NSView, outline: NSView) {
         self.editor = editor
@@ -28,6 +30,16 @@ final class DocumentContentView: NSView {
             )
             self.needsLayout = true
         }
+        outlineDivider.onDragEnd = { [weak self] in
+            guard let self else { return }
+            Self.persist(outlineWidth: self.outlineWidth)
+        }
+        // Hidden tabs keep tracking too, so showing the outline lands on the
+        // shared width, not on whatever this tab was when it was last visible.
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(outlineWidthDidChange(_:)),
+            name: Self.outlineWidthDidChange, object: nil
+        )
         addSubview(editor)
         addSubview(outlineDivider)
         addSubview(outline)
@@ -50,6 +62,14 @@ final class DocumentContentView: NSView {
         outlineDivider.panelBackground = theme.background.nsColor
         outlineDivider.panelEdge = .maxX
         outlineDivider.needsDisplay = true
+    }
+
+    /// Another tab dragged its outline divider: adopt the shared width. The
+    /// dragging tab also lands here and re-reads the value it just wrote - a
+    /// no-op that keeps every view on the same single source of truth.
+    @objc private func outlineWidthDidChange(_ note: Notification) {
+        outlineWidth = Self.restoredOutlineWidth
+        needsLayout = true
     }
 
     override func layout() {
@@ -88,6 +108,22 @@ final class DocumentContentView: NSView {
     /// The grab area: a one-point target is a coin toss with a trackpad, so the
     /// view is wider than the hairline it draws.
     private static let dividerWidth: CGFloat = 5
+
+    /// Outline width persistence, keyed like `recentFiles` / `recentFolders`.
+    private static let outlineWidthKey = "outlineWidth"
+    private static let outlineWidthDidChange = Notification.Name("outlineWidthDidChange")
+    /// The saved width, floored at the panel minimum; the 220pt default wins
+    /// when nothing was saved yet (or the value predates this persistence).
+    private static var restoredOutlineWidth: CGFloat {
+        let stored = UserDefaults.standard.double(forKey: outlineWidthKey)
+        return stored >= minimumPanelWidth ? CGFloat(stored) : preferredWidth
+    }
+    /// Writes the shared width, then re-widths every open tab through the
+    /// notification the views observe.
+    private static func persist(outlineWidth width: CGFloat) {
+        UserDefaults.standard.set(Double(width), forKey: outlineWidthKey)
+        NotificationCenter.default.post(name: outlineWidthDidChange, object: nil)
+    }
 }
 
 /// The hairline between a panel and the editor.
@@ -97,24 +133,38 @@ final class DocumentContentView: NSView {
 final class PanelDivider: NSView {
     /// The drag distance since the previous event, in points (mouse x).
     var onDrag: ((CGFloat) -> Void)?
+    /// Fired once at mouse-up after an actual drag, so owners can persist the
+    /// final width instead of writing on every mouse-move tick.
+    var onDragEnd: (() -> Void)?
     /// The panel's own background, painted over the grab area's panel-side half
     /// so the unpainted band beside the hairline matches the panel, not the window.
     var panelBackground: NSColor?
     /// Which half of the grab strip belongs to the panel.
     var panelEdge: NSRectEdge = .minX
     private var lastLocation: CGFloat?
+    /// Distinguishes a real drag from a click that merely lands on the divider.
+    private var didDrag = false
 
     override var mouseDownCanMoveWindow: Bool { false }
 
     override func mouseDown(with event: NSEvent) {
         lastLocation = event.locationInWindow.x
+        didDrag = false
     }
 
     override func mouseDragged(with event: NSEvent) {
         guard let last = lastLocation else { return }
         let location = event.locationInWindow.x
         lastLocation = location
+        didDrag = true
         onDrag?(location - last)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        lastLocation = nil
+        guard didDrag else { return }
+        didDrag = false
+        onDragEnd?()
     }
 
     override func draw(_ dirtyRect: NSRect) {
