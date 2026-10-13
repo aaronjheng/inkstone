@@ -104,9 +104,6 @@ private struct Outline: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            header
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityLabel("Outline Header")
             if model.entries.isEmpty {
                 Text("No headings")
                     .font(.system(size: 13))
@@ -136,19 +133,10 @@ private struct Outline: View {
         .background(model.background)
     }
 
-    /// Header pinned to the top, word count pinned to the bottom: a SwiftUI
-    /// root view without a `Spacer` gets centred in its hosting view, which
-    /// left the whole panel floating in a void of background.
-    private var header: some View {
-        Text("Outline")
-            .font(.system(size: 16, weight: .medium))
-            .foregroundStyle(model.secondary)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .padding(.horizontal, 20)
-            .padding(.top, 10)
-            .padding(.bottom, 8)
-    }
-
+    /// Word count pinned to the bottom: a SwiftUI root view without an
+    /// expanding child (the `Spacer` above when empty, the `ScrollView` when
+    /// not) gets centred in its hosting view, which left the whole panel
+    /// floating in a void of background.
     private var footer: some View {
         HStack(spacing: 4) {
             Text("\(model.words) words")
