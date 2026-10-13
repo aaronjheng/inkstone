@@ -60,7 +60,12 @@ enum MenuBuilder {
         menu.addItem(
             withTitle: "Quit \(applicationName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"
         )
+        // The title must be set explicitly: `NSMenuItem()` defaults to
+        // "NSMenuItem" and assigning a submenu never syncs it. The bar itself
+        // displays the submenu's title and looks fine, but every `title ==`
+        // menu lookup in AppDelegate silently failed on the mismatch.
         item.submenu = menu
+        item.title = menu.title
         return item
     }
 
@@ -131,6 +136,7 @@ enum MenuBuilder {
         ).target = responder
         menu.addItem(.separator())
         item.submenu = menu
+        item.title = menu.title
         return item
     }
 
@@ -182,6 +188,7 @@ enum MenuBuilder {
             withTitle: "Toggle Source Mode", action: #selector(AppDelegate.toggleSourceMode(_:)), keyEquivalent: "."
         ).target = responder
         item.submenu = menu
+        item.title = menu.title
         return item
     }
 
@@ -242,6 +249,7 @@ enum MenuBuilder {
         entry("Table of Contents", .tableOfContents, "")
         entry("YAML Front Matter", .frontMatter, "")
         item.submenu = menu
+        item.title = menu.title
         return item
     }
 
@@ -314,6 +322,7 @@ enum MenuBuilder {
         // to NSMenuDelegate for exactly this).
         menu.delegate = responder
         item.submenu = menu
+        item.title = menu.title
         return item
     }
 
@@ -340,6 +349,7 @@ enum MenuBuilder {
         useThemeSize.state = store.settings.settings.useCustomFontSize ? .off : .on
         menu.delegate = NSApp.delegate as? AppDelegate
         item.submenu = menu
+        item.title = menu.title
         return item
     }
 
@@ -381,6 +391,7 @@ enum MenuBuilder {
             withTitle: "Bring All to Front", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: ""
         )
         item.submenu = menu
+        item.title = menu.title
         NSApp.windowsMenu = menu
         return item
     }
@@ -393,6 +404,7 @@ enum MenuBuilder {
             withTitle: "Markdown Reference", action: #selector(NSApplication.showHelp(_:)), keyEquivalent: ""
         )
         item.submenu = menu
+        item.title = menu.title
         NSApp.helpMenu = menu
         return item
     }

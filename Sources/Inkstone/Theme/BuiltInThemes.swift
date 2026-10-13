@@ -161,7 +161,11 @@ enum BuiltInTheme {
         identifier: "night",
         displayName: "Night",
         background: DynamicColor(0x363B40, 0x363B40),
-        sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
+        // Night forces a dark surface in both appearances, so its sidebar can't
+        // ride the generic chrome pair: the light-side F9F9F9 would sit beside
+        // the dark editor under a light system appearance. It shares the
+        // theme's own background instead.
+        sidebarBackground: DynamicColor(0x363B40, 0x363B40),
         text: DynamicColor(0xCCCCCC, 0xCCCCCC),
         link: DynamicColor(0x4B9FD5, 0x6CB6FF),
         selection: DynamicColor(0x4A5560, 0x4A5560),

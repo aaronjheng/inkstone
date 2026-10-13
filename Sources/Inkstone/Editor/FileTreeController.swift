@@ -219,43 +219,31 @@ final class FileTreeModel {
             return NSColor.secondaryLabelColor.withAlphaComponent(isDark ? 0.15 : 0.12)
         }))
 
+    /// Theme tokens for the tree. `DynamicColor` is already appearance-dynamic,
+    /// so a system-appearance switch still needs no re-render; only the
+    /// alpha-washed hover and guide need an explicit light/dark branch.
+    ///
+    /// This used to resolve everything from the fixed system palette, which left
+    /// the Files panel unthemed no matter which theme was active.
     func apply(theme: EditorTheme) {
-        accent = Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxKey
-                    : ThemePalette.systemLight.syntaxKey
-            }))
-        foreground = Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? NSColor.labelColor
-                    : NSColor.labelColor
-            }))
-        secondary = Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxBool
-                    : ThemePalette.systemLight.syntaxBool
-            }))
-        background = Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.sidebarBackground
-                    : ThemePalette.systemLight.sidebarBackground
-            }))
-        sidebarBackground = Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.sidebarBackground
-                    : ThemePalette.systemLight.sidebarBackground
-            }))
-        selectionBackground = Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.secondaryBackground.withAlphaComponent(0.25)
-                    : ThemePalette.systemLight.secondaryBackground.withAlphaComponent(0.30)
-            }))
+        accent = Color(nsColor: theme.link.nsColor)
+        foreground = Color(nsColor: theme.text.nsColor)
+        secondary = Color(nsColor: theme.syntax.comment.nsColor)
+        background = Color(nsColor: theme.sidebarBackground.nsColor)
+        sidebarBackground = Color(nsColor: theme.sidebarBackground.nsColor)
+        selectionBackground = Color(nsColor: theme.selection.nsColor)
+        hover = Color(
+            nsColor: NSColor(name: nil) { appearance in
+                let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                let text = isDark ? theme.text.dark : theme.text.light
+                return text.withAlphaComponent(isDark ? 0.08 : 0.06)
+            })
+        guide = Color(
+            nsColor: NSColor(name: nil) { appearance in
+                let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                let comment = isDark ? theme.syntax.comment.dark : theme.syntax.comment.light
+                return comment.withAlphaComponent(isDark ? 0.15 : 0.12)
+            })
     }
 
     func replace(entries: [Entry], rootPath: String?, rootName: String, error: String?) {
