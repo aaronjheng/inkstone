@@ -92,7 +92,14 @@ public enum HTMLWriter {
         case .linkDefinition:
             return ""
         case .footnoteDefinition:
-            return "\(pad)<section class=\"footnotes\">\n\(nested(block, depth: depth))\(pad)</section>\n"
+            // The parser stores the definition's body in `definitionTitle` and
+            // fills neither `inlines` nor `children`, so the old path emitted an
+            // empty section and the footnote text vanished from the export.
+            let label = block.attributes.definitionLabel
+            let body = block.attributes.definitionTitle ?? ""
+            return "\(pad)<section class=\"footnotes\">\n"
+                + "\(pad)  <div id=\"fn-\(escape(label))\">\(escape(body))</div>\n"
+                + "\(pad)</section>\n"
         case .emptyLine:
             return ""
         }
@@ -122,54 +129,21 @@ public enum HTMLWriter {
         return out + "\(pad)  </tbody>\n\(pad)</table>\n"
     }
 
-    /// Every row of a pipe table, cells split on unescaped pipes.
+    /// Every row of a pipe table, cells split by the same recognizer the parser
+    /// and the painted grid use.
     ///
-    /// The parser keeps a table as one block with its source intact, so the rows are
-    /// recovered here rather than read off the tree - the same split the layout pass
-    /// does, and deliberately the same rule: a pipe preceded by a backslash is content.
+    /// This used to be a private re-implementation with its own delimiter rule
+    /// (three dashes minimum, where the parser accepts one), so a valid GFM table
+    /// like `|-|-|` rendered in the editor and silently vanished from the export.
     private static func tableRows(of block: BlockNode) -> [[String]] {
         var lines = block.source.split(separator: "\n", omittingEmptySubsequences: false)
             .map(String.init)
         if lines.last?.isEmpty == true { lines.removeLast() }
-        guard lines.count > 1, isDelimiterRow(lines[1]) else { return [] }
+        guard lines.count > 1, TableRecognizer.isDelimiterRow(lines[1]) else {
+            return []
+        }
         lines.remove(at: 1)
-        return lines.map(splitRow)
-    }
-
-    private static func isDelimiterRow(_ line: String) -> Bool {
-        let cells = splitRow(line)
-        guard !cells.isEmpty else { return false }
-        return cells.allSatisfy { cell in
-            let body = cell.filter { $0 != ":" }
-            return body.count >= 3 && body.allSatisfy { $0 == "-" }
-        }
-    }
-
-    private static func splitRow(_ row: String) -> [String] {
-        let characters = Array(row)
-        var cells: [String] = []
-        var current = ""
-        var index = 0
-        while index < characters.count {
-            let character = characters[index]
-            if character == "\\", index + 1 < characters.count {
-                current.append(characters[index + 1])
-                index += 2
-                continue
-            }
-            if character == "|" {
-                cells.append(current)
-                current = ""
-            } else {
-                current.append(character)
-            }
-            index += 1
-        }
-        cells.append(current)
-        // The leading and trailing pipes produce empty cells at both ends.
-        if cells.first?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeFirst() }
-        if cells.last?.trimmingCharacters(in: .whitespaces).isEmpty == true { cells.removeLast() }
-        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+        return lines.map { TableRecognizer.split($0) }
     }
 
     // MARK: - Inlines
@@ -178,12 +152,16 @@ public enum HTMLWriter {
         inlines.map { node in
             let children = html(inlines: node.children)
             switch node.kind {
-            case .text, .softBreak, .escape:
+            case .text, .softBreak:
                 return escape(node.verbatim)
             case .hardBreak:
                 return "<br>\n"
             case .entity:
-                return node.verbatim
+                return node.payload.isEmpty ? escape(node.verbatim) : escape(node.payload)
+            case .escape:
+                // The escape's whole point is the literal character behind the
+                // backslash; exporting the backslash undid it.
+                return escape(node.payload.isEmpty ? node.verbatim : node.payload)
             case .strong:
                 return wrap("strong", children.isEmpty ? escape(node.payload) : children)
             case .em:
@@ -213,8 +191,12 @@ public enum HTMLWriter {
                 return "<a href=\"\(escape(node.payload))\">\(escape(node.payload))</a>"
             case .image, .refImage:
                 let source = node.attributes.destination ?? node.payload
-                let alt = node.attributes.title ?? ""
-                return "<img src=\"\(escape(source))\" alt=\"\(escape(alt))\">"
+                // The alt text lives in `name` (the lexer stores the optional link
+                // title separately); the old code exported the title as alt and
+                // dropped both the real alt text and the title.
+                let alt = node.attributes.name ?? node.payload
+                let title = node.attributes.title.map { " title=\"\(escape($0))\"" } ?? ""
+                return "<img src=\"\(escape(source))\" alt=\"\(escape(alt))\"\(title)>"
             case .footnoteRef:
                 let reference = node.attributes.reference ?? ""
                 return "<sup id=\"fnref-\(escape(reference))\">"

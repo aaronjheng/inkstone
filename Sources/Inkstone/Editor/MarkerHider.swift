@@ -29,9 +29,6 @@ import Foundation
 /// keeps this delegate stateless. A mutable `hiddenRanges` set here would drift
 /// out of sync with the cache and silently stop working.
 final class MarkerHider: NSObject, NSLayoutManagerDelegate {
-    /// Ranges TextKit has asked about, for diagnostics in the self-check.
-    private(set) var lastGlyphRange: NSRange = NSRange(location: 0, length: 0)
-
     func layoutManager(
         _ layoutManager: NSLayoutManager,
         shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
@@ -40,7 +37,6 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
         font aFont: NSFont,
         forGlyphRange glyphRange: NSRange
     ) -> Int {
-        lastGlyphRange = glyphRange
         guard glyphRange.length > 0 else { return 0 }
         guard let storage = layoutManager.textStorage, storage.length > 0 else { return 0 }
 
@@ -141,50 +137,6 @@ struct MarkerVisibility {
         }
         storage.endEditing()
         return changed
-    }
-
-    /// Hides every marker. Used when the editor loses focus or enters source mode.
-    @discardableResult
-    func hideAll() -> [NSRange] {
-        var changed: [NSRange] = []
-        storage.beginEditing()
-        for marker in layout.markers
-        where marker.range.length > 0
-            && marker.range.location < storage.length
-        {
-            // The length check is not optional: `apply(for:)` has the same one, and
-            // a stale layout against a shrunken storage throws here rather than
-            // trapping.
-            let current =
-                storage.attribute(
-                    MarkdownAttribute.hidden, at: marker.range.location, effectiveRange: nil
-                ) as? Bool
-            guard current != true else { continue }
-            let target = clamp(marker.range)
-            storage.addAttribute(MarkdownAttribute.hidden, value: true, range: target)
-            changed.append(target)
-        }
-        storage.endEditing()
-        return changed
-    }
-
-    /// Total width the visible markers would occupy if they were shown.
-    ///
-    /// Only meaningful for diagnostics: TextKit cannot report the advance of
-    /// characters it never generated, so this measures the font directly.
-    func visibleMarkerWidth(at location: Int, font: NSFont) -> CGFloat {
-        guard location >= 0, location < storage.length else { return 0 }
-        guard
-            storage.attribute(
-                MarkdownAttribute.hidden, at: location, effectiveRange: nil
-            ) as? Bool == false
-        else { return 0 }
-        let runLength = storage.length - location
-        let run = storage.attributedSubstring(from: NSRange(location: location, length: runLength))
-        let index = run.attribute(MarkdownAttribute.marker, at: 0, effectiveRange: nil) as? Int
-        guard let index else { return 0 }
-        let marker = layout.markers.first { $0.index == index }
-        return (marker.map { ($0.text as NSString).size(withAttributes: [.font: font]).width } ?? 0)
     }
 
     private func clamp(_ range: NSRange) -> NSRange {

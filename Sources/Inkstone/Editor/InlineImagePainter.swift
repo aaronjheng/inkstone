@@ -42,14 +42,14 @@ final class InlineImagePainter {
         return loaded
     }
 
-    /// How tall the image is at the given line, and whether it exists at all.
+    /// Display size for the layout pass, served from the same cache painting uses.
     ///
-    /// A missing image reports zero height so the alt text is laid out as a normal line
-    /// instead of leaving a gap where a picture was meant to be.
-    func height(of path: String, measureWidth: CGFloat) -> CGFloat {
-        guard let image = image(for: path) else { return 0 }
-        let size = fittedSize(of: image)
-        return min(size.height, measureWidth <= 0 ? size.height : measureWidth)
+    /// `AttributedBuilder` asks for this on every relayout - including every
+    /// resize tick - so it must not hit the disk again; `image(for:)` decodes
+    /// once and caches by path.
+    func displaySize(of path: String) -> CGSize {
+        guard let image = image(for: path) else { return .zero }
+        return fittedSize(of: image)
     }
 
     func fittedSize(of image: NSImage) -> CGSize {

@@ -28,24 +28,4 @@ enum ThemeAppearance: Int, CaseIterable {
         case .dark: NSAppearance(named: .darkAqua)
         }
     }
-
-    @MainActor
-    func applyToWindow(_ window: NSWindow) {
-        window.appearance = nsAppearance
-    }
-
-    /// Whether this appearance resolves to the light palette side.
-    var isLightSide: Bool {
-        switch self {
-        case .system:
-            NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .aqua
-        case .light: true
-        case .dark: false
-        }
-    }
-
-    /// The palette side matching the current appearance.
-    static var activePalette: ThemePalette {
-        ThemeAppearance.system.isLightSide ? ThemePalette.systemLight : ThemePalette.neutralDark
-    }
 }

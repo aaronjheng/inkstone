@@ -236,17 +236,66 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     private func closeOtherTabs(at index: Int) {
         guard documents.indices.contains(index) else { return }
         let keep = documents[index]
-        for document in documents where document !== keep {
+        let closing = documents.filter { $0 !== keep }
+        guard confirmClosing(closing) else { return }
+        for document in closing where documents.contains(where: { $0 === document }) {
             removeDocument(document)
         }
         select(document: keep)
     }
 
     private func closeAllTabs() {
+        guard confirmClosing(documents) else { return }
         while let document = documents.first {
             removeDocument(document)
         }
         close()
+    }
+
+    /// Asks once per closing batch what to do with unsaved work, exactly like
+    /// the terminate path. Closing a dirty tab silently used to discard the tab;
+    /// only the crash-recovery draft survived, which is not a substitute for a
+    /// prompt.
+    private func confirmClosing(_ closing: [DocumentWindowController]) -> Bool {
+        let dirty = closing.filter(\.hasUnsavedChanges)
+        guard !dirty.isEmpty else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText =
+            dirty.count == 1
+            ? "Save changes to “\(dirty[0].fileURL?.lastPathComponent ?? "Untitled")”?"
+            : "Save changes to \(dirty.count) documents?"
+        alert.informativeText = "Your changes will be lost if you don't save them."
+        alert.addButton(withTitle: "Save")
+        alert.addButton(withTitle: "Don't Save")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            for document in dirty {
+                do {
+                    if document.fileURL != nil {
+                        try document.save()
+                    } else {
+                        // Untitled documents need a path before they can be saved.
+                        guard window != nil else { return false }
+                        let panel = NSSavePanel()
+                        panel.allowedContentTypes = [.plainText, .markdown]
+                        panel.nameFieldStringValue = "Untitled.md"
+                        guard panel.runModal() == .OK, let url = panel.url else { return false }
+                        try document.saveAs(url)
+                    }
+                } catch {
+                    let failure = NSAlert(error: error)
+                    failure.runModal()
+                    return false
+                }
+            }
+            return true
+        case .alertSecondButtonReturn:
+            return true
+        default:
+            return false
+        }
     }
 
     /// Closes the selected tab, or the window when it was the last one.
@@ -261,6 +310,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
 
     private func closeTab(at index: Int) {
         guard documents.indices.contains(index) else { return }
+        guard confirmClosing([documents[index]]) else { return }
         removeDocument(documents[index])
         if documents.isEmpty {
             close()
@@ -417,8 +467,16 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         panel.nameFieldStringValue = "Untitled.md"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let url = panel.url, let self else { return }
-            if !FileManager.default.fileExists(atPath: url.path) {
-                try? Data().write(to: url)
+            do {
+                if !FileManager.default.fileExists(atPath: url.path) {
+                    try Data().write(to: url)
+                }
+            } catch {
+                // Opening a file that was never created fails silently one hop
+                // later; say why here instead.
+                let alert = NSAlert(error: error)
+                alert.runModal()
+                return
             }
             self.onSelectFile?(url)
             self.filesPanel.refresh()
@@ -468,7 +526,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     /// The tab under an event, in strip coordinates. Geometry mirrors
     /// `EditorTabStripLayout`: viewport minus strip inset, then track offset.
     private func tabID(at event: NSEvent) -> ObjectIdentifier? {
-        guard let host = tabStripHost, let window else { return nil }
+        guard let host = tabStripHost, window != nil else { return nil }
         let local = host.convert(event.locationInWindow, from: nil)
         guard host.bounds.contains(local) else { return nil }
         let trackWidth = EditorTabStripLayout.viewportWidth(containerWidth: host.bounds.width)
@@ -507,6 +565,12 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     }
 
     // MARK: - NSWindowDelegate
+
+    /// The window close button runs the same save-check as tab closes: the
+    /// window dies with one keystroke otherwise.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        confirmClosing(documents)
+    }
 
     func windowDidBecomeKey(_ notification: Notification) {
         onSelectionChange?()

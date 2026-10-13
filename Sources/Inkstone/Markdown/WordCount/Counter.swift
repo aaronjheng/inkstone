@@ -91,7 +91,7 @@ public enum Counter {
             : text.reduce(into: 1) { count, character in
                 if character == "\n" { count += 1 }
             }
-        let minutes = wordsPerMinute > 0 ? (total / wordsPerMinute) + 1 : 0
+        let minutes = wordsPerMinute > 0 ? (total + wordsPerMinute - 1) / wordsPerMinute : 0
 
         return Count(
             words: max(total, 0),

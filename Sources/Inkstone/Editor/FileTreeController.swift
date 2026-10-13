@@ -369,13 +369,39 @@ private struct FileTree: View {
         .background(model.sidebarBackground)
     }
 
-    /// The title sits centred above the tree, the way the original's sidebar
-    /// header does.
+    /// The title row: centred label with the "New File" action at the edge.
+    /// The button used to live in a `toolbar` view that no body composed, so the
+    /// affordance wired through `onCreateFile` never appeared on screen.
     private var header: some View {
-        Text("Files")
-            .font(.system(size: 12, weight: .semibold))
+        HStack(spacing: 8) {
+            Text("Files")
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(model.secondary)
+            Spacer(minLength: 0)
+            newFileButton
+        }
+        .padding(.leading, 16)
+        .padding(.trailing, 10)
+        .padding(.vertical, 4)
+    }
+
+    @ViewBuilder
+    private var newFileButton: some View {
+        if let onCreateFile {
+            Button {
+                onCreateFile()
+            } label: {
+                Image(systemName: "plus")
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
             .foregroundStyle(model.secondary)
-            .padding(.vertical, 6)
+            .help("New File")
+            .accessibilityLabel("New File")
+            .accessibilityHint("Creates a new Markdown file in the current folder")
+        }
     }
 
     private var folderRow: some View {
@@ -470,26 +496,4 @@ private struct FileTree: View {
 
     private let indentStep: CGFloat = 16
     private let chevronSlot: CGFloat = 11
-
-    /// A "New File" button that creates a file in the current folder.
-    private var toolbar: some View {
-        HStack {
-            Spacer(minLength: 0)
-            Button {
-                onCreateFile?()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .help("New File")
-            .accessibilityLabel("New File")
-            .accessibilityHint("Creates a new Markdown file in the current folder")
-        }
-        .padding(.top, 4)
-        .padding(.horizontal, 10)
-    }
-
 }

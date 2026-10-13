@@ -132,6 +132,13 @@ final class DocumentWindowController {
     /// refresh the tab label and title strip.
     var onContentChange: (() -> Void)?
 
+    /// Stable identity for the crash-recovery draft. An untitled document has no
+    /// path to hash, so it mints one UUID for its lifetime - the content-hash name
+    /// it used before changed with every edit, littering the drafts folder with a
+    /// new orphan file per autosave tick and never matching again after relaunch
+    /// (`hashValue` is seeded per process).
+    let documentID = UUID().uuidString
+
     init(
         theme: EditorTheme, markdown: String = SampleDocument.text, url: URL? = nil,
         environment: EditorEnvironment = .live
@@ -146,6 +153,7 @@ final class DocumentWindowController {
         documentContent.apply(theme: theme)
 
         parseOptions = environment.parseOptions
+        editor.parseOptions = parseOptions
         editor.load(markdown: markdown)
         editor.onTextChange = { [weak self] _ in
             self?.markDirty()
@@ -224,7 +232,7 @@ final class DocumentWindowController {
     func save() throws {
         guard let documentURL else { return }
         try editor.markdown.write(to: documentURL, atomically: true, encoding: .utf8)
-        onSaveCommitted?(documentURL)
+        onSaveCommitted?(documentURL, documentID)
         isDirty = false
         autosaveTimer?.invalidate()
         notifyHost()
@@ -232,9 +240,12 @@ final class DocumentWindowController {
 
     func saveAs(_ url: URL) throws {
         try editor.markdown.write(to: url, atomically: true, encoding: .utf8)
-        onSaveCommitted?(documentURL)
+        let previousURL = documentURL
         documentURL = url
-        onSaveCommitted?(url)
+        // Both identities stop being drafts: the old name (nil for a document that
+        // was never saved) and the new one.
+        onSaveCommitted?(previousURL, documentID)
+        onSaveCommitted?(url, documentID)
         isDirty = false
         autosaveTimer?.invalidate()
         notifyHost()
@@ -244,7 +255,7 @@ final class DocumentWindowController {
     var autosaveInterval: TimeInterval = 0
     /// Filled in by `AppStore`: `Editor/` may not reach into `Session/`.
     var onWriteDraft: ((DraftSnapshot) -> Void)?
-    var onSaveCommitted: ((URL?) -> Void)?
+    var onSaveCommitted: ((URL?, String?) -> Void)?
     /// Set once `AppStore` attaches autosave/draft wiring. Tabs are built on
     /// both the new-document and the file-open paths, so the store funnels
     /// both through one attach point instead of nil-checking the closures.
@@ -281,6 +292,7 @@ final class DocumentWindowController {
         onWriteDraft?(
             DraftSnapshot(
                 sourceURL: documentURL,
+                documentID: documentID,
                 title: documentURL?.lastPathComponent ?? "Untitled",
                 markdown: editor.markdown,
                 savedAt: Date()
@@ -295,7 +307,16 @@ final class DocumentWindowController {
     private func performAutosave() {
         guard isDirty else { return }
         if let documentURL {
-            try? editor.markdown.write(to: documentURL, atomically: true, encoding: .utf8)
+            do {
+                try editor.markdown.write(to: documentURL, atomically: true, encoding: .utf8)
+            } catch {
+                // The draft net still holds the content, but a failing autosave the
+                // user believes is happening must at least reach the log.
+                AppLogger.error(
+                    "Autosave failed for \(documentURL.lastPathComponent): \(error)",
+                    category: "File"
+                )
+            }
         }
         writeDraft()
     }
@@ -398,7 +419,13 @@ final class DocumentWindowController {
     /// Applies edits made in source mode: re-parse the document and reload the
     /// editor. Wholesale, because source mode is a deliberate mode rather than the
     /// typing path.
+    ///
+    /// A toggle with no edit in between is a no-op: materialising the source of an
+    /// unedited document reproduces the buffer byte for byte, and reloading it as
+    /// if it were new used to dirty a pristine document just for looking at it in
+    /// source mode.
     private func pushFromSource(_ markdown: String) {
+        guard markdown != editor.markdown else { return }
         editor.load(markdown: markdown)
         markDirty()
     }
@@ -463,6 +490,7 @@ final class DocumentWindowController {
     /// open tab follows the setting instead of waiting for a reopen.
     func applyParseOptions(_ options: BlockParser.Options) {
         parseOptions = options
+        editor.parseOptions = options
         editor.load(markdown: editor.markdown)
     }
 
@@ -527,30 +555,18 @@ struct EditorEnvironment {
     var parseOptions: BlockParser.Options = .standard
     var sidebarFolder: URL?
     var wordsPerMinute: Int = 382
-    var autosaveInterval: TimeInterval = 0
 
     /// Filled in by `AppStore`; the default keeps `DocumentWindowController`
     /// constructible on its own.
     @MainActor
     static var live: EditorEnvironment { EditorEnvironment() }
-
-    /// A document's unsaved content, handed up to the draft store.
-    ///
-    /// A value rather than the `Draft` type itself: `Editor/` must not name a `Session/`
-    /// type, and this is the whole contract between them.
-    func draftSnapshot(
-        sourceURL: URL?, title: String, markdown: String
-    ) -> DraftSnapshot {
-        DraftSnapshot(
-            sourceURL: sourceURL, title: title, markdown: markdown, savedAt: Date()
-        )
-    }
-
 }
 
 /// What a document tells the session layer about its unsaved content.
 struct DraftSnapshot {
     var sourceURL: URL?
+    /// Stable per-document identity; the draft key for a document with no file.
+    var documentID: String
     var title: String
     var markdown: String
     var savedAt: Date

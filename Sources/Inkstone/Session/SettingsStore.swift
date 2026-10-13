@@ -30,32 +30,27 @@ enum LaunchOption: String, Codable, CaseIterable, Sendable {
 /// mechanical; the authoritative list of what is and is not implemented is
 /// `Docs/option-inventory.md`.
 ///
-/// Kept free of AppKit types so it can be exercised from the self-check.
+/// Every field is decoded with `decodeIfPresent` and a default: the synthesized
+/// decoder required every key to be present, so the first release that added a
+/// preference made every existing `settings.json` undecodable and silently reset
+/// the theme, launch option and autosave to factory defaults.
 struct EditorSettings: Codable, Equatable, Sendable {
     // Appearance
     var themeIdentifier = "github"
     var useCustomFontSize = false
     var customFontSize: Double = 16
-    var alwaysShowWordCount = true
     var wordsPerMinute = 382
     /// Folder shown in the sidebar's Files column; `nil` means "the document's
     /// own folder".
     var sidebarFolderPath: String?
-    var showStatusBar = true
-    var showToolbar = false
 
     // Editor
     var autoPairBrackets = true
     var autoPairMarkdownSyntax = true
     var emojiAutocomplete = true
-    var autoExpandBlockOnFocus = false
-    var copyMarkdownByDefault = true
-    var lineWiseCopyCut = false
     var keepCaretInMiddle = false
     var indentSize = 2
     var codeIndentSize = 4
-    var prettyIndent = false
-    var shiftTabAutoIndent = false
     var spellCheckEnabled = true
     /// Seconds between autosaves; `0` disables it, which is the original's default.
     var autoSaveInterval: Double = 0
@@ -63,9 +58,6 @@ struct EditorSettings: Codable, Equatable, Sendable {
 
     // Markdown
     var strictMarkdown = false
-    var headingStyle = 0  // 0 = setext-and-atx, 1 = atx only, 3 = setext only
-    var ulStyle = 0  // 0 = "-", 1 = "*", 2 = "+"
-    var olStyle = 0  // 0 = "1.", 1 = "1)"
     var enableInlineMath = true
     var enableSubscript = false
     var enableSuperscript = false
@@ -74,25 +66,12 @@ struct EditorSettings: Codable, Equatable, Sendable {
     var enableStrike = true
     var noAutoLink = false
     var smartQuotes = false
-    var smartDashes = false
-    var remapUnicodePunctuation = false
-    var twoHyphensToEm = false
     var ignoreLineBreak = false
-    var hideBrAndLineBreak = false
-    var indentFirstLine = false
-    var showLineNumbersForFence = false
-    var noLineWrapping = false
-    var insertFinalNewLineOnSave = false
-    var preferCRLF = false
-    var defaultCodeLanguage = ""
     var enableLegacyInlineMath = false
 
     // Files
-    var autoSave = false
-    var saveOnSwitch = false
     var recordRecentFiles = true
     var showHiddenFiles = false
-    var revealOutlineOnStart = false
 
     // Launch
     /// What the app does when it starts with nothing handed to it by the
@@ -101,13 +80,55 @@ struct EditorSettings: Codable, Equatable, Sendable {
     /// The folder `openSpecifiedFolder` opens, if one is chosen.
     var launchFolderPath: String?
 
-    // Math
-    var autoNumberMath = false
-    var applyLineBreakAtBackslash = false
-    var mathSourceInsteadOfSVG = false
-
     // Zoom
     var zoomFactor: Double = 1
+
+    init() {}
+
+    private enum CodingKeys: String, CodingKey {
+        case themeIdentifier, useCustomFontSize, customFontSize, wordsPerMinute
+        case sidebarFolderPath, autoPairBrackets, autoPairMarkdownSyntax
+        case emojiAutocomplete, keepCaretInMiddle, indentSize, codeIndentSize
+        case spellCheckEnabled, autoSaveInterval, showInvisibleCharacters
+        case strictMarkdown, enableInlineMath, enableSubscript, enableSuperscript
+        case enableHighlight, enableAlert, enableStrike, noAutoLink, smartQuotes
+        case ignoreLineBreak, enableLegacyInlineMath, recordRecentFiles
+        case showHiddenFiles, launchOption, launchFolderPath, zoomFactor
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        themeIdentifier = try container.decodeIfPresent(String.self, forKey: .themeIdentifier) ?? "github"
+        useCustomFontSize = try container.decodeIfPresent(Bool.self, forKey: .useCustomFontSize) ?? false
+        customFontSize = try container.decodeIfPresent(Double.self, forKey: .customFontSize) ?? 16
+        wordsPerMinute = try container.decodeIfPresent(Int.self, forKey: .wordsPerMinute) ?? 382
+        sidebarFolderPath = try container.decodeIfPresent(String.self, forKey: .sidebarFolderPath)
+        autoPairBrackets = try container.decodeIfPresent(Bool.self, forKey: .autoPairBrackets) ?? true
+        autoPairMarkdownSyntax = try container.decodeIfPresent(Bool.self, forKey: .autoPairMarkdownSyntax) ?? true
+        emojiAutocomplete = try container.decodeIfPresent(Bool.self, forKey: .emojiAutocomplete) ?? true
+        keepCaretInMiddle = try container.decodeIfPresent(Bool.self, forKey: .keepCaretInMiddle) ?? false
+        indentSize = try container.decodeIfPresent(Int.self, forKey: .indentSize) ?? 2
+        codeIndentSize = try container.decodeIfPresent(Int.self, forKey: .codeIndentSize) ?? 4
+        spellCheckEnabled = try container.decodeIfPresent(Bool.self, forKey: .spellCheckEnabled) ?? true
+        autoSaveInterval = try container.decodeIfPresent(Double.self, forKey: .autoSaveInterval) ?? 0
+        showInvisibleCharacters = try container.decodeIfPresent(Bool.self, forKey: .showInvisibleCharacters) ?? false
+        strictMarkdown = try container.decodeIfPresent(Bool.self, forKey: .strictMarkdown) ?? false
+        enableInlineMath = try container.decodeIfPresent(Bool.self, forKey: .enableInlineMath) ?? true
+        enableSubscript = try container.decodeIfPresent(Bool.self, forKey: .enableSubscript) ?? false
+        enableSuperscript = try container.decodeIfPresent(Bool.self, forKey: .enableSuperscript) ?? false
+        enableHighlight = try container.decodeIfPresent(Bool.self, forKey: .enableHighlight) ?? false
+        enableAlert = try container.decodeIfPresent(Bool.self, forKey: .enableAlert) ?? true
+        enableStrike = try container.decodeIfPresent(Bool.self, forKey: .enableStrike) ?? true
+        noAutoLink = try container.decodeIfPresent(Bool.self, forKey: .noAutoLink) ?? false
+        smartQuotes = try container.decodeIfPresent(Bool.self, forKey: .smartQuotes) ?? false
+        ignoreLineBreak = try container.decodeIfPresent(Bool.self, forKey: .ignoreLineBreak) ?? false
+        enableLegacyInlineMath = try container.decodeIfPresent(Bool.self, forKey: .enableLegacyInlineMath) ?? false
+        recordRecentFiles = try container.decodeIfPresent(Bool.self, forKey: .recordRecentFiles) ?? true
+        showHiddenFiles = try container.decodeIfPresent(Bool.self, forKey: .showHiddenFiles) ?? false
+        launchOption = try container.decodeIfPresent(LaunchOption.self, forKey: .launchOption) ?? .openNewFile
+        launchFolderPath = try container.decodeIfPresent(String.self, forKey: .launchFolderPath)
+        zoomFactor = try container.decodeIfPresent(Double.self, forKey: .zoomFactor) ?? 1
+    }
 
     /// Font scale the theme is rendered at.
     var fontScale: CGFloat {
@@ -147,20 +168,6 @@ struct EditorSettings: Codable, Equatable, Sendable {
         var options = parseOptions.inline
         options.legacyInlineMath = enableLegacyInlineMath
         return options
-    }
-
-    /// Ordered list marker for a given 1-based position, honouring `olStyle`.
-    func orderedMarker(for position: Int) -> String {
-        olStyle == 1 ? "\(position))" : "\(position)."
-    }
-
-    /// Unordered list marker, honouring `ulStyle`.
-    var unorderedMarker: String {
-        switch ulStyle {
-        case 1: return "* "
-        case 2: return "+ "
-        default: return "- "
-        }
     }
 }
 

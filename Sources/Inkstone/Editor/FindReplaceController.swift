@@ -216,11 +216,28 @@ final class FindReplaceController: NSViewController {
         options.wholeWord = wholeWordButton.state == .on
         options.useRegularExpression = regexButton.state == .on
         let query = queryField.stringValue
+        if !NodeSearch(options: options).hasValidExpression(for: query) {
+            results = NodeSearch.Results()
+            selectedIndex = nil
+            counter.textColor = .systemRed
+            counter.stringValue = "Invalid regular expression"
+            return
+        }
+        counter.textColor = .secondaryLabelColor
         results = NodeSearch(options: options).find(in: editor.document, query: query)
         counter.stringValue = counterText()
         // Land on the match at or after the caret, which is what makes repeated
-        // Cmd-F feel like stepping forward rather than restarting.
-        selectedIndex = results.hits.isEmpty ? nil : 0
+        // Cmd-F feel like stepping forward rather than restarting - and what lets
+        // Replace walk forward: restarting at hit 0 re-replaced the first match in
+        // the document every time.
+        let caret = editor.selectedRange().location
+        selectedIndex =
+            results.hits.indices.first { index in
+                guard let range = bufferRange(for: results.hits[index], in: editor) else {
+                    return false
+                }
+                return NSMaxRange(range) > caret
+            } ?? (results.hits.isEmpty ? nil : 0)
         if let selectedIndex {
             select(index: selectedIndex, reveal: true)
         }
@@ -257,33 +274,49 @@ final class FindReplaceController: NSViewController {
         let hit = results.hits[index]
         counter.stringValue = counterText()
         guard let range = bufferRange(for: hit, in: editor) else {
-            // A hit inside an attachment-rendered block has no buffer range; skip to
-            // the next one rather than pretending the highlight is somewhere else.
+            // A hit inside an attachment-rendered block has no buffer range; skip
+            // to the next one rather than pretending the highlight is somewhere
+            // else. At most one full lap: when every hit is unmappable, stop
+            // instead of recursing around the ring until the stack blows.
+            guard skippedRanges < results.count else { skippedRanges = 0; return }
+            skippedRanges += 1
             select(index: (index + 1) % results.count, reveal: reveal)
             return
         }
+        skippedRanges = 0
         editor.setSelectedRange(range)
         if reveal { editor.scrollRangeToVisible(range) }
     }
 
+    /// Consecutive unmappable hits, so a find full of attachment-only matches
+    /// cannot turn the skip-to-next fallback into infinite recursion.
+    private var skippedRanges = 0
+
     /// Node-relative offset to buffer range.
     ///
-    /// The block's own leading marker (`## `, `> `, list indent) is not part of the
-    /// inline content, so the content offset has to be added to the block's range
-    /// location *plus* the marker width, which the layout pass recorded as the
-    /// first inline range.
+    /// The layout pass records where each inline element's *plain text* sits in
+    /// the buffer, so a hit offset translates directly. The old heuristic added
+    /// the offset to the first recorded element's start, which landed every hit
+    /// past the first element in the wrong place (headings missed by their own
+    /// marker width, paragraphs after bold text drifted by the syntax).
     private func bufferRange(for hit: NodeSearch.Hit, in editor: MarkdownTextView) -> NSRange? {
-        guard let blockRange = editor.bufferRange(forBlock: hit.blockID) else { return nil }
-        guard let firstInline = editor.layout.inlineNodes.first(where: { $0.blockID == hit.blockID })
-        else {
+        let inlines = editor.layout.inlineNodes.filter { $0.blockID == hit.blockID }
+        for inline in inlines where NSLocationInRange(hit.offset, inline.plainRange) {
+            let delta = hit.offset - inline.plainRange.location
+            guard delta >= 0, delta + hit.length <= inline.contentRange.length else { continue }
             return NSRange(
-                location: blockRange.location + hit.offset,
+                location: inline.contentRange.location + delta,
                 length: hit.length
             )
         }
-        let location = firstInline.range.location + hit.offset
-        guard location + hit.length <= NSMaxRange(firstInline.range) else { return nil }
-        return NSRange(location: location, length: hit.length)
+        // Fallback for blocks whose plain text maps cleanly (no markers, no
+        // inline syntax between the block start and the hit).
+        guard let blockRange = editor.bufferRange(forBlock: hit.blockID) else { return nil }
+        let hasMarkers = editor.layout.markers.contains { $0.blockID == hit.blockID }
+        let hasSyntax = inlines.contains { $0.contentRange.length > 0 }
+        if hasMarkers || hasSyntax { return nil }
+        guard hit.offset + hit.length <= blockRange.length else { return nil }
+        return NSRange(location: blockRange.location + hit.offset, length: hit.length)
     }
 
     // MARK: - Replacing
@@ -295,9 +328,17 @@ final class FindReplaceController: NSViewController {
             results.hits.indices.contains(index),
             let range = bufferRange(for: results.hits[index], in: editor)
         else { return }
-        let storage = editor.textStorage
-        storage?.replaceCharacters(in: range, with: replaceField.stringValue)
-        editor.notifyTextChanged()
+        // Through the editor's editing path: a direct storage write never entered
+        // the undo stack, and the node tree stayed stale until the next keystroke.
+        editor.apply(
+            FormatController.Edit(
+                range: range,
+                text: replaceField.stringValue,
+                selection: NSRange(
+                    location: range.location + replaceField.stringValue.utf16.count, length: 0
+                )
+            )
+        )
         onReplace?()
         queryChanged()
     }
@@ -311,13 +352,33 @@ final class FindReplaceController: NSViewController {
         options.wholeWord = wholeWordButton.state == .on
         options.useRegularExpression = regexButton.state == .on
         let search = NodeSearch(options: options)
+        guard search.hasValidExpression(for: query) else {
+            counter.textColor = .systemRed
+            counter.stringValue = "Invalid regular expression"
+            return
+        }
         let replaced = search.replace(in: editor.document.blocks, query: query, with: replaceField.stringValue)
         // Replace-all goes through the tree and then reloads, because rewriting the
         // buffer text directly would leave the node tree and the buffer describing
-        // different documents.
+        // different documents. The reload is applied as one whole-buffer edit so it
+        // lands on the undo stack - the old path rewrote the storage behind the
+        // text view's back, and ⌘Z afterwards applied stale ranges into the new
+        // buffer, corrupting text at best.
         var document = editor.document
         document.blocks = replaced
-        editor.load(document: document)
+        document.rebuildIndexes()
+        let next = document.source
+        guard let storage = editor.textStorage, next != storage.string else {
+            queryChanged()
+            return
+        }
+        editor.apply(
+            FormatController.Edit(
+                range: NSRange(location: 0, length: storage.length),
+                text: next,
+                selection: NSRange(location: 0, length: 0)
+            )
+        )
         onReplace?()
         queryChanged()
     }

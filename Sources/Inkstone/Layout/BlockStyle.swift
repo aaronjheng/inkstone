@@ -57,26 +57,6 @@ struct BlockStyle {
         return style
     }
 
-    static func blockquote(theme: EditorTheme, depth: Int) -> BlockStyle {
-        var style = BlockStyle(
-            font: EditorFont.nsSystem(size: theme.bodyFontSize),
-            textColor: theme.quoteText.nsColor
-        )
-        style.base[.paragraphStyle] = NSParagraphStyle.markdownQuote(
-            indent: theme.quoteIndent * CGFloat(max(depth, 1)),
-            lineHeight: theme.bodyLineHeight * theme.bodyFontSize,
-            spacing: theme.blockMargin
-        )
-        style.decoration.append(
-            .quoteBar(
-                color: theme.quoteBar.nsColor,
-                width: theme.quoteBarWidth,
-                inset: theme.quoteIndent
-            )
-        )
-        return style
-    }
-
     static func listItem(theme: EditorTheme, ordered: Bool, depth: Int, marker: String) -> BlockStyle {
         var style = BlockStyle(
             font: EditorFont.nsSystem(size: theme.bodyFontSize),
@@ -133,9 +113,6 @@ struct BlockStyle {
         return style
     }
 
-    /// A line whose glyphs are all zero-width (a fence delimiter, a table
-    /// delimiter row). Collapsing its height is what makes the hidden line
-    /// disappear rather than leave a gap.
     /// Marker runs, derived from the block they belong to.
     ///
     /// The paragraph style is inherited from the block **on purpose**. TextKit takes a
@@ -193,7 +170,6 @@ struct BlockStyle {
         // Display maths is centred; an inline run of the same text would not be, but
         // inline maths is styled by `InlineStyle`, not here.
         paragraph.alignment = .center
-        paragraph.paragraphSpacingBefore = theme.blockMargin
         style.base[.paragraphStyle] = paragraph
         style.base[.backgroundColor] = theme.codeBlockBackground.nsColor
         style.decoration.append(
@@ -235,11 +211,12 @@ struct BlockStyle {
 
     static func definition(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(size: max(theme.bodyFontSize - 2, 10)),
-            textColor: theme.quoteText.nsColor
+            font: EditorFont.nsSystem(size: max(theme.bodyFontSize - 2, 10))
+            , textColor: theme.quoteText.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownBody(
-            lineHeight: theme.bodyLineHeight, spacing: theme.blockMargin
+            lineHeight: theme.bodyLineHeight * max(theme.bodyFontSize - 2, 10),
+            spacing: theme.blockMargin
         )
         return style
     }
@@ -273,7 +250,6 @@ enum DecorationPlan {
     case codeBlock(background: NSColor, radius: CGFloat)
     case horizontalRule(color: NSColor, height: CGFloat)
     case inlineCode(background: NSColor, radius: CGFloat)
-    case focusChip(text: String, color: NSColor)
     case alertBox(title: String, background: NSColor, border: NSColor)
     case tocPlaceholder(color: NSColor)
     /// A pipe table's cells, painted by the decoration layer.

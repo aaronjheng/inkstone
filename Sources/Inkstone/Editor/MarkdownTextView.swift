@@ -108,9 +108,15 @@ final class MarkdownTextView: NSTextView {
 
     // MARK: - Loading
 
+    /// The parse options the live view re-parses with. Pushed in from the
+    /// document so the Markdown preference pane (strict mode, inline maths,
+    /// highlight, sub/superscript, …) governs rendering instead of being
+    /// silently ignored.
+    var parseOptions = BlockParser.Options.standard
+
     /// Replaces the whole document. Used on open, not while editing.
     func load(markdown text: String) {
-        let parsed = BlockParser.parse(text, options: .standard)
+        let parsed = BlockParser.parse(text, options: parseOptions)
         document = parsed
         rebuildLayout(replacingSelection: true)
     }
@@ -280,11 +286,19 @@ final class MarkdownTextView: NSTextView {
             let caret = NSRange(
                 location: target.location + replacement.utf16.count - caretOffset, length: 0
             )
+            // `shouldChangeText` validates and registers undo; it does not edit.
+            // The replacement has to be written here and the edit closed with
+            // `didChangeText`, then the original keystroke refused - returning true
+            // made AppKit perform the *raw* key at the *original* range, so smart
+            // dashes, auto-pairing and markdown delimiters never reached the buffer
+            // while the undo stack recorded a phantom edit.
             guard super.shouldChangeText(in: target, replacementString: replacement) else {
                 return false
             }
+            textStorage?.replaceCharacters(in: target, with: replacement)
+            didChangeText()
             setSelectedRange(caret, affinity: .downstream, stillSelecting: false)
-            return true
+            return false
         }
     }
 
@@ -339,7 +353,11 @@ final class MarkdownTextView: NSTextView {
         // Emoji: a run of shortcode characters directly before the caret.
         var start = caret
         while start > 0, isShortcodeCharacter(ns.character(at: start - 1)) { start -= 1 }
-        if start < caret, ns.character(at: start - 1) == colonCode {
+        // `start > 0` is what keeps `character(at: -1)` off the wire: with the caret
+        // inside an all-alphanumeric run from the buffer's very start, the scan ends
+        // at 0 and reading "the character before the run" raised NSRangeException -
+        // a crash on the first word of any plain-text document.
+        if start > 0, start < caret, ns.character(at: start - 1) == colonCode {
             let query = ns.substring(
                 with: NSRange(location: start, length: caret - start)
             )
@@ -362,6 +380,17 @@ final class MarkdownTextView: NSTextView {
             let query = ns.substring(
                 with: NSRange(location: pathStart, length: caret - pathStart)
             )
+            // The token must open with `](` - the walk above stops at `(`, so the
+            // two characters before it identify a link destination. Anything else is
+            // prose with a slash in it, and prose gets no file listing.
+            guard
+                pathStart >= 2,
+                ns.character(at: pathStart - 1) == 40,
+                ns.character(at: pathStart - 2) == 93
+            else {
+                completionController.hide()
+                return
+            }
             let items = CompletionSource.paths(
                 matching: query, in: completionDirectory
             )
@@ -385,12 +414,18 @@ final class MarkdownTextView: NSTextView {
 
     private func applyCompletion(_ item: Completion, replacing range: NSRange) {
         guard let storage = textStorage, NSMaxRange(range) <= storage.length else { return }
-        storage.replaceCharacters(in: range, with: item.insert + item.suffix)
-        let caret = range.location + item.insert.utf16.count + item.suffix.utf16.count
+        let inserted = item.insert + item.suffix
+        // Through the standard editing path: `shouldChangeText` registers undo,
+        // `didChangeText` closes the group and fires `textDidChange`, which is what
+        // schedules the reparse. The previous direct-storage write was invisible to
+        // undo and left the node tree stale until the next keystroke.
+        guard super.shouldChangeText(in: range, replacementString: inserted) else { return }
+        storage.replaceCharacters(in: range, with: inserted)
+        didChangeText()
+        let caret = range.location + inserted.utf16.count
         setSelectedRange(
             NSRange(location: caret, length: 0), affinity: .downstream, stillSelecting: false
         )
-        notifyTextChanged()
     }
 
     override func insertTab(_ sender: Any?) {
@@ -451,12 +486,16 @@ final class MarkdownTextView: NSTextView {
         if rewritten.hasSuffix("\n") { rewritten.removeLast() }
 
         let target = NSRange(location: ranges[0].location, length: lineEnd - lineStart)
+        // `shouldChangeText` validates and registers undo; the rewrite itself has to
+        // be performed here and closed with `didChangeText` - the old code computed
+        // the replacement and threw it away, so Tab and Shift-Tab did nothing.
         guard super.shouldChangeText(in: target, replacementString: rewritten) else { return }
+        textStorage?.replaceCharacters(in: target, with: rewritten)
+        didChangeText()
         setSelectedRange(
             NSRange(location: target.location + rewritten.utf16.count, length: 0),
             affinity: .downstream, stillSelecting: false
         )
-        notifyTextChanged()
     }
 
     private func isInsideCodeBlock(at location: Int) -> Bool {
@@ -483,9 +522,13 @@ final class MarkdownTextView: NSTextView {
             insertBlockPrefix(prefix)
         case let .exit(indent):
             // An empty item ends the list: drop the marker rather than carry it down.
-            storage.replaceCharacters(
-                in: NSRange(location: start, length: end - start), with: ""
-            )
+            // Through the standard path, so the deletion is undoable - a direct
+            // storage write made ⌘Z restore the newline but not the marker.
+            let markerRange = NSRange(location: start, length: end - start)
+            if super.shouldChangeText(in: markerRange, replacementString: "") {
+                storage.replaceCharacters(in: markerRange, with: "")
+                didChangeText()
+            }
             super.insertNewline(sender)
             if !indent.isEmpty { insertBlockPrefix(indent) }
         case .none:
@@ -573,7 +616,10 @@ final class MarkdownTextView: NSTextView {
         let built = AttributedBuilder(
             theme: theme,
             context: LayoutContext(
-                containerWidth: contentWidth, imageBaseDirectory: imagePainter.baseDirectory
+                containerWidth: contentWidth,
+                imageBaseDirectory: imagePainter.baseDirectory,
+                imageSize: { [imagePainter] path in imagePainter.displaySize(of: path) },
+                imageMaxWidth: InlineImagePainter.maximumWidth
             )
         ).build(document)
         layout = built
@@ -621,7 +667,7 @@ final class MarkdownTextView: NSTextView {
 
         let text = ((textStorage?.string ?? "") as NSString)
             .substring(with: clampToStorage(range.range))
-        let parsed = BlockParser.parse(text, options: .standard)
+        let parsed = BlockParser.parse(text, options: parseOptions)
         let before = signature(of: blockNode)
         let after = parsed.blocks.map { $0.kind }
         guard before != after else {
@@ -637,7 +683,7 @@ final class MarkdownTextView: NSTextView {
         // therefore the basis for putting the caret back.
         let anchor = range.range.location
         let offsetInBlock = max(0, caret - anchor)
-        document = BlockParser.parse(textStorage?.string ?? "", options: .standard)
+        document = BlockParser.parse(textStorage?.string ?? "", options: parseOptions)
         rebuildLayout(replacingSelection: false)
         restoreCaret(anchoredAt: anchor, offsetInBlock: offsetInBlock)
     }
@@ -949,8 +995,11 @@ final class MarkdownTextView: NSTextView {
     /// Applies a formatting rewrite as one undo step.
     ///
     /// The mutation goes through the ordinary text-system path - one
-    /// `shouldChangeText`, then the caret where the command put it - so undo,
-    /// the dirty flag and the reparse all behave exactly as they do for typing.
+    /// `shouldChangeText`, the replacement written, then `didChangeText` to close
+    /// the undo group and fire `textDidChange` - so undo, the dirty flag and the
+    /// reparse all behave exactly as they do for typing. `shouldChangeText` alone
+    /// validates and registers undo; it never edits, and skipping the write made
+    /// every Format command a no-op that still marked the document dirty.
     func apply(_ edit: FormatController.Edit) {
         guard let storage = textStorage, !isReadonly else { return }
         guard NSMaxRange(edit.range) <= storage.length else { return }
@@ -958,8 +1007,9 @@ final class MarkdownTextView: NSTextView {
         guard super.shouldChangeText(in: edit.range, replacementString: edit.text) else {
             return
         }
+        storage.replaceCharacters(in: edit.range, with: edit.text)
+        didChangeText()
         setSelectedRange(edit.selection, affinity: .downstream, stillSelecting: false)
-        notifyTextChanged()
     }
 
     /// Runs a pure formatting rewrite against the whole buffer.

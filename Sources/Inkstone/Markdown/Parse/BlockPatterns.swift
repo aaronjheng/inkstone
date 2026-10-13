@@ -430,10 +430,6 @@ enum ListItem {
 enum TableRecognizer {
     struct Row {
         var cells: [String]
-        /// Spaces after the pipe before the first cell's text, and before the
-        /// next pipe. Kept so a rebuilt table can reproduce irregular padding.
-        var padding: [TableState.CellPadding]
-        var isPipeDelimited: Bool
     }
 
     struct Parsed {
@@ -507,26 +503,18 @@ enum TableRecognizer {
     static func parseRow(_ content: String) -> Row {
         let characters = Array(content)
         var cells: [String] = []
-        var padding: [TableState.CellPadding] = []
         var current = ""
-        var leadingSpaces = 0
         var sawContent = false
         var index = 0
         let pipeDelimited = content.trimmingInlineWhitespace().hasPrefix("|")
 
         func flush() {
-            var trailing = 0
             var trimmed = Substring(current)
-            while trimmed.last == " " || trimmed.last == "\t" {
-                trailing += 1
+            while trimmed.last == " " || trimmed.last == "\t" || trimmed.last == "\r" {
                 trimmed = trimmed.dropLast()
             }
             cells.append(String(trimmed))
-            padding.append(
-                TableState.CellPadding(leading: sawContent ? leadingSpaces : 0, trailing: trailing)
-            )
             current = ""
-            leadingSpaces = 0
             sawContent = false
         }
 
@@ -545,12 +533,14 @@ enum TableRecognizer {
             if character == "|" {
                 flush()
                 index += 1
-                while index < characters.count, characters[index] == " " { index += 1 }
-                leadingSpaces = 0
+                while index < characters.count,
+                    characters[index] == " " || characters[index] == "\t"
+                {
+                    index += 1
+                }
                 continue
             }
-            if !sawContent, character == " " {
-                leadingSpaces += 1
+            if !sawContent, character == " " || character == "\t" {
                 index += 1
                 continue
             }
@@ -560,15 +550,12 @@ enum TableRecognizer {
         }
         flush()
 
+        // A trailing `\r` (CRLF line) is source punctuation, not cell content.
         let trailingPipe = characters.last == "|"
         if trailingPipe, !cells.isEmpty, cells.last == "", cells.count > 1 {
             cells.removeLast()
-            padding.removeLast()
         }
-        return Row(
-            cells: cells, padding: padding,
-            isPipeDelimited: pipeDelimited || trailingPipe
-        )
+        return Row(cells: cells)
     }
 }
 

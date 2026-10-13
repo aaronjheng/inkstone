@@ -335,16 +335,17 @@ enum FormatController {
             : nil
 
         if let body = unwrapped, !body.isEmpty {
+            let text = body.joined(separator: "\n")
             let starts = lineStarts(of: body, from: span.range.location)
             let newIndex = max(0, min(index - 1, body.count - 1))
-            let end = NSMaxRange(span.range)
+            // The caret keeps its column on the corresponding line, clamped to the
+            // *new* text - the old selection carried the pre-edit length, which
+            // selected whole paragraphs after unwrapping.
+            let caret = min(starts[newIndex] + offsetInLine, text.utf16.count)
             return Edit(
                 range: span.range,
-                text: body.joined(separator: "\n"),
-                selection: NSRange(
-                    location: min(starts[newIndex] + offsetInLine, end),
-                    length: range.length
-                )
+                text: text,
+                selection: NSRange(location: caret, length: 0)
             )
         }
 
@@ -496,7 +497,6 @@ enum FormatController {
     /// A YAML front matter block, unless the document already opens with one.
     private static func insertFrontMatter(in text: String, range: NSRange) -> Edit {
         guard !text.hasPrefix("---\n") else { return noOp }
-        let location = min(max(range.location, 0), (text as NSString).length)
         let block = "---\ntitle: Untitled\n---\n\n"
         let caret = "---\ntitle: ".utf16.count
         return Edit(

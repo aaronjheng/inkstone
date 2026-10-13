@@ -212,26 +212,22 @@ final class AppStore {
     private func draft(from snapshot: DraftSnapshot) -> Draft {
         Draft(
             sourceURL: snapshot.sourceURL,
+            documentID: snapshot.documentID,
             title: snapshot.title,
             markdown: snapshot.markdown,
             savedAt: snapshot.savedAt
         )
     }
 
-    /// Closes a document's tab, and its window when that was the last tab.
-    func close(_ document: DocumentWindowController) {
-        guard
-            let host = hosts.first(where: { host in
-                host.documents.contains { $0 === document }
-            })
-        else { return }
-        host.removeDocument(document)
-        if host.documents.isEmpty {
-            host.close()
+    /// Drops the crash-recovery drafts of documents the user chose not to save,
+    /// so a quit-with-Don't-Save does not resurrect the content next launch.
+    func discardDrafts(for documents: [DocumentWindowController]) {
+        for document in documents {
+            drafts.clear(sourceURL: document.fileURL, documentID: document.documentID)
         }
     }
 
-    /// ⌘W: the focused tab, or the window when the tab list is empty.
+    /// Closes a document's tab, and its window when that was the last tab.
     func closeFocusedDocument() {
         guard let host = focusedHost else { return }
         host.closeSelectedTab()
@@ -322,6 +318,7 @@ final class AppStore {
             noteRecentFolder(url.deletingLastPathComponent())
         } catch {
             AppLogger.error("Failed to open \(url.lastPathComponent): \(error)", category: "File")
+            presentOpenError(url, error)
         }
     }
 
@@ -348,6 +345,16 @@ final class AppStore {
             }
         }
         open(url, in: host)
+    }
+
+    /// A failed open must say why: a log line the user never sees turned every
+    /// unreadable or undecodable file into a silent nothing-happened.
+    private func presentOpenError(_ url: URL, _ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Could not open \"\(url.lastPathComponent)\"."
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
     }
 
     /// Focuses the tab already showing `url`, wherever it lives. Returns whether
@@ -382,8 +389,8 @@ final class AppStore {
             guard let self else { return }
             self.drafts.write(self.draft(from: snapshot))
         }
-        document.onSaveCommitted = { [weak self] url in
-            self?.drafts.clear(for: url)
+        document.onSaveCommitted = { [weak self] url, documentID in
+            self?.drafts.clear(sourceURL: url, documentID: documentID)
         }
         document.markSessionWired()
     }

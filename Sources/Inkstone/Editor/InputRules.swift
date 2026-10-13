@@ -12,9 +12,6 @@ struct InputOptions {
     var smartQuotes = true
     var indentSize = 2
     var codeIndentSize = 4
-    /// The original inserts spaces rather than tab characters, and a tab in the buffer would
-    /// be a byte the user never typed.
-    var tabInsertsSpaces = true
 }
 
 enum InputRule {

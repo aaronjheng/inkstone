@@ -14,8 +14,10 @@ enum PrintService {
     ///
     /// The scales are set to 1 so the output is the document's real size; letting
     /// AppKit shrink to fit would make a long document illegible rather than paginated.
+    /// A copy, not the shared instance: mutating `NSPrintInfo.shared` leaked the
+    /// margins into every other print job in the process and accumulated across calls.
     static func printInfo() -> NSPrintInfo {
-        let info = NSPrintInfo.shared
+        let info = (NSPrintInfo.shared.copy() as? NSPrintInfo) ?? NSPrintInfo()
         info.orientation = .portrait
         info.topMargin = 56
         info.bottomMargin = 56

@@ -106,15 +106,18 @@ enum MenuBuilder {
         menu.addItem(.separator())
 
         let recent = NSMenu(title: "Open Recent")
+        recent.autoenablesItems = false
         for url in store.recentFiles {
             let entry = recent.addItem(
                 withTitle: url.lastPathComponent, action: #selector(AppDelegate.openDocument(_:)), keyEquivalent: ""
             )
             entry.target = responder
             entry.representedObject = url
+            entry.isEnabled = true
         }
         if store.recentFiles.isEmpty {
-            recent.addItem(withTitle: "No Recent Files", action: nil, keyEquivalent: "")
+            let empty = recent.addItem(withTitle: "No Recent Files", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
         }
         let recentItem = menu.addItem(withTitle: "Open Recent", action: nil, keyEquivalent: "")
         recentItem.submenu = recent
@@ -144,8 +147,9 @@ enum MenuBuilder {
         menu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
         menu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
         menu.addItem(
-            withTitle: "Copy as Markdown", action: #selector(NSText.copy(_:)), keyEquivalent: "c"
+            withTitle: "Copy as Markdown", action: #selector(AppDelegate.copyAsMarkdown(_:)), keyEquivalent: "c"
         ).keyEquivalentModifierMask = [.command, .shift]
+        menu.items.last?.target = responder
         menu.addItem(
             withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v"
         )
@@ -172,12 +176,8 @@ enum MenuBuilder {
             item.target = responder
         }
         menu.addItem(.separator())
-        let substitutions = menu.addItem(withTitle: "Substitutions", action: nil, keyEquivalent: "")
-        substitutions.submenu = NSMenu(title: "Substitutions")
-        substitutions.submenu?.addItem(
-            withTitle: "Smart Quotes", action: nil, keyEquivalent: ""
-        )
-        menu.addItem(.separator())
+        // A nil action renders disabled and reads as a broken feature; the smart-
+        // quote behaviour itself lives in the Editor pane, so the stub goes.
         menu.addItem(
             withTitle: "Toggle Source Mode", action: #selector(AppDelegate.toggleSourceMode(_:)), keyEquivalent: "."
         ).target = responder
@@ -274,25 +274,28 @@ enum MenuBuilder {
             item.keyEquivalentModifierMask = modifiers
             item.target = responder
         }
-        // Image family actions: the image is drawn rather than attached (so the buffer
-        // stays byte-identical and the source is still `![alt](path)`). The menu acts on
-        // the file, not the node, so it uses the document's base folder.
-        menu.addItem(
-            withTitle: "Image › Delete", action: #selector(AppDelegate.imageDelete(_:)), keyEquivalent: ""
-        ).target = responder
-        menu.addItem(
-            withTitle: "Image › Rename", action: #selector(AppDelegate.imageRename(_:)), keyEquivalent: ""
-        ).target = responder
-        menu.addItem(
-            withTitle: "Image › Move…", action: #selector(AppDelegate.imageMove(_:)), keyEquivalent: ""
-        ).target = responder
-        menu.addItem(
-            withTitle: "Image › Scale 50%", action: #selector(AppDelegate.imageScaleHalf(_:)), keyEquivalent: ""
-        ).target = responder
+        menu.addItem(.separator())
+        // The image actions act on the file the painter draws (so the buffer stays
+        // byte-identical and the source is still `![alt](path)`); they get a real
+        // submenu instead of titles with “›” baked in.
+        let imageItem = menu.addItem(withTitle: "Image", action: nil, keyEquivalent: "")
+        let imageMenu = NSMenu(title: "Image")
+        for (title, action) in [
+            ("Delete", #selector(AppDelegate.imageDelete(_:))),
+            ("Rename…", #selector(AppDelegate.imageRename(_:))),
+            ("Move…", #selector(AppDelegate.imageMove(_:))),
+            ("Scale 50%…", #selector(AppDelegate.imageScaleHalf(_:))),
+        ] {
+            let entry = imageMenu.addItem(withTitle: title, action: action, keyEquivalent: "")
+            entry.target = responder
+        }
+        imageItem.submenu = imageMenu
+        // ⌘P belongs to Print; Quick Open was silently unreachable on the same
+        // chord, and File precedes View in the bar.
         menu.addItem(
             withTitle: "Quick Open…", action: #selector(AppDelegate.quickOpen(_:)), keyEquivalent: "p"
-        ).target = responder
-        menu.addItem(withTitle: "Status Bar", action: nil, keyEquivalent: "").isEnabled = false
+        ).keyEquivalentModifierMask = [.command, .shift]
+        menu.items.last?.target = responder
         menu.addItem(.separator())
         menu.addItem(
             withTitle: "Actual Size", action: #selector(AppDelegate.actualSize(_:)), keyEquivalent: "0"
@@ -307,6 +310,9 @@ enum MenuBuilder {
         menu.addItem(
             withTitle: "Enter Full Screen", action: #selector(NSWindow.toggleFullScreen(_:)), keyEquivalent: "f"
         ).keyEquivalentModifierMask = [.command, .control]
+        // Checkmarks are rebuilt every time the menu opens (AppDelegate conforms
+        // to NSMenuDelegate for exactly this).
+        menu.delegate = responder
         item.submenu = menu
         return item
     }
@@ -332,6 +338,7 @@ enum MenuBuilder {
         )
         useThemeSize.target = NSApp.delegate as? AppDelegate
         useThemeSize.state = store.settings.settings.useCustomFontSize ? .off : .on
+        menu.delegate = NSApp.delegate as? AppDelegate
         item.submenu = menu
         return item
     }

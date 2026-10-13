@@ -33,8 +33,15 @@ struct AttributedBuilder {
         let result = NSMutableAttributedString()
         for (index, block) in document.blocks.enumerated() {
             if index > 0 {
-                // Separator newline for the blank lines between blocks.
-                result.append(NSAttributedString(string: "\n"))
+                // Separator for the blank lines between blocks: the terminator the
+                // previous block ended with, `\r\n` included, so the buffer stays
+                // byte-exact for CRLF documents.
+                result.append(
+                    NSAttributedString(
+                        string: document.blocks[index - 1].endsWithCarriageReturn
+                            ? "\r\n" : "\n"
+                    )
+                )
             }
             for line in state.leadingText(for: block) {
                 result.append(NSAttributedString(string: line))
@@ -92,10 +99,12 @@ struct AttributedBuilder {
                 guard let base = context.imageBaseDirectory else { return 0 }
                 url = URL(fileURLWithPath: path, relativeTo: base)
             }
-            guard let size = NSImage(contentsOf: url)?.size,
-                size.width > 0, size.height > 0
-            else { return 0 }
-            let maximum: CGFloat = 480
+            // Through the editor's decode cache: `rebuildLayout` runs on every
+            // resize tick, and re-opening every image off the disk on the main
+            // thread each time stalled window resizing badly.
+            let size = context.imageSize?(url.path) ?? .zero
+            guard size.width > 0, size.height > 0 else { return 0 }
+            let maximum = context.imageMaxWidth
             let scale = size.width > maximum ? maximum / size.width : 1
             return min(size.height * scale, maximum)
         }
@@ -123,6 +132,9 @@ struct AttributedBuilder {
 
         func append(block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
             let start = result.length
+            // Plain-text offsets restart per block: a find hit's offset counts from
+            // the block's own content.
+            plainCursor = 0
             // Markers emitted anywhere inside this block - block markers and inline
             // delimiters alike - inherit the paragraph style of the block's own text.
             let inherited = markerParagraphStyle(for: block)
@@ -250,23 +262,29 @@ struct AttributedBuilder {
                 let isFootnote = block.kind == .footnoteDefinition
                 let openRole: MarkerRole = isFootnote ? .footnoteOpen : .linkOpen
                 let closeRole: MarkerRole = isFootnote ? .footnoteClose : .linkClose
-                let source = block.source
+                let source = block.source as NSString
                 let label = block.attributes.definitionLabel
-                let openLength = isFootnote ? min(2 + label.count, source.count) : 1
+                // All offsets in UTF-16 units: `openLength` used to mix Character
+                // counts into NSString ranges, which misaligned every definition
+                // whose label held an astral character.
+                let openLength =
+                    isFootnote ? min(2 + label.utf16.count, source.length) : 1
                 appendHiddenRun(
-                    String(source.prefix(openLength)), role: openRole, into: result,
+                    source.substring(with: NSRange(location: 0, length: openLength)),
+                    role: openRole, into: result,
                     style: style, block: block, depth: depth
                 )
-                let labelText = String(
-                    (source as NSString).substring(
-                        with: NSRange(location: openLength, length: max(label.utf16.count, 0))
+                let labelText = source.substring(
+                    with: NSRange(
+                        location: openLength,
+                        length: min(label.utf16.count, max(source.length - openLength, 0))
                     )
                 )
                 if !labelText.isEmpty {
                     emitPlain(labelText, into: result, style: style, block: block, depth: depth)
                 }
-                let remaining = String(
-                    (source as NSString).substring(from: openLength + label.utf16.count)
+                let remaining = source.substring(
+                    from: min(openLength + label.utf16.count, source.length)
                 )
                 if remaining.hasSuffix("]") {
                     let body = String(remaining.dropLast())
@@ -342,10 +360,12 @@ struct AttributedBuilder {
                     index = source.index(after: index)
                     continue
                 }
-                if character == " " || character == "\t" {
+                if character == " " || character == "\t" || character == "\r" {
                     // Consume the run, then keep it only if the line it sits on is blank.
                     var scan = index
-                    while scan < source.endIndex, source[scan] == " " || source[scan] == "\t" {
+                    while scan < source.endIndex,
+                        source[scan] == " " || source[scan] == "\t" || source[scan] == "\r"
+                    {
                         scan = source.index(after: scan)
                     }
                     if scan < source.endIndex, source[scan] == "\n" {
@@ -468,17 +488,10 @@ struct AttributedBuilder {
             register(body.decoration, for: block.id)
             for (index, line) in lines.enumerated() {
                 if index > 0 { result.append(NSMutableAttributedString(string: "\n")) }
-                let isFence = index == 0 || index == lines.count - 1
                 let isFenceLine =
-                    isFence
-                    && (Fence.opening(in: String(line), baseIndent: 0) != nil
-                        || Fence.closing(String(line), for: block.opening) != nil)
+                    Fence.opening(in: String(line), baseIndent: 0) != nil
+                    || Fence.closing(String(line), for: block.opening) != nil
                 if isFenceLine {
-                    appendHiddenRun(
-                        String(line), role: .fenceDelimiter, into: result,
-                        style: collapsed, block: block, depth: depth
-                    )
-                } else if isFence, !line.isEmpty {
                     appendHiddenRun(
                         String(line), role: .fenceDelimiter, into: result,
                         style: collapsed, block: block, depth: depth
@@ -597,7 +610,6 @@ struct AttributedBuilder {
             style: BlockStyle, block: BlockNode, depth: Int
         ) {
             guard !text.isEmpty else { return }
-            let start = result.length
             // No `blockMarkerStyle` here: painted text *is* the block's own text, and
             // the table hands each row the style it was sized with. Swapping in the
             // block's base style would flatten every row back to one height.
@@ -614,7 +626,6 @@ struct AttributedBuilder {
                     attributes: attributes.merged(blockAttributes(block, depth: depth))
                 )
             )
-            _ = start
         }
 
         // MARK: Inline
@@ -694,6 +705,33 @@ struct AttributedBuilder {
         /// margin on every line therefore opened up wrapped lines as well; only the
         /// first line of a block may carry it.
         private var isFirstLineOfBlock = true
+        /// Plain-text offset within the block being emitted, in UTF-16 units.
+        ///
+        /// Find hits arrive as offsets into a block's *plain* text; this cursor is
+        /// what lets the layout record where each plain span sits in the buffer, so
+        /// the find bar can translate without measuring syntax widths.
+        private var plainCursor = 0
+
+        /// Links a plain-text span to its buffer location for find-hit mapping.
+        private func recordPlain(
+            _ node: InlineNode, contentStart: Int, contentEnd: Int,
+            plainStart: Int, block: BlockNode
+        ) {
+            let plainLength = node.plainText.utf16.count
+            plainCursor = plainStart + plainLength
+            guard plainLength > 0, contentEnd > contentStart else { return }
+            inlineNodes.append(
+                InlineRange(
+                    index: inlineNodes.count, kind: node.kind,
+                    range: NSRange(
+                        location: contentStart, length: max(contentEnd - contentStart, 1)
+                    ),
+                    blockID: block.id,
+                    plainRange: NSRange(location: plainStart, length: plainLength),
+                    contentRange: NSRange(location: contentStart, length: contentEnd - contentStart)
+                )
+            )
+        }
 
         /// Attributes for one visible run: the style's base, then the font and
         /// colour it resolved to, then the block metadata the editor reads back.
@@ -739,9 +777,20 @@ struct AttributedBuilder {
         ) {
             switch node.kind {
             case .text, .softBreak, .hardBreak:
+                let start = result.length
                 append(
                     node.verbatim, runAttributes(style, block: block, depth: depth), to: result
                 )
+                // Only real text maps to plain offsets; a break's own bytes are a
+                // hole in the plain text, but the cursor still moves past them.
+                if node.kind == .text {
+                    recordPlain(
+                        node, contentStart: start, contentEnd: result.length,
+                        plainStart: plainCursor, block: block
+                    )
+                } else {
+                    plainCursor += node.plainText.utf16.count
+                }
             case .strong:
                 appendDelimited(
                     node, into: result, style: style, block: block, depth: depth,
@@ -796,11 +845,18 @@ struct AttributedBuilder {
                     ],
                     for: block.id
                 )
+                let contentStart = start + node.prefix.utf16.count
+                let plainStart = plainCursor
+                plainCursor = plainStart + node.payload.utf16.count
                 inlineNodes.append(
                     InlineRange(
                         index: inlineNodes.count, kind: node.kind,
                         range: NSRange(location: start, length: result.length - start),
-                        blockID: block.id
+                        blockID: block.id,
+                        plainRange: NSRange(location: plainStart, length: node.payload.utf16.count),
+                        contentRange: NSRange(
+                            location: contentStart, length: node.payload.utf16.count
+                        )
                     )
                 )
             case .link, .refLink:
@@ -826,6 +882,7 @@ struct AttributedBuilder {
                 let height = imageHeight(of: path, theme: theme)
                 register([.inlineImage(path: path, alt: alt, height: height)], for: block.id)
                 let start = result.length
+                let plainStart = plainCursor
                 // The alt text is the placeholder the picture is drawn over, so it is
                 // zero width too. It is not a marker, though: revealing it would put the
                 // `![…]` syntax back without the path, so the hidden flag is set here
@@ -835,6 +892,7 @@ struct AttributedBuilder {
                     block: block, depth: depth
                 )
                 append(alt, imageAttributes, to: result)
+                plainCursor = plainStart + alt.utf16.count
                 if height > 0, let paragraph = imageAttributes[.paragraphStyle] as? NSParagraphStyle {
                     result.addAttribute(
                         .paragraphStyle,
@@ -855,7 +913,9 @@ struct AttributedBuilder {
                     InlineRange(
                         index: inlineNodes.count, kind: node.kind,
                         range: NSRange(location: start, length: result.length - start),
-                        blockID: block.id
+                        blockID: block.id,
+                        plainRange: NSRange(location: plainStart, length: alt.utf16.count),
+                        contentRange: NSRange(location: start, length: alt.utf16.count)
                     )
                 )
             case .autolink:
@@ -886,6 +946,7 @@ struct AttributedBuilder {
                 )
 
             case .escape, .entity:
+                let start = result.length
                 append(
                     node.verbatim,
                     runAttributes(
@@ -893,10 +954,29 @@ struct AttributedBuilder {
                     ),
                     to: result
                 )
+                // The escape's backslash is syntax; an entity's decoded form has a
+                // different length than its verbatim. Both map through their own
+                // plain length, so a hit inside or after them stays aligned.
+                let contentStart = node.kind == .escape ? start + node.prefix.utf16.count : start
+                recordPlain(
+                    node, contentStart: contentStart, contentEnd: result.length,
+                    plainStart: plainCursor, block: block
+                )
             case .emoji, .html, .ruby:
+                let start = result.length
                 append(
                     node.verbatim, runAttributes(style, block: block, depth: depth), to: result
                 )
+                if node.kind == .emoji {
+                    recordPlain(
+                        node,
+                        contentStart: start + node.prefix.utf16.count,
+                        contentEnd: result.length - node.suffix.utf16.count,
+                        plainStart: plainCursor, block: block
+                    )
+                } else {
+                    plainCursor += node.plainText.utf16.count
+                }
             }
         }
 
@@ -919,6 +999,7 @@ struct AttributedBuilder {
             // underline: the override was computed, then handed to nobody.
             let childStyle = linkStyle.applied(to: style)
             let start = result.length
+            let plainStart = plainCursor
             for child in node.children {
                 emit(inline: child, into: result, style: childStyle, block: block, depth: depth)
             }
@@ -930,7 +1011,9 @@ struct AttributedBuilder {
                     runAttributes(childStyle, block: block, depth: depth),
                     to: result
                 )
+                plainCursor = plainStart + node.plainText.utf16.count
             }
+            let contentEnd = result.length
             appendHiddenRun(
                 node.suffix, role: .linkClose, into: result, style: hiddenStyle,
                 block: block, depth: depth, inlineIndex: inlineIndex
@@ -939,7 +1022,9 @@ struct AttributedBuilder {
                 InlineRange(
                     index: inlineIndex, kind: node.kind,
                     range: NSRange(location: start, length: max(result.length - start, 1)),
-                    blockID: block.id
+                    blockID: block.id,
+                    plainRange: NSRange(location: plainStart, length: plainCursor - plainStart),
+                    contentRange: NSRange(location: start, length: contentEnd - start)
                 )
             )
         }
@@ -962,6 +1047,7 @@ struct AttributedBuilder {
             // as plain body text. The override has to reach the children as a style.
             let childStyle = overrideStyle.applied(to: style)
             let start = result.length
+            let plainStart = plainCursor
             for child in node.children {
                 emit(inline: child, into: result, style: childStyle, block: block, depth: depth)
             }
@@ -974,17 +1060,21 @@ struct AttributedBuilder {
                     runAttributes(childStyle, block: block, depth: depth),
                     to: result
                 )
+                plainCursor = plainStart + node.plainText.utf16.count
             }
-            appendHiddenRun(
-                node.suffix, role: close, into: result, style: hiddenStyle,
-                block: block, depth: depth, inlineIndex: inlineIndex
-            )
+            let contentEnd = result.length
             inlineNodes.append(
                 InlineRange(
                     index: inlineIndex, kind: node.kind,
                     range: NSRange(location: start, length: max(result.length - start, 1)),
-                    blockID: block.id
+                    blockID: block.id,
+                    plainRange: NSRange(location: plainStart, length: plainCursor - plainStart),
+                    contentRange: NSRange(location: start, length: contentEnd - start)
                 )
+            )
+            appendHiddenRun(
+                node.suffix, role: close, into: result, style: hiddenStyle,
+                block: block, depth: depth, inlineIndex: inlineIndex
             )
         }
 
@@ -1078,7 +1168,7 @@ struct AttributedBuilder {
             guard !block.attributes.isSetext else { return }
             let heading = BlockStyle.heading(theme: theme, level: block.attributes.level)
             let style = BlockStyle.collapsed(from: heading, theme: theme)
-            var emitted = String(block.inlines.verbatim)
+        let emitted = String(block.inlines.verbatim)
             for line in block.source.split(separator: "\n", omittingEmptySubsequences: false) {
                 let text = String(line)
                 if text.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -1099,7 +1189,6 @@ struct AttributedBuilder {
                         block: block, depth: depth
                     )
                 }
-                emitted = ""
                 return
             }
         }
@@ -1116,9 +1205,12 @@ struct AttributedBuilder {
             guard let newline = source.firstIndex(of: "\n") else { return }
             let underline = String(source[source.index(after: newline)...])
             guard !underline.isEmpty else { return }
-            // The newline between the text and its underline belongs to this block,
-            // and `build` only emits newlines *between* blocks.
-            result.append(NSAttributedString(string: "\n"))
+            // The separator re-creates the terminator the *text* line had - the `\r`
+            // sits just before the `\n` in the slice, and the block's own flag only
+            // knows about the underline line.
+            let textLineEndedCR =
+                newline > source.startIndex && source[source.index(before: newline)] == "\r"
+            result.append(NSAttributedString(string: textLineEndedCR ? "\r\n" : "\n"))
             let heading = BlockStyle.heading(theme: theme, level: block.attributes.level)
             appendHiddenRun(
                 underline, role: .headingHash, into: result,

@@ -53,10 +53,11 @@ public enum OPMLWriter {
             out.append("    <outline text=\"\(escape(text))\"/>\n")
         }
         out.append(nest(headings, depth: 2))
-        out.append("</outline>")
-        out.append("  </body>")
-        out.append("</opml>")
-        out.append("")
+        // One closing tag per line, like the head above: the old tail ran three
+        // closing tags together on one line.
+        out.append("</outline>\n")
+        out.append("  </body>\n")
+        out.append("</opml>\n")
         return out
     }
 
@@ -97,12 +98,21 @@ public enum OPMLWriter {
         var out = ""
         for node in inlines {
             switch node.kind {
-            case .text, .code, .emoji, .autolink, .entity:
-                out += node.verbatim
+            case .text:
+                out += node.payload
+            case .code, .emoji, .autolink:
+                // The payload, not the verbatim: code dropped its backticks and
+                // emoji its colons in the outline.
+                out += node.payload
+            case .entity:
+                // The verbatim (`&amp;`) would be escaped a second time below and
+                // arrive in the reader as literal text.
+                out += node.payload.isEmpty ? node.verbatim : InlineNode.decodeEntity(node.payload)
             case .softBreak, .hardBreak:
                 out += " "
             case .image, .refImage:
-                out += node.attributes.title ?? ""
+                // The alt text, not the link title (which is usually nil).
+                out += node.attributes.name ?? node.payload
             case .footnoteRef:
                 out += "[\(node.attributes.reference ?? "")]"
             default:

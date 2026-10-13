@@ -15,6 +15,8 @@ import Foundation
 struct Draft: Sendable {
     /// Where the document lives, or `nil` for one that was never saved.
     var sourceURL: URL?
+    /// Stable per-document identity - the draft key for a document with no file.
+    var documentID: String?
     /// The document's title at the time of the last write, for the recovery prompt.
     var title: String
     var markdown: String
@@ -68,10 +70,27 @@ final class DraftStore {
     }
 
     /// Drops the mirror. Called on every successful save, including autosave.
-    func clear(for sourceURL: URL?) {
-        let file = url(for: Draft(sourceURL: sourceURL, title: "", markdown: "", savedAt: .distantPast))
-        try? FileManager.default.removeItem(at: file)
-        drafts.removeAll { $0.sourceURL == sourceURL }
+    ///
+    /// Both identities are cleared: the file path when there is one, and the
+    /// per-document id, which is the only key an untitled document has. The old
+    /// path-only clear hashed an empty string for untitled documents and removed a
+    /// file that never existed, so a just-saved document came back as a phantom
+    /// recovery draft on the next launch.
+    func clear(sourceURL: URL?, documentID: String?) {
+        if let sourceURL {
+            try? FileManager.default.removeItem(
+                at: url(for: Draft(sourceURL: sourceURL, documentID: documentID, title: "", markdown: "", savedAt: .distantPast))
+            )
+        }
+        if let documentID, sourceURL == nil {
+            try? FileManager.default.removeItem(
+                at: directory.appendingPathComponent("untitled-" + documentID + ".md")
+            )
+        }
+        drafts.removeAll { draft in
+            (sourceURL != nil && draft.sourceURL == sourceURL)
+                || (documentID != nil && draft.documentID == documentID)
+        }
     }
 
     // MARK: - Recovery
@@ -104,17 +123,20 @@ final class DraftStore {
     ///
     /// The path is hashed rather than percent-encoded: a document name can contain
     /// anything a filesystem allows, and the draft name only has to be unique and
-    /// recoverable, which the index file supplies.
+    /// recoverable, which the index file supplies. An untitled document keys on its
+    /// minted per-document id - a content hash changed with every edit and left a
+    /// new orphan file per autosave tick, and Swift's `hashValue` is seeded per
+    /// process, so the name never matched again after a relaunch.
     private func url(for draft: Draft) -> URL {
-        directory.appendingPathComponent(Self.identifier(for: draft) + ".md")
+        if draft.sourceURL == nil, let documentID = draft.documentID {
+            return directory.appendingPathComponent("untitled-" + documentID + ".md")
+        }
+        return directory.appendingPathComponent(Self.identifier(for: draft) + ".md")
     }
 
     static func identifier(for draft: Draft) -> String {
         guard let path = draft.sourceURL?.standardizedFileURL.path else {
-            // An untitled document has no stable identity of its own, so it gets one
-            // from its content: two untitled windows with the same text are the same
-            // document as far as recovery is concerned.
-            return "untitled-" + String(format: "%08x", draft.markdown.hashValue)
+            return "untitled-" + (draft.documentID ?? "unknown")
         }
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in Array(path.utf8) {
@@ -149,9 +171,13 @@ final class DraftStore {
             let savedAt = attributes?[.modificationDate] as? Date ?? .distantPast
             let identifier = file.deletingPathExtension().lastPathComponent
             let source = paths[identifier].map { URL(fileURLWithPath: $0) }
+            let documentID = identifier.hasPrefix("untitled-")
+                ? String(identifier.dropFirst("untitled-".count))
+                : nil
             out.append(
                 Draft(
                     sourceURL: source,
+                    documentID: documentID,
                     title: source?.lastPathComponent ?? "Untitled",
                     markdown: text,
                     savedAt: savedAt
@@ -174,7 +200,11 @@ final class DraftStore {
 
     private func upsert(_ draft: Draft) {
         recordPath(for: draft)
-        drafts.removeAll { $0.sourceURL == draft.sourceURL }
+        drafts.removeAll { existing in
+            existing.documentID != nil
+                ? existing.documentID == draft.documentID
+                : existing.sourceURL == draft.sourceURL
+        }
         drafts.append(draft)
     }
 

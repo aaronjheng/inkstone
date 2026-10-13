@@ -83,14 +83,19 @@ public enum AlertKind: String, Hashable, Sendable {
 /// `source`, used for rendering, outline, search, word count and export. The two
 /// can never drift because the view is derived, never re-entered.
 ///
-/// The exception is `isAttachmentRendered` blocks: those occupy one placeholder
-/// character in the buffer, so their text has to be regenerated. See
-/// `Markdown/Serialize/AttachmentWriter.swift`.
+/// The exception is `isAttachmentRendered` blocks: their painted rows are emitted
+/// straight from the byte-exact `source` slice, so the buffer never holds a
+/// placeholder for them at all.
 public struct BlockNode: Identifiable, Hashable, Sendable {
     public var id: Int
     public var kind: BlockKind
-    /// The block's exact source text, including its own trailing newline.
+    /// The block's exact source text. It excludes the newline that terminates the
+    /// block's last line (the document's reassembly and the layout's separator
+    /// re-add it) but includes every interior terminator verbatim, `\r\n` included.
     public var source: String
+    /// Whether the block's last line ended `\r\n` in the original - the flag the
+    /// separator that follows the block has to reproduce.
+    public var endsWithCarriageReturn = false
     /// Verbatim text of the blank lines that preceded this block, each terminated
     /// by a newline.
     ///
@@ -176,9 +181,8 @@ public struct BlockNode: Identifiable, Hashable, Sendable {
     /// invisible until `source` is refreshed. Parsing never needs this; any code
     /// path that mutates inlines does.
     ///
-    /// Returns `false` when the old body is not a suffix of `source`, which means the
-    /// block is not a text block (a table keeps its original rows in `TableState` and
-    /// must be re-rendered through the writer instead).
+    /// Returns `false` when the old body is not a suffix of `source`, which means
+    /// the block is not a text block and its source cannot be refreshed here.
     @discardableResult
     public mutating func refreshSource(from previousBody: String) -> Bool {
         guard !previousBody.isEmpty, !inlines.isEmpty else { return false }
@@ -234,38 +238,13 @@ extension Array where Element == BlockNode {
     }
 }
 
-/// Table-specific state.
+/// Table alignment state.
 ///
-/// `userText` and `alignText` are the original's round-trip escape hatch and the
-/// single most important detail for table fidelity: while they are present the
-/// writer replays the original rows verbatim, which preserves irregular padding
-/// and non-aligned delimiters that a recomputed table would rewrite.
-///
-/// Both are cleared together the moment anything about the table changes -
-/// **including a cell's text**, not just its structure. the original clears them in
-/// eight places (`tryResetTable`): move row, move column, resize, delete row,
-/// delete column, insert row, insert column, change cell text, change alignment,
-/// delete table. Missing the cell-text case silently discards the user's typing
-/// on the next save.
+/// The table's source slice is byte-exact by construction and is what the buffer
+/// replays, so no row replay fields are kept here - only the alignments the
+/// delimiter row declares, for renderers that want them without re-parsing.
 public struct TableState: Hashable, Sendable {
     public var columnAlignments: [ColumnAlignment] = []
-    public var columnCount: Int = 0
-    public var rowCount: Int = 0
-    /// True when the source uses a GitHub-style table (leading and trailing
-    /// pipes on every row).
-    public var isPipeDelimited = true
-    /// Original row texts, replayed verbatim while present.
-    public var userText: [String]?
-    /// Original delimiter-row texts, replayed verbatim while present.
-    public var alignText: [String]?
-    /// Leading/trailing spaces around each cell's content, kept only when the
-    /// table is irregular enough that a rebuild would not reproduce the source.
-    public var cellPadding: [CellPadding] = []
-
-    public struct CellPadding: Hashable, Sendable {
-        public var leading: Int = 0
-        public var trailing: Int = 0
-    }
 
     public enum ColumnAlignment: String, Hashable, Sendable {
         case none, left, center, right
@@ -291,29 +270,20 @@ public struct TableState: Hashable, Sendable {
             return .none
         }
     }
-
-    /// Clears the replay state so the next serialisation rebuilds the table.
-    /// See the type documentation for the full trigger list.
-    public mutating func invalidateReplay() {
-        userText = nil
-        alignText = nil
-    }
 }
 
 /// The parsed document: a flat list of top-level blocks plus derived indexes.
 public struct MarkdownDocument: Hashable, Sendable {
     public var blocks: [BlockNode]
-    /// Whether the source used CRLF.
-    ///
-    /// Recorded but no longer acted on: every block's `source` is a verbatim slice of
-    /// the original text, so it already carries its own `\r`. Re-applying the
-    /// substitution here doubled it - a CRLF file came back 86 bytes longer than it
-    /// started, on every save.
+    /// Whether the source used CRLF anywhere.
     public var usesCarriageReturns = false
+    /// Whether the file's final terminator was `\r\n`; the re-added final newline
+    /// has to match it or the file grows or shrinks by one byte per save.
+    public var finalNewlineIsCRLF = false
     /// Whether the source ended with a trailing newline.
     public var endsWithNewline = true
-    /// Verbatim blank-line text after the last block, each terminated by a
-    /// newline. A file ending in `\n\n` must not be rewritten to end in `\n`.
+    /// Verbatim blank-line text after the last block, each terminated by its own
+    /// original newline. A file ending in `\n\n` must not be rewritten to end in `\n`.
     public var trailingText: String = ""
 
     /// Link reference definitions by lowercased label.
@@ -336,14 +306,16 @@ public struct MarkdownDocument: Hashable, Sendable {
 
     /// Reassembles the original document text.
     ///
-    /// Each block contributes `blankLinesBefore` newlines, a separator newline
-    /// when it is not the first, and its own `source`. Because every block's
-    /// `source` is a verbatim slice, this reproduces the input byte for byte -
-    /// there is no normalisation step to disagree with.
+    /// Each block contributes its leading blank lines, and the separator before
+    /// block `i` reproduces the terminator block `i-1` ended with (`\r\n` or `\n`).
+    /// Because every block's `source` is a verbatim slice, this reproduces the
+    /// input byte for byte - CRLF, mixed endings and all.
     public var source: String {
         var text = ""
         for (index, block) in blocks.enumerated() {
-            if index > 0 { text += "\n" }
+            if index > 0 {
+                text += blocks[index - 1].endsWithCarriageReturn ? "\r\n" : "\n"
+            }
             text += block.leadingText
             text += block.source
         }
@@ -351,7 +323,9 @@ public struct MarkdownDocument: Hashable, Sendable {
         // a blank line, and adding another would grow the tail by a byte per save -
         // which is how `a\n\n\n` came back as `a\n\n\n\n`.
         let tailCoversIt = trailingText.hasSuffix("\n")
-        if endsWithNewline, !text.isEmpty, !tailCoversIt { text += "\n" }
+        if endsWithNewline, !text.isEmpty, !tailCoversIt {
+            text += finalNewlineIsCRLF ? "\r\n" : "\n"
+        }
         text += trailingText
         return text
     }

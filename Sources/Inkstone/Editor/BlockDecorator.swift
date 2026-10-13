@@ -144,10 +144,6 @@ enum BlockDecorator {
             case let .inlineCode(background, radius):
                 // Inline chrome is painted per line fragment by the inline pass.
                 _ = (background, radius)
-            case let .focusChip(text, color):
-                drawMarker(
-                    text, in: lineRect, width: lineRect.width, alignment: .left,
-                    theme: theme, context: context, color: color, small: true)
             case let .alertBox(title, background, border):
                 let path = CGPath(
                     roundedRect: lineRect.insetBy(dx: 0, dy: 0),

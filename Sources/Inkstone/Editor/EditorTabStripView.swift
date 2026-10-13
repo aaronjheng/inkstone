@@ -116,7 +116,7 @@ private final class TabEscapeMonitor {
     }
 }
 
-private final class TabAutoScroller {
+private final class TabAutoScroller: @unchecked Sendable {
     var onTick: (() -> Void)?
     private var timer: Timer?
 
@@ -218,7 +218,7 @@ struct EditorTabStripView: View {
                 .fill(Color(nsColor: .unemphasizedSelectedContentBackgroundColor))
                 .overlay(
                     Capsule(style: .continuous)
-                        .stroke(Color(nsColor: .quinaryLabel), lineWidth: EditorTabStripLayout.hairline)
+                        .stroke(Color(nsColor: .quinaryLabelColor), lineWidth: EditorTabStripLayout.hairline)
                 )
         )
     }
@@ -329,6 +329,9 @@ struct EditorTabStripView: View {
                     drag = nil
                     dragCancelled = false
                     isTearingOff = false
+                    // The offset is derived per drag; leaving it set made the next
+                    // drag's first autoscroll tick jump to the previous drag's tab.
+                    autoScrollShift = EditorTabStripLayout.trackPadding
                     autoScroller.stop()
                     escapeMonitor.disarm()
                 }

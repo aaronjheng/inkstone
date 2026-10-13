@@ -40,27 +40,13 @@ struct TableGrid {
 
     var columnCount: Int { columnOffsets.count }
 
-    /// Splits a row on unescaped pipes and trims the padding that only exists to
-    /// space the source out.
+    /// Splits a row into cells, honouring `\|` escapes and the parser's own
+    /// rules for leading and trailing pipes. Delegated to `TableRecognizer`
+    /// (Markdown/Parse) so the painted geometry can never disagree with the
+    /// parsed cells: the old hand-rolled split dropped empty interior cells
+    /// (`| a || b |`) and shifted every later column one left.
     static func cells(in row: String) -> [String] {
-        let characters = Array(row)
-        var cells: [String] = []
-        var start: Int?
-        var index = 0
-        while index <= characters.count {
-            let atEnd = index == characters.count
-            let isPipe =
-                atEnd || (characters[index] == "|" && (index == 0 || characters[index - 1] != "\\"))
-            if isPipe {
-                // An empty span is the row's leading or trailing pipe, not a cell.
-                if let begin = start, begin < index {
-                    cells.append(String(characters[begin..<index]))
-                }
-                start = index + 1 <= characters.count ? index + 1 : nil
-            }
-            index += 1
-        }
-        return cells.map { $0.trimmingCharacters(in: .whitespaces) }
+        TableRecognizer.split(row)
     }
 
     /// Reads `:---`, `---:` and `:---:` out of the delimiter row.

@@ -106,9 +106,10 @@ final class SourceModeController: NSObject {
         }
         scrollView.isHidden = true
         scrollView.removeFromSuperview()
-        let text = textView.string
-        document = BlockParser.parse(text, options: parseOptions)
-        return text
+        // Re-parsing here only refreshes the internal view; the caller pushes the
+        // text back through the editor, and assigning `document` on the way out was
+        // a dead store (the value is overwritten before it is ever read).
+        return textView.string
     }
 
     /// Replaces the content when the underlying document changes elsewhere - a
@@ -143,7 +144,10 @@ final class SourceModeController: NSObject {
         )
         let location = min(selected.location, textView.textStorage?.length ?? 0)
         textView.setSelectedRange(
-            NSRange(location: location, length: min(selected.length, text.count))
+            NSRange(
+                location: location,
+                length: min(selected.length, (text as NSString).length)
+            )
         )
         isSyncing = false
     }
@@ -161,7 +165,7 @@ extension SourceModeController: NSTextViewDelegate {
     }
 
     private func rehighlight() {
-        guard let storage = textView.textStorage else { return }
+        guard let storage = textView.textStorage, storage.length > 0 else { return }
         let location = textView.selectedRange().location
         let lineRange = (storage.string as NSString).lineRange(
             for: NSRange(location: min(location, storage.length - 1), length: 0)
@@ -249,6 +253,12 @@ enum SourceHighlighter {
     }
 
     /// Length of the leading run of block-marker characters on a line.
+    ///
+    /// The run counts as a marker when it ends on whitespace or covers the whole
+    /// line: `# Heading` and `- item` carry `# `/`- ` as their marker, while
+    /// `a-b` keeps its hyphen. (The first version required the character *after*
+    /// the run to be whitespace, which is never true for `# Heading` - the tint
+    /// was effectively dead for every ordinary marker line.)
     private static func leadingMarkerLength(of line: String) -> Int {
         var index = line.startIndex
         var length = 0
@@ -261,9 +271,11 @@ enum SourceHighlighter {
             }
             break
         }
-        // Only a prefix that ends in whitespace or the whole line counts, so a
-        // paragraph starting with a hyphenated word is not tinted.
-        guard length > 0, length < line.count else { return length }
+        guard length > 0 else { return 0 }
+        if length == line.count { return length }
+        // The run itself ends in whitespace (`- `), or the next character starts
+        // a whitespace run (`#  Title`): either way the prefix is a marker.
+        if line[line.index(line.startIndex, offsetBy: length - 1)].isWhitespace { return length }
         let next = line[line.index(line.startIndex, offsetBy: length)]
         return next.isWhitespace ? length : 0
     }

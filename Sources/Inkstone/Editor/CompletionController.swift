@@ -73,13 +73,19 @@ final class CompletionController: NSObject {
     /// Returns whether the key was consumed.
     func handle(_ event: NSEvent) -> Bool {
         guard !items.isEmpty else { return false }
+        func moved() -> Bool {
+            // The rows are painted by hand, so a selection index change is invisible
+            // until the next repaint is asked for.
+            table.needsDisplay = true
+            return true
+        }
         switch event.keyCode {
         case 125:  // down
             selected = min(selected + 1, items.count - 1)
-            return true
+            return moved()
         case 126:  // up
             selected = max(selected - 1, 0)
-            return true
+            return moved()
         case 36, 76:  // return, enter
             accept()
             return true
@@ -113,7 +119,13 @@ final class CompletionController: NSObject {
                 rect = line
                 stop.pointee = true
             }
-            caret = rect.origin
+            // Line-fragment rects are in text-container coordinates; the view adds
+            // `textContainerInset` on top. Skipping the origin put the panel one
+            // content-padding off, the same offset `BlockDecorator` had to learn.
+            caret = NSPoint(
+                x: rect.origin.x + textView.textContainerOrigin.x,
+                y: rect.origin.y + textView.textContainerOrigin.y
+            )
         } else {
             caret = textView.bounds.origin
         }
@@ -122,10 +134,11 @@ final class CompletionController: NSObject {
         var origin = window.convertPoint(toScreen: inWindow)
         origin.y -= panel.frame.height + 4
         // Flip above the caret when there is no room below, the way every autocomplete
-        // does: the bottom of the screen is where the cursor usually is.
+        // does: the bottom of the screen is where the cursor usually is. The downward
+        // shift is cancelled and the panel's bottom lands a few points above the line.
         let screen = window.screen?.visibleFrame ?? NSRect(x: 0, y: 0, width: 0, height: 0)
         if origin.y < screen.minY + 8 {
-            origin.y += panel.frame.height * 2 + 8
+            origin.y += panel.frame.height + 8
         }
         panel.setFrameOrigin(origin)
     }
@@ -149,7 +162,9 @@ final class CompletionController: NSObject {
             )
         }
         table.onMouseDown = { [weak self] point in
-            guard let self, let row = self.table.row(at: point) else { return }
+            guard let self, let row = self.table.row(at: point), row < self.items.count else {
+                return
+            }
             self.selected = row
             self.accept()
         }
@@ -198,14 +213,19 @@ extension CompletionController {
                 let rect = NSRect(
                     x: 1, y: 4 + CGFloat(index) * 22, width: view.bounds.width - 2, height: 21
                 )
+                // The selection background goes down first: filling it after the text
+                // painted the highlighted row's candidate out of existence.
+                if index == selected {
+                    NSColor.selectedContentBackgroundColor.setFill()
+                    NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
+                }
                 let paragraph = NSMutableParagraphStyle()
                 paragraph.alignment = .left
                 let label = NSAttributedString(
                     string: item.label,
                     attributes: [
                         .font: EditorFont.nsSystem(size: 12),
-                        .foregroundColor: item.label == item.detail && item.detail.isEmpty
-                            ? theme.text.nsColor : theme.text.nsColor,
+                        .foregroundColor: theme.text.nsColor,
                         .paragraphStyle: paragraph,
                     ]
                 )
@@ -221,10 +241,6 @@ extension CompletionController {
                     )
                     let size = detail.size()
                     detail.draw(at: NSPoint(x: view.bounds.width - size.width - 8, y: rect.minY + 3))
-                }
-                if index == selected {
-                    NSColor.selectedContentBackgroundColor.setFill()
-                    NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4).fill()
                 }
             }
         }

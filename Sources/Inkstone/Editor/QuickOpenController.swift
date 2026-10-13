@@ -28,6 +28,9 @@ final class QuickOpenController: NSObject {
     private var entries: [Entry] = []
     private var roots: [URL] = []
     private var snapshotAt: Date?
+    /// Set while the code drives the table's selection itself; the callback must
+    /// not write the selected path back into the query field then.
+    private var isFiltering = false
 
     private let panel = NSPanel(
         contentRect: NSRect(x: 0, y: 0, width: 560, height: 320),
@@ -115,6 +118,11 @@ final class QuickOpenController: NSObject {
         field.stringValue = ""
         filtered = entries
         table.reloadData()
+        if !filtered.isEmpty {
+            // Row 0 preselected, so Return opens the first hit immediately instead
+            // of doing nothing until an arrow key was pressed.
+            table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
+        }
         panel.center()
         panel.makeKeyAndOrderFront(nil)
         panel.makeFirstResponder(field)
@@ -171,10 +179,16 @@ final class QuickOpenController: NSObject {
                 .prefix(200)
                 .map(\.0)
         }
+        // Sync the selection without echoing it back into the query field: the
+        // selection-change callback used to overwrite the query with row 0's full
+        // path and select all of it, so the second keystroke replaced the query
+        // and multi-character queries were impossible.
+        isFiltering = true
         table.reloadData()
         if !filtered.isEmpty {
             table.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false)
         }
+        isFiltering = false
     }
 
     @objc private func commit() {
@@ -229,11 +243,10 @@ extension QuickOpenController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     func tableViewSelectionDidChange(_ notification: Notification) {
-        let row = table.selectedRow
-        if filtered.indices.contains(row) {
-            field.stringValue = filtered[row].display
-            field.selectText(nil)
-        }
+        // Selection is visual state for the Return key; it never rewrites the
+        // query. (The old body overwrote the query on every programmatic
+        // selection, which made Quick Open unusable after one character.)
+        guard !isFiltering else { return }
     }
 }
 

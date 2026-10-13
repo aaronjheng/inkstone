@@ -72,9 +72,11 @@ enum CodeLanguage: String, CaseIterable {
         case "", "text", "plain", "plaintext":
             self = .plain
         default:
-            // Unknown language: register a family so unknown tokens still get a
-            // colour rather than being dropped.
-            self = .clike
+            // Unregistered languages fall through to plain, per the documented
+            // behaviour difference from the original (DESIGN.md §7) - tokenising
+            // prose-like input as C-like sprayed keywords over text the user
+            // never asked to highlight.
+            self = .plain
         }
     }
 }
@@ -148,10 +150,19 @@ enum CodeTokenizer {
         let characters = Array(text)
         var tokens: [CodeToken] = []
         var index = 0
+        // Tokens are found over `[Character]` but consumed as NSString ranges
+        // (UTF-16 offsets): an emoji in a comment used to shift every later token
+        // one unit per astral character and silently miscolour the line.
+        var utf16Offsets = [Int](repeating: 0, count: characters.count + 1)
+        for (position, character) in characters.enumerated() {
+            utf16Offsets[position + 1] = utf16Offsets[position] + String(character).utf16.count
+        }
 
         func emit(_ kind: CodeToken.Kind, from start: Int, to end: Int) {
             guard end > start else { return }
-            tokens.append(CodeToken(kind: kind, range: NSRange(location: start, length: end - start)))
+            let location = utf16Offsets[min(max(start, 0), characters.count)]
+            let limit = utf16Offsets[min(max(end, 0), characters.count)]
+            tokens.append(CodeToken(kind: kind, range: NSRange(location: location, length: limit - location)))
         }
 
         while index < characters.count {
@@ -255,7 +266,9 @@ enum CodeTokenizer {
                             $0 == " " || $0 == "\t" || $0 == "/"
                                 || $0 == "\n"
                         }) ?? body.endIndex
-                    let nameLength = nameEnd.utf16Offset(in: body)
+                    // A Character offset into `body`, not a UTF-16 one: the tag name
+                    // length lands back on the same index space the tokenizer uses.
+                    let nameLength = body.distance(from: body.startIndex, to: nameEnd)
                     emit(.tag, from: index, to: index + 1 + nameLength)
                     emit(.attribute, from: index + 1 + nameLength, to: end)
                 }
@@ -345,9 +358,6 @@ enum CodeTokenizer {
 }
 
 extension String.Index {
-    ///
-    /// Falls back to the end of the string when the index has no counterpart in
-    /// the UTF-16 view; every call site treats that as "no token here".
     /// Number of UTF-16 units between the string's start and this index.
     ///
     /// Returns 0 for an index that does not belong to `string`, which every call

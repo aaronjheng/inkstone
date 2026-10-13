@@ -20,9 +20,15 @@ final class PreferencesController: NSWindowController {
         self.init(window: window)
     }
 
-    /// Re-centres on first show; afterwards the user's placement wins.
+    private var didInitialCenter = false
+
+    /// Re-centres on first show; afterwards the user's placement wins. The old
+    /// body centred unconditionally, contradicting its own comment.
     func show() {
-        window?.center()
+        if !didInitialCenter {
+            window?.center()
+            didInitialCenter = true
+        }
         showWindow(nil)
         window?.makeKeyAndOrderFront(nil)
     }

@@ -56,6 +56,9 @@ public struct BlockParser {
     private struct Line {
         var text: Substring
         var offset: Int
+        /// Whether the line ended `\r\n` in the original. The `\r` is stripped for
+        /// matching, but every byte has to reach `source` again - see `slice`.
+        var hasCR = false
         var isBlank: Bool { Self.isBlankLine(text) }
 
         static func isBlankLine(_ value: Substring) -> Bool {
@@ -100,12 +103,14 @@ public struct BlockParser {
         // Front matter is recognised before the body so it is not also matched as
         // a horizontal rule plus whatever follows.
         var frontMatter: BlockNode?
+        var frontMatterStep = Step(block: BlockNode(id: -1, kind: .emptyLine, source: ""), nextLine: 0)
         var bodyStart = 0
         if !lines.isEmpty, isFrontMatterOpening(String(lines[0].text)),
             hasFrontMatterCloser(from: 1)
         {
             let step = consumeFrontMatter(from: 0, until: lines.count)
             frontMatter = step.block
+            frontMatterStep = step
             bodyStart = step.nextLine
         }
         var blocks = parseRegion(bodyStart, lines.count, indent: 0, topLevel: true)
@@ -119,55 +124,37 @@ public struct BlockParser {
             endsWithNewline: !text.isEmpty && (text.hasSuffix("\n") || text.hasSuffix("\r")),
             trailingText: trailingText(after: blocks)
         )
+        document.finalNewlineIsCRLF = text.hasSuffix("\r\n")
+        if let frontMatter, frontMatterStep.nextLine > 0, frontMatterStep.nextLine <= lines.count {
+            var matter = frontMatter
+            matter.endsWithCarriageReturn = lines[frontMatterStep.nextLine - 1].hasCR
+            blocks[0] = matter
+            document.blocks = blocks
+        }
         document.rebuildIndexes()
         return document
     }
 
     /// Verbatim text of the blank lines after the final block.
     ///
-    /// `splitLines` yields one trailing empty element per source newline, so a file
-    /// ending in `\n\n` produces two. The first of those is the newline that
-    /// terminates the last block's own line and is not part of this text.
-    /// The verbatim text after the last block.
-    ///
-    /// Everything from the end of the final block to the end of the file, including
-    /// the whitespace *on* those blank lines. Collecting them by stripping and
-    /// re-adding a newline loses a trailing line that holds only a tab, which is how a
-    /// 133-byte file came back as one byte.
-    /// The document text after its last block, verbatim.
-    ///
-    /// Taken from the text rather than re-assembled from blank lines: a file whose last
-    /// line is a tab, or which ends in three newlines, has a tail that no amount of
-    /// stripping and re-adding newlines reproduces.
-    ///
     /// The end offset is counted in UTF-16 units because that is what `NSString`
-    /// indexes by, and it is summed from `leadingText + source` rather than taken from
-    /// `sourceOffset`, which is a *byte* offset - using it truncated every document that
-    /// contained a non-ASCII character.
+    /// indexes by. It is summed from `leadingText + source` plus each block's own
+    /// terminator (which `slice` leaves off and the separator re-adds, `\r\n` when
+    /// that block's last line ended with one) rather than from `sourceOffset`, which
+    /// is a *byte* offset - using it truncated every document that contained a
+    /// non-ASCII character.
     private func trailingText(after blocks: [BlockNode]) -> String {
         var consumed = 0
-        var carriageReturns = 0
         for (index, block) in blocks.enumerated() {
-            if index > 0 {
-                consumed += 1
-                carriageReturns += 1
+            if index > 0, let previous = blocks[index - 1] as BlockNode? {
+                consumed += previous.endsWithCarriageReturn ? 2 : 1
             }
-            // `splitLines` strips the `\r` of a CRLF line, so each `\n` a block
-            // accounts for is two bytes wide in the original. Count them to index the
-            // tail correctly.
-            for piece in [block.leadingText, block.source] {
-                consumed += piece.utf16.count
-                carriageReturns += piece.utf16.filter { $0 == 0x0A }.count
-            }
+            consumed += block.leadingText.utf16.count
+            consumed += block.source.utf16.count
         }
         let ns = text as NSString
-        // `splitLines` strips the `\r` from each line, so every newline a block
-        // accounts for is one UTF-16 unit here but two bytes in the original. The tail
-        // has to be indexed past those.
-        let offset = consumed + (text.contains("\r\n") ? carriageReturns : 0)
-        guard offset >= 0, offset < ns.length else { return "" }
-        let tail = ns.substring(from: offset)
-        return text.contains("\r\n") ? tail.replacingOccurrences(of: "\r\n", with: "\n") : tail
+        guard consumed >= 0, consumed < ns.length else { return "" }
+        return ns.substring(from: consumed)
     }
 
     private mutating func splitLines(_ value: String) -> [Line] {
@@ -175,8 +162,12 @@ public struct BlockParser {
         var offset = 0
         for segment in value.split(separator: "\n", omittingEmptySubsequences: false) {
             var clean = segment
-            if clean.hasSuffix("\r") { clean = clean.dropLast() }
-            result.append(Line(text: clean, offset: offset))
+            var hasCR = false
+            if clean.hasSuffix("\r") {
+                clean = clean.dropLast()
+                hasCR = true
+            }
+            result.append(Line(text: clean, offset: offset, hasCR: hasCR))
             offset += segment.utf16.count + 1
         }
         return result
@@ -196,7 +187,7 @@ public struct BlockParser {
             let line = lines[cursor]
 
             if line.isBlank {
-                pendingLeadingText += line.text + "\n"
+                pendingLeadingText += line.text + (line.hasCR ? "\r\n" : "\n")
                 pendingByteCost += line.text.utf16.count + 1
                 cursor += 1
                 continue
@@ -214,6 +205,12 @@ public struct BlockParser {
             }
             pendingByteCost = 0
             pendingLeadingText = ""
+            // The block's own final terminator is re-added by the document's source
+            // reassembly and the layout's separator; both need to know whether it
+            // was `\r\n` or `\n`, which the stripped line no longer shows.
+            if step.nextLine > 0, step.nextLine <= lines.count {
+                step.block.endsWithCarriageReturn = lines[step.nextLine - 1].hasCR
+            }
             blocks.append(step.block)
             cursor = step.nextLine
         }
@@ -339,7 +336,6 @@ public struct BlockParser {
         return sawAny ? count : nil
     }
 
-    /// Lines `start ... end` joined with newlines, both bounds inclusive.
     /// Walks `cursor` back over blank lines, never past `floor`.
     ///
     /// Used when a container reaches the end of its region without closing: the
@@ -349,11 +345,19 @@ public struct BlockParser {
         while cursor > floor, lines[cursor - 1].isBlank { cursor -= 1 }
     }
 
+    /// Lines `start ... end` joined with newlines, both bounds inclusive.
+    ///
+    /// Each join re-uses the terminator the *previous* line had in the original:
+    /// `\r\n` for a CRLF line. Stripping `\r` for matching must not cost the byte
+    /// on the way back out - that was how saving quietly converted every CRLF file
+    /// to LF.
     private func slice(from start: Int, through end: Int) -> String {
         guard start >= 0, end < lines.count, start <= end else { return "" }
         var result = ""
         for position in start...end {
-            if position > start { result += "\n" }
+            if position > start {
+                result += lines[position - 1].hasCR ? "\r\n" : "\n"
+            }
             result += lines[position].text
         }
         return result
@@ -364,23 +368,37 @@ public struct BlockParser {
     private mutating func consumeParagraph(from start: Int, until end: Int) -> Step {
         var cursor = start
         var parts: [Substring] = []
+        var terminators: [String] = []
         while cursor < end {
             if lines[cursor].isBlank { break }
             let content = String(lines[cursor].text)
             if cursor > start, terminatesParagraph(content) { break }
             parts.append(lines[cursor].text)
+            // The inline content keeps each line's own terminator so the buffer it
+            // produces stays byte-exact for CRLF documents.
+            terminators.append(lines[cursor].hasCR ? "\r\n" : "\n")
             cursor += 1
         }
         var block = BlockNode(
             id: ids.allocate(), kind: .paragraph, source: slice(from: start, through: cursor - 1)
         )
-        block.inlines = InlineLexer.parse(joinForInlining(parts), options: options.inline)
+        block.inlines = InlineLexer.parse(
+            joinForInlining(parts, terminators: terminators), options: options.inline
+        )
         return Step(block: block, nextLine: cursor)
     }
 
-    private func joinForInlining(_ parts: [Substring]) -> String {
+    private func joinForInlining(_ parts: [Substring], terminators: [String]) -> String {
         guard parts.count > 1 else { return parts.first.map(String.init) ?? "" }
-        return parts.map(String.init).joined(separator: options.ignoreLineBreak ? " " : "\n")
+        if options.ignoreLineBreak { return parts.map(String.init).joined(separator: " ") }
+        var joined = ""
+        for (index, part) in parts.enumerated() {
+            joined += part
+            if index < parts.count - 1, index < terminators.count {
+                joined += terminators[index]
+            }
+        }
+        return joined
     }
 
     private func terminatesParagraph(_ content: String) -> Bool {
@@ -528,13 +546,19 @@ public struct BlockParser {
 
     /// Removes the quote markers from a line.
     ///
-    /// Only **one** space comes off with each `>`, which is the CommonMark rule. The
-    /// remaining indentation has to survive: dropping it too turned `    > x` into
-    /// `x` on one pass and then `> x` on the next, so parsing the stripped region found
-    /// another quote and recursed until the stack ran out.
+    /// Exactly **one** `>` comes off per pass - plus the one space or tab that
+    /// follows it, which is the CommonMark rule. One level per pass is also what
+    /// keeps *nesting*: the old version stripped every `>` in a single sweep, so
+    /// `> > deep` collapsed to `deep` and lost a quote level - the outline and
+    /// HTML export both saw the wrong tree. Each recursion now removes exactly
+    /// one marker, so the remaining levels come back one pass at a time.
+    ///
+    /// The remaining indentation still has to survive: dropping it too turned
+    /// `    > x` into `x` on one pass and then `> x` on the next, so parsing the
+    /// stripped region found another quote and recursed until the stack ran out.
     private func stripQuoteMarker(_ line: Substring) -> Substring {
         var value = line[...]
-        // Skip the up-to-three leading spaces `isQuote` allows, then the markers.
+        // Skip the up-to-three leading spaces `isQuote` allows, then the marker.
         // Leaving them in place means the stripped line still matches `isQuote`, and
         // parsing the stripped region finds the same quote again - which is an infinite
         // recursion, not a rendering artefact.
@@ -543,10 +567,9 @@ public struct BlockParser {
             value = value.dropFirst()
             leading += 1
         }
-        while value.first == ">" {
-            value = value.dropFirst()
-            if value.first == " " || value.first == "\t" { value = value.dropFirst() }
-        }
+        guard value.first == ">" else { return value }
+        value = value.dropFirst()
+        if value.first == " " || value.first == "\t" { value = value.dropFirst() }
         return value
     }
 
@@ -586,29 +609,24 @@ public struct BlockParser {
             id: ids.allocate(), kind: .table, source: slice(from: index, through: consumed - 1)
         )
         var state = TableState()
-        state.columnCount = parsed.alignments.count
         state.columnAlignments = parsed.alignments
-        state.rowCount = parsed.body.count + 1
-        state.isPipeDelimited = parsed.header.isPipeDelimited
-        state.userText = parsed.rowTexts
-        state.alignText = [parsed.delimiterRow]
-        state.cellPadding = parsed.header.padding
         block.attributes.table = state
         // Cell content is lexed so the grid can render inline styling and so
-        // search sees cell text.
+        // search sees cell text. Cells draw their IDs from the parser's shared
+        // allocator: numbering them from zero collided with top-level block IDs,
+        // and a find hit inside a cell then resolved to an unrelated block -
+        // highlight in the wrong place, Replace corrupting the wrong text.
         block.children = tableCells(parsed)
         return Step(block: block, nextLine: consumed)
     }
 
-    private func tableCells(_ parsed: TableRecognizer.Parsed) -> [BlockNode] {
+    private mutating func tableCells(_ parsed: TableRecognizer.Parsed) -> [BlockNode] {
         var cells: [BlockNode] = []
-        var counter = 0
         for row in [parsed.header] + parsed.body {
             for cell in row.cells {
-                var node = BlockNode(id: counter, kind: .paragraph, source: cell)
+                var node = BlockNode(id: ids.allocate(), kind: .paragraph, source: cell)
                 node.inlines = InlineLexer.parse(cell, options: options.inline)
                 cells.append(node)
-                counter += 1
             }
         }
         return cells

@@ -129,15 +129,48 @@ public struct NodeSearch {
         return blocks.map { replace(in: $0, query: query, with: replacement) }
     }
 
+    /// Whether the query compiles as a regular expression when regex mode is on.
+    /// The find bar uses it to say so instead of reporting zero hits for a typo.
+    public func hasValidExpression(for query: String) -> Bool {
+        if !options.useRegularExpression { return true }
+        return (try? makeExpression(for: query)) != nil
+    }
+
     private func replace(in block: BlockNode, query: String, with replacement: String) -> BlockNode {
         var copy = block
-        guard !copy.inlines.isEmpty else { return copy }
+        guard !copy.inlines.isEmpty || !copy.children.isEmpty else { return copy }
         // The original body has to be captured before the edit, because `source` is
         // an exact slice of the input and nothing else knows what it was.
         let previousBody = copy.text
         copy.inlines = replace(in: copy.inlines, query: query, with: replacement)
-        guard copy.text != previousBody else { return copy }
-        copy.refreshSource(from: previousBody)
+        if copy.text != previousBody {
+            copy.refreshSource(from: previousBody)
+        }
+        // Nested blocks - list items, quotes, table cells - are replaced too. The
+        // old code stopped at the block's own inlines, so replace-all reported
+        // success while text inside lists, quotes and tables survived untouched.
+        // A container's `source` slice is the authority for the buffer, so each
+        // changed child's old source is swapped out inside it, in child order.
+        if !copy.children.isEmpty {
+            let oldChildren = copy.children
+            copy.children = replace(in: copy.children, query: query, with: replacement)
+            if oldChildren != copy.children {
+                var source = copy.source
+                var cursor = source.startIndex
+                for (old, new) in zip(oldChildren, copy.children) where old.source != new.source {
+                    guard
+                        let range = source.range(of: old.source, range: cursor..<source.endIndex)
+                    else { continue }
+                    source.replaceSubrange(range, with: new.source)
+                    cursor =
+                        source.index(
+                            range.lowerBound, offsetBy: new.source.count,
+                            limitedBy: source.endIndex
+                        ) ?? source.endIndex
+                }
+                copy.source = source
+            }
+        }
         return copy
     }
 
@@ -210,14 +243,34 @@ public struct NodeSearch {
     }
 
     private func isWholeWord(_ text: String, at location: Int, length: Int) -> Bool {
-        let characters = Array(text)
-        let before = location > 0 ? characters[location - 1] : nil
-        let afterIndex = location + length
-        let after = afterIndex < characters.count ? characters[afterIndex] : nil
-        let isWordCharacter: (Character?) -> Bool = { character in
-            guard let character else { return false }
+        // `location` is a UTF-16 offset - it comes from an NSString search. The old
+        // version indexed `[Character]` with it, which crashes as soon as an astral
+        // character (emoji, CJK extension) before the hit pushes the two index
+        // spaces apart.
+        let ns = text as NSString
+        func isWordUnit(at index: Int) -> Bool {
+            guard index >= 0, index < ns.length else { return false }
+            // UInt32 arithmetic: a combined surrogate pair does not fit a UInt16.
+            var value = UInt32(ns.character(at: index))
+            if value >= 0xD800, value <= 0xDBFF, index + 1 < ns.length {
+                let low = UInt32(ns.character(at: index + 1))
+                if low >= 0xDC00, low <= 0xDFFF {
+                    value = 0x10000 + ((value - 0xD800) << 10) + (low - 0xDC00)
+                }
+            }
+            guard let scalar = Unicode.Scalar(value) else { return false }
+            let character = Character(String(scalar))
             return character.isLetter || character.isNumber || character == "_"
         }
-        return !isWordCharacter(before) && !isWordCharacter(after)
+        // The unit before the hit: step over a low surrogate onto its pair.
+        var beforeIndex = location - 1
+        if beforeIndex >= 0, beforeIndex < ns.length,
+            (0xDC00...0xDFFF).contains(ns.character(at: beforeIndex)), beforeIndex > 0
+        {
+            beforeIndex -= 1
+        }
+        let before = isWordUnit(at: beforeIndex)
+        let after = isWordUnit(at: location + length)
+        return !before && !after
     }
 }

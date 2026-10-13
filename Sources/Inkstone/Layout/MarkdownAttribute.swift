@@ -70,13 +70,6 @@ struct MarkerOccurrence {
     let blockID: Int
     /// Index of the inline element, when the marker is part of one.
     let inlineIndex: Int?
-
-    /// Whether the marker is shown while the caret is elsewhere.
-    ///
-    /// The original hides block markers entirely (they are represented by CSS
-    /// `list-style`, the quote border or a drawn rule) and reveals inline markers
-    /// only for the element under the caret.
-    var isInline: Bool { inlineIndex != nil }
 }
 
 /// One inline element's range in the produced string.
@@ -85,6 +78,12 @@ struct InlineRange {
     let kind: InlineKind
     let range: NSRange
     let blockID: Int
+    /// The element's span in the block's *plain text* (the text `NodeSearch`
+    /// matches), or a zero range when the element carries none.
+    var plainRange = NSRange(location: 0, length: 0)
+    /// Where the plain content sits in the buffer, so a plain-text offset can be
+    /// translated into a buffer range without guessing from syntax widths.
+    var contentRange = NSRange(location: 0, length: 0)
 }
 
 /// One block's range in the produced string.
@@ -117,18 +116,6 @@ struct LayoutOutput {
     /// The innermost inline elements containing `location`, outermost first.
     func inlineChain(at location: Int) -> [InlineRange] {
         inlineNodes.filter { $0.range.contains(location) }
-    }
-
-    /// Marker ranges whose element is in `chain` and whose delimiter role is
-    /// `role`. Used by the editor to reveal exactly one element's syntax.
-    func markerRanges(inlineIndices: Set<Int>, roles: Set<MarkerRole>) -> [NSRange] {
-        markers.compactMap { marker in
-            guard let inline = marker.inlineIndex, inlineIndices.contains(inline) else {
-                return nil
-            }
-            guard marker.range.length > 0 else { return nil }
-            return marker.range
-        }
     }
 }
 
@@ -175,10 +162,15 @@ enum MarkerRole {
 /// Where and how wide the document is laid out.
 struct LayoutContext {
     var containerWidth: CGFloat
-    var isExport = false
     /// Folder relative image paths resolve against. Set by the editor so `Layout/` does
     /// not have to know which document it is laying out.
     var imageBaseDirectory: URL?
+    /// Image size lookup served from the editor's decode cache, so a resize-driven
+    /// relayout does not re-decode every image on the main thread.
+    var imageSize: ((String) -> CGSize)?
+    /// Largest width an inline image may occupy; mirrors the painter's cap so the
+    /// layout pass and the painter agree.
+    var imageMaxWidth: CGFloat = 480
     /// Renders every marker as visible. Source mode and copy-as-markdown use it.
     var showsAllMarkers = false
 }

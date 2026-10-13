@@ -5,7 +5,7 @@ import UniformTypeIdentifiers
 
 /// Application delegate: menu bar, window lifecycle, and file handling.
 @MainActor
-public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
+public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     private let store = AppStore.shared
     private var isTerminating = false
     /// Set once `prepareUI` has run. `applicationDidFinishLaunching` is posted
@@ -70,6 +70,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             MainActor.assumeIsolated { self?.pushSettingsToWindows() }
         }
         pushSettingsToWindows()
+        // The menu checkmarks are rebuilt on demand (see `menuNeedsUpdate`); this
+        // event is what makes a window/tab switch re-read the focused document's
+        // panel state. It used to have no subscriber at all, so the notifications
+        // were fired into the void.
+        store.onWindowsChange = { [weak self] in
+            MainActor.assumeIsolated { self?.refreshViewCheckmarks() }
+        }
         // Open whatever the Finder, `open -a` or the command line handed us *before*
         // creating a scratch window: opening a file that then leaves an empty Untitled
         // window behind is what made the tab bar read "Untitled" three times over.
@@ -80,11 +87,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         earlyOpenURLs.removeAll()
         var seenPaths = Set<String>()
         var launched: [URL] = []
-        for file in allFiles {
-            if !seenPaths.contains(file.path) {
-                seenPaths.insert(file.path)
-                launched.append(file)
-            }
+        for file in allFiles where !seenPaths.contains(file.path) {
+            seenPaths.insert(file.path)
+            launched.append(file)
         }
         let recovered = recoverableDrafts()
         if !launched.isEmpty {
@@ -179,6 +184,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 
     public func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard !isTerminating else { return .terminateNow }
+        isTerminating = true
+        defer { isTerminating = false }
         let dirty = store.documents.filter(\.hasUnsavedChanges)
         guard !dirty.isEmpty else { return .terminateNow }
         let alert = NSAlert()
@@ -192,18 +199,44 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         alert.addButton(withTitle: "Cancel")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
-            do {
-                for document in dirty { try document.save() }
-            } catch {
-                AppLogger.error("Save failed on quit: \(error)", category: "File")
-                return .terminateCancel
+            for document in dirty {
+                do {
+                    // An untitled document has nowhere to save until the user
+                    // picks a path; the old path fell through `save()`'s guard and
+                    // destroyed the content on quit even though Save was chosen.
+                    if try promptSave(document) { continue }
+                    return .terminateCancel
+                } catch {
+                    present(error, for: document)
+                    return .terminateCancel
+                }
             }
             return .terminateNow
         case .alertSecondButtonReturn:
+            // The user explicitly declined: the drafts must not come back as a
+            // recovery prompt on the next launch.
+            store.discardDrafts(for: dirty)
             return .terminateNow
         default:
             return .terminateCancel
         }
+    }
+
+    /// Saves `document`, asking for a path first when it has none. Returns false
+    /// when the user cancelled the panel.
+    private func promptSave(_ document: DocumentWindowController) throws -> Bool {
+        guard document.fileURL == nil else {
+            try document.save()
+            return true
+        }
+        guard document.hostWindow != nil else { return false }
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText, .markdown]
+        panel.nameFieldStringValue = "Untitled.md"
+        guard panel.runModal() == .OK, let url = panel.url else { return false }
+        try document.saveAs(url)
+        store.noteRecent(url)
+        return true
     }
 
     // MARK: - Launch arguments
@@ -215,9 +248,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// `-psn_0_12345` is what the Finder passes to identify the process, and it is not
     /// a path - which is why the arguments are filtered rather than taken wholesale.
     private func launchFileURLs() -> [URL] {
-        CommandLine.arguments
-            .dropFirst()
-            .filter { $0.hasSuffix(".md") || $0.hasSuffix(".markdown") }
+        CommandLine.arguments.dropFirst()
+            .filter { argument in
+                guard !argument.hasPrefix("-") else { return false }
+                return ["md", "markdown", "mdown", "txt"]
+                    .contains((argument as NSString).pathExtension.lowercased())
+            }
+            .filter { FileManager.default.fileExists(atPath: $0) }
             .map { URL(fileURLWithPath: $0) }
     }
 
@@ -276,6 +313,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     @objc func openDocument(_ sender: Any?) {
+        // Open Recent routes through here with the URL in the item's
+        // representedObject; ignoring it made every recent-files row open the
+        // file panel instead of the file.
+        if let item = sender as? NSMenuItem, let url = item.representedObject as? URL {
+            open([url])
+            return
+        }
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
         panel.canChooseDirectories = false
@@ -359,7 +403,9 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func saveDocument(_ sender: Any?) {
         guard let window = store.focusedWindow else { return }
         do {
-            try window.save()
+            // ⌘S on an untitled document has to ask where, exactly like TextEdit -
+            // the old path hit `save()`'s nil-URL guard and silently did nothing.
+            _ = try promptSave(window)
         } catch {
             present(error, for: window)
         }
@@ -369,7 +415,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         guard let window = store.focusedWindow else { return }
         let panel = NSSavePanel()
         panel.nameFieldStringValue = window.fileURL?.lastPathComponent ?? "Untitled.md"
-        panel.allowedContentTypes = [.plainText]
+        panel.allowedContentTypes = [.plainText, .markdown]
         guard panel.runModal() == .OK, let url = panel.url else { return }
         do {
             try window.saveAs(url)
@@ -548,33 +594,67 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     private func replaceImagePath(_ url: URL, in window: DocumentWindowController, ref: ImageRef) {
-        guard let storage = window.editor.textStorage else { return }
         let text = pathText(for: url, in: window)
-        storage.beginEditing()
-        storage.replaceCharacters(in: ref.pathRange, with: text)
-        storage.endEditing()
-        window.editor.load(markdown: storage.string)
+        // Through the editor's editing path: the old direct-storage write bypassed
+        // undo, `load(markdown:)` threw the whole undo stack away, and neither
+        // marked the document dirty, so a renamed image silently vanished from the
+        // edited state and could be lost on close.
+        window.editor.apply(
+            FormatController.Edit(
+                range: ref.pathRange,
+                text: text,
+                selection: NSRange(
+                    location: ref.pathRange.location + text.utf16.count, length: 0
+                )
+            )
+        )
     }
 
-    private func bitmapFileType(for url: URL) -> NSBitmapImageRep.FileType {
+    private func bitmapFileType(for url: URL) -> NSBitmapImageRep.FileType? {
         switch url.pathExtension.lowercased() {
         case "png": return .png
         case "jpg", "jpeg": return .jpeg
-        default: return .tiff
+        case "gif": return .gif
+        case "bmp": return .bmp
+        case "tif", "tiff": return .tiff
+        default: return nil
         }
     }
 
     @objc func imageDelete(_ sender: Any?) {
         guard let window = store.focusedWindow, let ref = imageRef(in: window) else { return }
-        guard let storage = window.editor.textStorage else { return }
-        if let url = imageURL(ref.path, in: window) {
-            try? FileManager.default.removeItem(at: url)
+        let url = imageURL(ref.path, in: window)
+        let exists = url.flatMap({ FileManager.default.fileExists(atPath: $0.path) }) == true
+        if exists, let url {
+            // One menu item used to unlink a file from disk with no warning - a file
+            // other documents may reference. The syntax is recoverable by undo, the
+            // file is not.
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Delete “\(url.lastPathComponent)”?"
+            alert.informativeText =
+                "The image file moves to the Trash and the reference is removed from the document."
+            alert.addButton(withTitle: "Delete")
+            alert.addButton(withTitle: "Cancel")
+            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        }
+        if exists, let url {
+            var trashed: NSURL?
+            do {
+                try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
+            } catch {
+                present(error, for: window)
+                return
+            }
         }
         window.editor.imagePainter.invalidate()
-        storage.beginEditing()
-        storage.deleteCharacters(in: ref.syntaxRange)
-        storage.endEditing()
-        window.editor.load(markdown: storage.string)
+        window.editor.apply(
+            FormatController.Edit(
+                range: ref.syntaxRange,
+                text: "",
+                selection: NSRange(location: ref.syntaxRange.location, length: 0)
+            )
+        )
     }
 
     @objc func imageRename(_ sender: Any?) {
@@ -586,9 +666,18 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         panel.nameFieldStringValue = url.lastPathComponent
         panel.beginSheetModal(for: sheet) { result in
             guard result == .OK, let saveURL = panel.url else { return }
-            try? FileManager.default.removeItem(at: saveURL)
-            try? FileManager.default.moveItem(at: url, to: saveURL)
-            guard FileManager.default.fileExists(atPath: saveURL.path) else { return }
+            if saveURL.standardizedFileURL.path == url.standardizedFileURL.path { return }
+            do {
+                // The save panel already asks before replacing; a silent pre-delete
+                // here destroyed the destination even when the move then failed.
+                if FileManager.default.fileExists(atPath: saveURL.path) {
+                    try FileManager.default.removeItem(at: saveURL)
+                }
+                try FileManager.default.moveItem(at: url, to: saveURL)
+            } catch {
+                self.present(error, for: window)
+                return
+            }
             window.editor.imagePainter.invalidate()
             self.replaceImagePath(saveURL, in: window, ref: ref)
         }
@@ -606,11 +695,26 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         panel.beginSheetModal(for: sheet) { result in
             guard result == .OK, let folder = panel.url else { return }
             let destination = folder.appendingPathComponent(url.lastPathComponent)
-            if destination.standardizedFileURL.path != url.standardizedFileURL.path {
-                try? FileManager.default.removeItem(at: destination)
-                try? FileManager.default.moveItem(at: url, to: destination)
+            if destination.standardizedFileURL.path == url.standardizedFileURL.path {
+                return
             }
-            guard FileManager.default.fileExists(atPath: destination.path) else { return }
+            do {
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Replace “\(destination.lastPathComponent)”?"
+                    alert.informativeText =
+                        "An image with this name already exists in the destination folder."
+                    alert.addButton(withTitle: "Replace")
+                    alert.addButton(withTitle: "Cancel")
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    try FileManager.default.removeItem(at: destination)
+                }
+                try FileManager.default.moveItem(at: url, to: destination)
+            } catch {
+                self.present(error, for: window)
+                return
+            }
             window.editor.imagePainter.invalidate()
             self.replaceImagePath(destination, in: window, ref: ref)
         }
@@ -619,6 +723,22 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func imageScaleHalf(_ sender: Any?) {
         guard let window = store.focusedWindow, let ref = imageRef(in: window), !ref.path.isEmpty else { return }
         guard let url = imageURL(ref.path, in: window), let image = NSImage(contentsOf: url) else { return }
+        guard let fileType = bitmapFileType(for: url) else {
+            let alert = NSAlert()
+            alert.alertStyle = .warning
+            alert.messageText = "Cannot scale “\(url.lastPathComponent)”."
+            alert.informativeText = "Scaling in place supports PNG, JPEG, GIF, BMP and TIFF files."
+            alert.runModal()
+            return
+        }
+        // The rewrite is destructive: the original pixels are gone after it.
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Scale “\(url.lastPathComponent)” to 50%?"
+        alert.informativeText = "The file on disk is rewritten at half its pixel size."
+        alert.addButton(withTitle: "Scale")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
         guard let tiff = image.tiffRepresentation, let source = NSBitmapImageRep(data: tiff) else { return }
         // Halve the pixels rather than the point size, so the file really gets smaller
         // instead of shipping a half-size image at double density.
@@ -637,8 +757,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
         image.draw(in: NSRect(x: 0, y: 0, width: wide, height: high))
         NSGraphicsContext.restoreGraphicsState()
-        guard let data = canvas.representation(using: bitmapFileType(for: url), properties: [:]) else { return }
-        try? data.write(to: url)
+        guard let data = canvas.representation(using: fileType, properties: [:]) else { return }
+        do {
+            try data.write(to: url, options: .atomic)
+        } catch {
+            present(error, for: window)
+            return
+        }
         window.editor.imagePainter.invalidate()
         window.editor.markDirty()
     }
@@ -665,6 +790,15 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         store.focusedWindow?.format(action)
     }
 
+    /// Copy puts the styled text AppKit builds from the buffer; this puts the
+    /// Markdown source itself, which is what the menu item promises.
+    @objc func copyAsMarkdown(_ sender: Any?) {
+        guard let window = store.focusedWindow else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(window.editor.markdown, forType: .string)
+    }
+
     /// ⌘W: the focused tab; the window closes when it was the last tab.
     @objc func closeDocument(_ sender: Any?) {
         store.closeFocusedDocument()
@@ -674,7 +808,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         AppLogger.error("\(error)", category: "File")
         let alert = NSAlert()
         alert.alertStyle = .warning
-        alert.messageText = "Could not save the document."
+        alert.messageText = "The operation could not be completed."
         alert.informativeText = error.localizedDescription
         if let sheet = window?.hostWindow {
             alert.beginSheetModal(for: sheet, completionHandler: nil)
@@ -684,6 +818,17 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     // MARK: - View actions
+
+    /// Menu checkmarks are read live: the View and Themes menus rebuild their
+    /// state every time they open, so a mode flipped by one window is reflected
+    /// everywhere. Static state computed at build time used to contradict the
+    /// app after the first toggle.
+    public func menuNeedsUpdate(_ menu: NSMenu) {        if menu.title == "View" {
+            refreshViewCheckmarks()
+        } else if menu.title == "Themes" {
+            refreshThemesMenu()
+        }
+    }
 
     /// Flips the checkmarks in the View menu to match the focused window.
     ///
@@ -927,17 +1072,20 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func toggleFocusMode(_ sender: Any?) {
         store.focusMode.toggle()
         pushSettingsToWindows()
+        refreshViewCheckmarks()
     }
 
     @objc func toggleTypewriterMode(_ sender: Any?) {
         store.typeWriterMode.toggle()
         pushSettingsToWindows()
         for document in store.documents { document.editor.centerCaretIfNeeded() }
+        refreshViewCheckmarks()
     }
 
     @objc func toggleReadonlyMode(_ sender: Any?) {
         store.readonlyMode.toggle()
         pushSettingsToWindows()
+        refreshViewCheckmarks()
     }
 
     @objc func zoomIn(_ sender: Any?) {
@@ -974,6 +1122,21 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     @objc func selectTheme(_ sender: NSMenuItem) {
         guard let identifier = sender.representedObject as? String else { return }
         store.setTheme(identifier: identifier)
-        UserDefaults.standard.set(identifier, forKey: "theme")
+        refreshThemesMenu()
+    }
+
+    /// Syncs the Themes menu's checkmarks with the active theme and font size.
+    private func refreshThemesMenu() {
+        guard
+            let themesMenu = NSApp.mainMenu?.items.first(where: { $0.title == "Themes" })?
+                .submenu
+        else { return }
+        for item in themesMenu.items {
+            if let identifier = item.representedObject as? String {
+                item.state = identifier == store.theme.identifier ? .on : .off
+            } else if item.title == "Use Theme Font Size" {
+                item.state = store.settings.settings.useCustomFontSize ? .off : .on
+            }
+        }
     }
 }
