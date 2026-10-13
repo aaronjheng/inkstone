@@ -6,6 +6,10 @@ import Foundation
 /// switching to a built-in theme reproduces the original's measure, type scale, spacing
 /// and palette. Font families are the documented substitution: the originals ship
 /// as web fonts we do not bundle (DESIGN.md §7).
+///
+/// One deliberate deviation: every `rootFontSize` sits 2pt below the original's,
+/// so the rendered document reads closer to native macOS text sizes; heading,
+/// code and spacing scales still apply on top of it unchanged.
 enum BuiltInTheme {
     static let all: [EditorTheme] = [github, newsprint, night, whitey, gothic, pixyll]
 
@@ -55,7 +59,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0x333333, 0xC9D1D9),
             marker: DynamicColor(0xD94F8A, 0xFF7B9C)
         ),
-        rootFontSize: 16,
+        rootFontSize: 14,
         // `h1..h6 { font-size: 2.25em | 1.75em | 1.5em | 1.25em | 1em | 1em }`
         headingScales: [2.25, 1.75, 1.5, 1.25, 1.0, 1.0],
         headingWeights: [.bold, .bold, .bold, .bold, .bold, .bold],
@@ -126,7 +130,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0x3A3A3A, 0xD8D8D8),
             marker: DynamicColor(0x990000, 0xE06C6C)
         ),
-        rootFontSize: 18,
+        rootFontSize: 16,
         headingScales: [1.9, 1.6, 1.35, 1.2, 1.05, 1.0],
         headingWeights: [.bold, .bold, .bold, .semibold, .semibold, .semibold],
         headingLineHeights: [1.2, 1.25, 1.3, 1.35, 1.4, 1.4],
@@ -191,7 +195,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0xCCCCCC, 0xCCCCCC),
             marker: DynamicColor(0xCEBCCA, 0xCEBCCA)
         ),
-        rootFontSize: 16,
+        rootFontSize: 14,
         // `36px | 28px | 24px | 20px | 18px | 16px` against a 16px root
         headingScales: [2.25, 1.75, 1.5, 1.25, 1.125, 1.0],
         headingWeights: [.regular, .bold, .bold, .regular, .bold, .regular],
@@ -258,7 +262,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0x4A4A4A, 0xD0D0D0),
             marker: DynamicColor(0x777777, 0xB0B0B0)
         ),
-        rootFontSize: 19,
+        rootFontSize: 17,
         headingScales: [1.9, 1.6, 1.35, 1.2, 1.05, 1.0],
         headingWeights: [.semibold, .semibold, .semibold, .regular, .regular, .regular],
         headingLineHeights: [1.3, 1.35, 1.4, 1.4, 1.4, 1.4],
@@ -321,7 +325,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0x333333, 0xD4D4D4),
             marker: DynamicColor(0x8B5A2B, 0xE5B978)
         ),
-        rootFontSize: 17,
+        rootFontSize: 15,
         headingScales: [2.0, 1.65, 1.4, 1.2, 1.05, 1.0],
         headingWeights: [.semibold, .semibold, .semibold, .semibold, .semibold, .semibold],
         headingLineHeights: [1.25, 1.3, 1.35, 1.4, 1.4, 1.4],
@@ -384,7 +388,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0x3A3A3A, 0xD8D8D8),
             marker: DynamicColor(0xA0A1A7, 0x7F848E)
         ),
-        rootFontSize: 16,
+        rootFontSize: 14,
         headingScales: [2.1, 1.7, 1.4, 1.15, 1.0, 1.0],
         headingWeights: [.bold, .bold, .bold, .medium, .medium, .medium],
         headingLineHeights: [1.25, 1.3, 1.35, 1.4, 1.4, 1.4],
