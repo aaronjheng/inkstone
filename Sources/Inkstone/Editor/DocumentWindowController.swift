@@ -212,6 +212,10 @@ final class DocumentWindowController {
         editor.completionDirectory = folder
         editor.imagePainter.baseDirectory = folder
         isDirty = false
+        // The buffer was replaced wholesale: whatever the tab held before -
+        // reverted edits included - is abandoned, and its recovery draft must
+        // not outlive it as a phantom on the next launch.
+        onOpenCommitted?(url, documentID)
         notifyHost()
         updateStatus()
     }
@@ -257,6 +261,9 @@ final class DocumentWindowController {
     /// Filled in by `AppStore`: `Editor/` may not reach into `Session/`.
     var onWriteDraft: ((DraftSnapshot) -> Void)?
     var onSaveCommitted: ((URL?, String?) -> Void)?
+    /// Fired after `open(_:)` replaces the buffer, so the session layer can
+    /// drop the recovery draft of whatever the tab held before.
+    var onOpenCommitted: ((URL, String) -> Void)?
     /// Set once `AppStore` attaches autosave/draft wiring. Tabs are built on
     /// both the new-document and the file-open paths, so the store funnels
     /// both through one attach point instead of nil-checking the closures.

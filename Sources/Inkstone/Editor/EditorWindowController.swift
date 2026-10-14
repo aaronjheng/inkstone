@@ -52,6 +52,10 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     var onNewTab: (() -> Void)?
     /// Fired when the window closes, so the session layer can drop the host.
     var onClosed: (() -> Void)?
+    /// Fired with the documents the user chose not to save, so the session
+    /// layer can drop their crash-recovery drafts. Without this a closed
+    /// Don't-Save tab came back as a recovery prompt on the next launch.
+    var onDiscardDrafts: (([DocumentWindowController]) -> Void)?
     /// Fired when the context menu sends a tab to a fresh window.
     var onMoveToNewWindow: ((Int) -> Void)?
     /// Fired when a drag leaves the strip and the tab should become a window.
@@ -300,6 +304,9 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
             }
             return true
         case .alertSecondButtonReturn:
+            // The user explicitly declined: the drafts must not come back as a
+            // recovery prompt on the next launch.
+            onDiscardDrafts?(dirty)
             return true
         default:
             return false

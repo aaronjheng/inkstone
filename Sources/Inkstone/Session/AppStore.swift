@@ -113,6 +113,9 @@ final class AppStore {
         host.onClosed = { [weak self, weak host] in
             self?.remove(host)
         }
+        host.onDiscardDrafts = { [weak self] documents in
+            self?.discardDrafts(for: documents)
+        }
         host.onNewTab = { [weak self, weak host] in
             self?.newDocument(in: host)
         }
@@ -176,12 +179,19 @@ final class AppStore {
     /// launch) is restored *into* that tab rather than duplicated: the draft is
     /// the newer content, and a second tab for the same file would leave the
     /// user saving the wrong one.
+    ///
+    /// Either way the draft is re-keyed onto the tab that now holds its
+    /// content (`migrate`): the tab minted a fresh identity on creation, and
+    /// without the re-key every later save or Don't-Save would address the new
+    /// identity while the old draft file survived to be recovered again on the
+    /// next launch - an undismissable phantom tab.
     func recoverDrafts(_ drafts: [Draft]) {
         guard !drafts.isEmpty else { return }
         var pending: [(draft: Draft, folder: URL?)] = []
         for draft in drafts {
             if let existing = documents.first(where: { $0.fileURL == draft.sourceURL }) {
                 existing.restoreDraft(markdown: draft.markdown)
+                self.drafts.migrate(draft, to: existing.documentID)
             } else {
                 pending.append((draft, draft.sourceURL?.deletingLastPathComponent()))
             }
@@ -203,6 +213,7 @@ final class AppStore {
             for draft in group {
                 let document = newDocument(markdown: draft.markdown, url: draft.sourceURL, in: host)
                 document.restoreDraft(markdown: draft.markdown)
+                self.drafts.migrate(draft, to: document.documentID)
             }
         }
     }
@@ -394,6 +405,9 @@ final class AppStore {
             self.drafts.write(self.draft(from: snapshot))
         }
         document.onSaveCommitted = { [weak self] url, documentID in
+            self?.drafts.clear(sourceURL: url, documentID: documentID)
+        }
+        document.onOpenCommitted = { [weak self] url, documentID in
             self?.drafts.clear(sourceURL: url, documentID: documentID)
         }
         document.markSessionWired()

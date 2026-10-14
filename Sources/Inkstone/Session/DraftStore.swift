@@ -80,13 +80,18 @@ final class DraftStore {
     /// path-only clear hashed an empty string for untitled documents and removed a
     /// file that never existed, so a just-saved document came back as a phantom
     /// recovery draft on the next launch.
+    ///
+    /// The id-keyed file goes regardless of whether a path is given: a tab born
+    /// untitled writes under its id, and clearing only by its later path left
+    /// that file behind to be recovered as a phantom on every launch after.
     func clear(sourceURL: URL?, documentID: String?) {
         if let sourceURL {
             try? FileManager.default.removeItem(
                 at: url(for: Draft(sourceURL: sourceURL, documentID: documentID, title: "", markdown: "", savedAt: .distantPast))
             )
+            forgetPath(for: sourceURL)
         }
-        if let documentID, sourceURL == nil {
+        if let documentID {
             try? FileManager.default.removeItem(
                 at: directory.appendingPathComponent("untitled-" + documentID + ".md")
             )
@@ -94,6 +99,31 @@ final class DraftStore {
         drafts.removeAll { draft in
             (sourceURL != nil && draft.sourceURL == sourceURL)
                 || (documentID != nil && draft.documentID == documentID)
+        }
+    }
+
+    /// Re-keys a recovered draft onto the tab that now holds its content.
+    ///
+    /// Recovery builds a fresh tab with a fresh `documentID`, so addressing the
+    /// draft by its old identity afterwards misses everywhere: every later save
+    /// or Don't-Save names the new identity, the old file and entry survive,
+    /// and the phantom tab is recovered again on every launch until it ages
+    /// out. The write lands first so the content is never without a copy on
+    /// disk; only an untitled draft leaves an old name behind (a file-backed
+    /// draft overwrites its own path and the upsert replaces its entry).
+    func migrate(_ draft: Draft, to documentID: String) {
+        guard draft.documentID != documentID else { return }
+        write(
+            Draft(
+                sourceURL: draft.sourceURL,
+                documentID: documentID,
+                title: draft.title,
+                markdown: draft.markdown,
+                savedAt: draft.savedAt
+            )
+        )
+        if draft.sourceURL == nil {
+            clear(sourceURL: nil, documentID: draft.documentID)
         }
     }
 
@@ -142,6 +172,10 @@ final class DraftStore {
         guard let path = draft.sourceURL?.standardizedFileURL.path else {
             return "untitled-" + (draft.documentID ?? "unknown")
         }
+        return identifier(forPath: path)
+    }
+
+    static func identifier(forPath path: String) -> String {
         var hash: UInt64 = 0xcbf2_9ce4_8422_2325
         for byte in Array(path.utf8) {
             hash = (hash ^ UInt64(byte)) &* 0x1000_0000_01b3
@@ -200,6 +234,19 @@ final class DraftStore {
         lines.removeAll { $0.hasPrefix(identifier + "\t") }
         lines.append(identifier + "\t" + path)
         let body = lines.joined(separator: "\n") + "\n"
+        try? body.write(to: indexURL, atomically: true, encoding: .utf8)
+    }
+
+    /// Drops one file's line from the index. Without this the index keeps a
+    /// line for every draft ever cleared, pointing at a file that no longer
+    /// exists.
+    private func forgetPath(for sourceURL: URL) {
+        let identifier = Self.identifier(forPath: sourceURL.standardizedFileURL.path)
+        guard let contents = try? String(contentsOf: indexURL, encoding: .utf8) else { return }
+        let kept = contents.split(separator: "\n").map(String.init).filter {
+            !$0.hasPrefix(identifier + "\t")
+        }
+        let body = kept.isEmpty ? "" : kept.joined(separator: "\n") + "\n"
         try? body.write(to: indexURL, atomically: true, encoding: .utf8)
     }
 
