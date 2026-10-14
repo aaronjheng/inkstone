@@ -256,6 +256,24 @@ final class DocumentWindowController {
         notifyHost()
     }
 
+    /// Points an already-open document at a renamed or moved file.
+    ///
+    /// The buffer is untouched - only path bookkeeping moves, so path
+    /// completion, relative images and the next save all follow the new
+    /// location. The session layer is told the old path retired so its
+    /// recovery draft travels with the document.
+    func retarget(to url: URL) {
+        guard documentURL != url else { return }
+        let previous = documentURL
+        documentURL = url
+        let folder = url.deletingLastPathComponent()
+        editor.completionDirectory = folder
+        editor.imagePainter.baseDirectory = folder
+        onOpenCommitted?(previous ?? url, documentID)
+        notifyHost()
+        updateStatus()
+    }
+
     /// Autosave interval in seconds; `0` means off.
     var autosaveInterval: TimeInterval = 0
     /// Filled in by `AppStore`: `Editor/` may not reach into `Session/`.

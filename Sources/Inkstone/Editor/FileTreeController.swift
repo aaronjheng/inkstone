@@ -10,10 +10,31 @@ import SwiftUI
 /// `NSFileCoordinator` so edits arriving from outside the app do not race the
 /// refresh. Nothing watches the file system, so callers that create or delete
 /// files by hand have to ask for `refresh()`.
+/// One file-tree context-menu command, mirroring Typora's file-tree actions.
+///
+/// `reveal`, `copyPath`, `refresh`, `expandAll` and `collapseAll` need no
+/// window, so `FileTreeController` runs them directly; the rest travel up
+/// through `onAction` to the host (sheets, alerts) or the session layer.
+enum FileTreeAction {
+    case openInNewWindow(URL)
+    case newFile(URL)
+    case newFolder(URL)
+    case duplicate(URL)
+    case rename(URL, String)
+    case trash(URL)
+    case reveal(URL)
+    case copyPath(URL)
+    case refresh
+    case expandAll
+    case collapseAll
+}
+
 final class FileTreeController: NSViewController {
     var onSelect: ((URL) -> Void)?
     /// The toolbar's "+": creates a file in the tree's folder.
     var onCreateFile: (() -> Void)?
+    /// Context-menu commands the host (or session) layer must run.
+    var onAction: ((FileTreeAction) -> Void)?
 
     private let model = FileTreeModel()
     private var hosting: NSHostingView<FileTree>?
@@ -52,11 +73,24 @@ final class FileTreeController: NSViewController {
         let root = FileTree(
             model: model,
             onSelect: { [weak self] url in self?.onSelect?(url) },
-            onCreateFile: { [weak self] in self?.onCreateFile?() }
+            onCreateFile: { [weak self] in self?.onCreateFile?() },
+            onAction: { [weak self] action in self?.run(action) }
         )
         let hosted = NSHostingView(rootView: root)
         hosting = hosted
         view = hosted
+    }
+
+    /// Runs the actions that need no window; the rest go up to the host.
+    private func run(_ action: FileTreeAction) {
+        switch action {
+        case let .reveal(url): reveal(url)
+        case let .copyPath(url): copyPath(url)
+        case .refresh: refresh()
+        case .expandAll: expandAll()
+        case .collapseAll: collapseAll()
+        default: onAction?(action)
+        }
     }
 
     func apply(theme: EditorTheme) {
@@ -82,6 +116,32 @@ final class FileTreeController: NSViewController {
     /// Re-reads the current folder.
     func refresh() {
         reload()
+    }
+
+    /// Selects `url` in the Finder. Read-only, so no root check is needed.
+    func reveal(_ url: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([url])
+    }
+
+    /// Copies the absolute path, as Typora's "Copy File Path" does.
+    func copyPath(_ url: URL) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(url.path, forType: .string)
+    }
+
+    /// Expands every folder so "Expand All" shows the whole tree.
+    func expandAll() {
+        model.expandAll()
+    }
+
+    /// Collapses back to the root's top level.
+    func collapseAll() {
+        model.collapseAll()
+    }
+
+    /// Makes sure `path` (a folder) is expanded, so newly created items show.
+    func expand(_ path: String) {
+        model.setExpanded(path, expanded: true)
     }
 
     /// Recursively reads the tree under `root`.
@@ -178,6 +238,8 @@ final class FileTreeModel {
     private(set) var rows: [Row] = []
     private(set) var rootPath: String?
     private(set) var rootName = ""
+    /// The root as a URL, for "new file here" affordances in the panel menu.
+    var rootURL: URL? { rootPath.map { URL(fileURLWithPath: $0) } }
     private(set) var errorText: String?
     var expanded: Set<String> = []
     var currentPath: String?
@@ -300,11 +362,35 @@ final class FileTreeModel {
     }
 
     func toggle(_ path: String) {
-        if expanded.contains(path) {
-            expanded.remove(path)
+        setExpanded(path, expanded: !expanded.contains(path))
+    }
+
+    func setExpanded(_ path: String, expanded: Bool) {
+        if expanded {
+            self.expanded.insert(path)
         } else {
-            expanded.insert(path)
+            self.expanded.remove(path)
         }
+        rebuildRows()
+    }
+
+    /// Expands every known folder, so the whole tree shows.
+    func expandAll() {
+        var all: Set<String> = []
+        func collect(_ list: [Entry]) {
+            for entry in list where entry.isDirectory {
+                all.insert(entry.url.path)
+                collect(entry.children)
+            }
+        }
+        collect(entries)
+        expanded.formUnion(all)
+        rebuildRows()
+    }
+
+    /// Collapses every folder back to the root's top level.
+    func collapseAll() {
+        expanded.removeAll()
         rebuildRows()
     }
 
@@ -360,6 +446,7 @@ private struct FileTree: View {
     let model: FileTreeModel
     let onSelect: (URL) -> Void
     let onCreateFile: (() -> Void)?
+    let onAction: (FileTreeAction) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -378,6 +465,7 @@ private struct FileTree: View {
                     .padding(.horizontal, 12)
                     .padding(.vertical, 6)
                     .frame(maxWidth: .infinity, alignment: .leading)
+                    .contextMenu { panelMenu(target: model.rootURL) }
                 Spacer(minLength: 0)
             } else {
                 folderRow
@@ -405,6 +493,8 @@ private struct FileTree: View {
         .padding(.leading, 16)
         .padding(.trailing, 10)
         .padding(.vertical, 4)
+        // Typora pops the folder menu from the panel's empty spots too.
+        .contextMenu { panelMenu(target: model.rootURL) }
     }
 
     @ViewBuilder
@@ -442,6 +532,65 @@ private struct FileTree: View {
         .padding(.leading, indentOffset(0))
         .padding(.trailing, 10)
         .padding(.vertical, 8)
+        .contentShape(Rectangle())
+        // The root row acts as the folder itself.
+        .contextMenu { panelMenu(target: model.rootURL) }
+    }
+
+    // MARK: Context menus (Typora's file-tree actions)
+
+    /// Panel-level menu: create into the tree's folder, expand/collapse, refresh.
+    @ViewBuilder
+    private func panelMenu(target: URL?) -> some View {
+        Button("New File") {
+            if let target { onAction(.newFile(target)) } else { onCreateFile?() }
+        }
+        Button("New Folder") {
+            guard let target else { return }
+            onAction(.newFolder(target))
+        }
+        Divider()
+        Button("Expand All") { onAction(.expandAll) }
+        Button("Collapse All") { onAction(.collapseAll) }
+        Divider()
+        Button("Refresh") { onAction(.refresh) }
+        if let target {
+            Divider()
+            Button("Copy File Path") { onAction(.copyPath(target)) }
+            Button("Reveal in Finder") { onAction(.reveal(target)) }
+        }
+    }
+
+    /// Menu for a `.md` row. Names follow Typora's `Menu.strings`.
+    @ViewBuilder
+    private func fileMenu(_ item: FileTreeModel.Row) -> some View {
+        Button("Open in New Window") { onAction(.openInNewWindow(item.url)) }
+        Divider()
+        Button("New File") { onAction(.newFile(item.url.deletingLastPathComponent())) }
+        Divider()
+        Button("Duplicate") { onAction(.duplicate(item.url)) }
+        Button("Rename…") { onAction(.rename(item.url, item.name)) }
+        Button("Move to Trash") { onAction(.trash(item.url)) }
+        Divider()
+        Button("Copy File Path") { onAction(.copyPath(item.url)) }
+        Button("Reveal in Finder") { onAction(.reveal(item.url)) }
+    }
+
+    /// Menu for a folder row: the file menu plus "New Folder" inside it.
+    @ViewBuilder
+    private func folderMenu(_ item: FileTreeModel.Row) -> some View {
+        Button("New File") { onAction(.newFile(item.url)) }
+        Button("New Folder") { onAction(.newFolder(item.url)) }
+        Divider()
+        Button("Expand All") { onAction(.expandAll) }
+        Button("Collapse All") { onAction(.collapseAll) }
+        Divider()
+        Button("Duplicate") { onAction(.duplicate(item.url)) }
+        Button("Rename…") { onAction(.rename(item.url, item.name)) }
+        Button("Move to Trash") { onAction(.trash(item.url)) }
+        Divider()
+        Button("Copy File Path") { onAction(.copyPath(item.url)) }
+        Button("Reveal in Finder") { onAction(.reveal(item.url)) }
     }
 
     private func row(_ item: FileTreeModel.Row) -> some View {
@@ -463,8 +612,11 @@ private struct FileTree: View {
                 HStack(spacing: 4) {
                     Group {
                         if item.isDirectory {
-                            Image(systemName: item.isExpanded ? "arrowtriangle.down.fill" : "arrowtriangle.right.fill")
-                                .font(.system(size: 9))
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(model.secondary)
+                                .rotationEffect(.degrees(item.isExpanded ? 90 : 0))
+                                .animation(.easeInOut(duration: 0.12), value: item.isExpanded)
                                 .frame(width: chevronSlot)
                         } else {
                             Color.clear.frame(width: chevronSlot, height: 1)
@@ -494,6 +646,13 @@ private struct FileTree: View {
             }
         }
         .buttonStyle(.plain)
+        .contextMenu {
+            if item.isDirectory {
+                folderMenu(item)
+            } else {
+                fileMenu(item)
+            }
+        }
     }
 
     private func rowForeground(isCurrent: Bool, path: String) -> Color {
@@ -522,15 +681,14 @@ private struct FileTree: View {
         8 + CGFloat(depth) * indentStep
     }
 
+    /// VS Code hangs each level's guide just left of that level's twistie
+    /// column, so a subtree's rows read as hanging off their parent's chevron.
     private func guideOffset(_ level: Int) -> CGFloat {
-        indentOffset(level) + chevronSlot / 2
+        indentOffset(level) - 2
     }
 
-    // Typora nests each `.file-tree-node` inside its parent's
-    // `.file-node-children` with a constant `padding-left: 8px`, so every
-    // depth compounds by exactly 8px.
-    private let indentStep: CGFloat = 8
-    // Typora: `.file-node-open-state { min-width: 8px }`,
-    // `.file-node-icon { margin-right: 4px }`.
-    private let chevronSlot: CGFloat = 8
+    // VS Code's tree rhythm: a 16px twistie column and a 16px indent step per
+    // level, chevron first, then the icon, then the label.
+    private let indentStep: CGFloat = 16
+    private let chevronSlot: CGFloat = 16
 }

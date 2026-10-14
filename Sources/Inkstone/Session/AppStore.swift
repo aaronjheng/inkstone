@@ -123,6 +123,12 @@ final class AppStore {
             guard let self, let host else { return }
             self.moveTabToNewWindow(from: host, at: index, followCursor: false)
         }
+        host.onOpenFileInNewWindow = { [weak self] url in
+            guard let self else { return }
+            let destination = self.newHost(sidebarFolder: url.deletingLastPathComponent())
+            destination.window?.makeKeyAndOrderFront(nil)
+            self.open(url, in: destination)
+        }
         host.onTearOff = { [weak self, weak host] index in
             guard let self, let host else { return }
             self.moveTabToNewWindow(from: host, at: index, followCursor: true)

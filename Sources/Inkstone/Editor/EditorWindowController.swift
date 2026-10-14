@@ -58,6 +58,8 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     var onDiscardDrafts: (([DocumentWindowController]) -> Void)?
     /// Fired when the context menu sends a tab to a fresh window.
     var onMoveToNewWindow: ((Int) -> Void)?
+    /// Fired when the Files context menu opens a file in its own window.
+    var onOpenFileInNewWindow: ((URL) -> Void)?
     /// Fired when a drag leaves the strip and the tab should become a window.
     var onTearOff: ((Int) -> Void)?
 
@@ -97,6 +99,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         filesPanel.prepare()
         filesPanel.onSelect = { [weak self] url in self?.onSelectFile?(url) }
         filesPanel.onCreateFile = { [weak self] in self?.createFileInFolder() }
+        filesPanel.onAction = { [weak self] in self?.handleFileTreeAction($0) }
         tabStripModel.onSelect = { [weak self] index in self?.selectTab(at: index) }
         tabStripModel.onClose = { [weak self] index in self?.closeTab(at: index) }
         tabStripModel.onNewTab = { [weak self] in self?.onNewTab?() }
@@ -475,7 +478,45 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
     /// The "+": a new Markdown file in the tree's folder, opened once it
     /// exists on disk.
     private func createFileInFolder() {
-        guard let window, let folder = filesPanel.rootURL else { return }
+        guard let folder = filesPanel.rootURL else { return }
+        createFile(in: folder)
+    }
+
+    // MARK: - File tree context actions
+
+    /// Typora's file-tree commands that need a window: sheets for creates and
+    /// rename, a confirm for trashing folders, and retargeting for open tabs.
+    private func handleFileTreeAction(_ action: FileTreeAction) {
+        switch action {
+        case let .openInNewWindow(url):
+            onOpenFileInNewWindow?(url)
+        case let .newFile(folder):
+            createFile(in: folder)
+        case let .newFolder(folder):
+            createFolder(in: folder)
+        case let .duplicate(url):
+            duplicateItem(at: url)
+        case let .rename(url, currentName):
+            renameItem(at: url, currentName: currentName)
+        case let .trash(url):
+            trashItem(at: url)
+        case let .reveal(url):
+            filesPanel.reveal(url)
+        case let .copyPath(url):
+            filesPanel.copyPath(url)
+        case .refresh:
+            filesPanel.refresh()
+        case .expandAll:
+            filesPanel.expandAll()
+        case .collapseAll:
+            filesPanel.collapseAll()
+        }
+    }
+
+    /// "New File": save panel rooted at `folder`, then create, open, and expand
+    /// the folder so the new row shows.
+    private func createFile(in folder: URL) {
+        guard let window else { return }
         let panel = NSSavePanel()
         panel.directoryURL = folder
         panel.allowedContentTypes = [.plainText, .markdown]
@@ -487,15 +528,150 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
                     try Data().write(to: url)
                 }
             } catch {
-                // Opening a file that was never created fails silently one hop
-                // later; say why here instead.
-                let alert = NSAlert(error: error)
-                alert.runModal()
+                NSAlert(error: error).runModal()
                 return
             }
             self.onSelectFile?(url)
+            self.filesPanel.expand(folder.path)
             self.filesPanel.refresh()
         }
+    }
+
+    /// "New Folder": a name panel, then `mkdir`.
+    private func createFolder(in folder: URL) {
+        guard let window else { return }
+        let panel = NSSavePanel()
+        panel.directoryURL = folder
+        panel.canCreateDirectories = false
+        panel.nameFieldStringValue = "New Folder"
+        panel.message = "Choose a name for the new folder."
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            do {
+                try FileManager.default.createDirectory(
+                    at: url, withIntermediateDirectories: false
+                )
+            } catch {
+                NSAlert(error: error).runModal()
+                return
+            }
+            self.filesPanel.expand(folder.path)
+            self.filesPanel.refresh()
+        }
+    }
+
+    /// "Duplicate": `Name copy.ext` beside the original, numbered like the
+    /// Finder when the name is taken.
+    private func duplicateItem(at url: URL) {
+        let folder = url.deletingLastPathComponent()
+        let stem = url.deletingPathExtension().lastPathComponent
+        let ext = url.pathExtension
+        func candidate(_ suffix: String) -> URL {
+            let name = ext.isEmpty ? "\(stem) \(suffix)" : "\(stem) \(suffix).\(ext)"
+            return folder.appendingPathComponent(name)
+        }
+        var destination = candidate("copy")
+        var counter = 2
+        while FileManager.default.fileExists(atPath: destination.path) {
+            destination = candidate("copy \(counter)")
+            counter += 1
+        }
+        do {
+            try FileManager.default.copyItem(at: url, to: destination)
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        filesPanel.refresh()
+    }
+
+    /// "Rename…": an alert sheet with a text field. An open tab on the file
+    /// follows the rename so its next save writes to the new path.
+    private func renameItem(at url: URL, currentName: String) {
+        guard let window else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Rename"
+        alert.addButton(withTitle: "Rename")
+        alert.addButton(withTitle: "Cancel")
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 240, height: 24))
+        field.stringValue = currentName
+        alert.accessoryView = field
+        alert.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            var newName = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !newName.isEmpty, newName != currentName else { return }
+            // Dropping the extension would hide the file from this md-only tree.
+            let ext = url.pathExtension
+            if !ext.isEmpty, (newName as NSString).pathExtension.isEmpty {
+                newName += ".\(ext)"
+            }
+            let destination = url.deletingLastPathComponent().appendingPathComponent(newName)
+            guard destination != url else { return }
+            guard !FileManager.default.fileExists(atPath: destination.path) else {
+                let exists = NSAlert()
+                exists.alertStyle = .warning
+                exists.messageText = "“\(newName)” already exists."
+                exists.informativeText = "Choose a different name."
+                exists.runModal()
+                return
+            }
+            do {
+                try FileManager.default.moveItem(at: url, to: destination)
+            } catch {
+                NSAlert(error: error).runModal()
+                return
+            }
+            for document in documents where document.fileURL == url {
+                document.retarget(to: destination)
+            }
+            refreshTitleAndHighlight()
+            filesPanel.refresh()
+        }
+    }
+
+    /// "Move to Trash": a folder takes a confirm (its whole subtree goes);
+    /// a file goes straight to the Trash, and tabs on it are closed first.
+    private func trashItem(at url: URL) {
+        var isDirectory: ObjCBool = false
+        FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory)
+        guard isDirectory.boolValue, let window else {
+            performTrash(url)
+            return
+        }
+        let confirm = NSAlert()
+        confirm.alertStyle = .warning
+        confirm.messageText = "Move “\(url.lastPathComponent)” to Trash?"
+        confirm.informativeText = "The folder and everything inside it will be moved to the Trash."
+        confirm.addButton(withTitle: "Move to Trash")
+        confirm.addButton(withTitle: "Cancel")
+        confirm.beginSheetModal(for: window) { [weak self] response in
+            guard response == .alertFirstButtonReturn, let self else { return }
+            self.performTrash(url)
+        }
+    }
+
+    private func performTrash(_ url: URL) {
+        do {
+            var trashed: NSURL?
+            try FileManager.default.trashItem(at: url, resultingItemURL: &trashed)
+        } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        // Dirty tabs get the save prompt; clean ones just close.
+        let affected = documents.filter { document in
+            guard let path = document.fileURL?.path else { return false }
+            return path == url.path || path.hasPrefix(url.path + "/")
+        }
+        guard confirmClosing(affected) else {
+            filesPanel.refresh()
+            return
+        }
+        for document in affected where documents.contains(where: { $0 === document }) {
+            removeDocument(document)
+        }
+        filesPanel.refresh()
     }
 
     // MARK: - Theme
