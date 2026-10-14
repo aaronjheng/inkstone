@@ -119,9 +119,15 @@ enum BlockDecorator {
                 if checked {
                     context.setStrokeColor(theme.text.nsColor.cgColor)
                     context.setLineWidth(1.6)
+                    context.setLineCap(.round)
+                    context.setLineJoin(.round)
+                    // The text view is flipped (origin at top-left, y grows down),
+                    // so the elbow sits near `maxY` (bottom) and the tip near
+                    // `minY` (top). The previous version had them swapped and the
+                    // tick rendered upside-down as `^`.
                     context.move(to: CGPoint(x: box.minX + 2.5, y: box.midY))
-                    context.addLine(to: CGPoint(x: box.minX + side / 2 - 0.5, y: box.minY + 2.5))
-                    context.addLine(to: CGPoint(x: box.maxX - 2.5, y: box.maxY - 3))
+                    context.addLine(to: CGPoint(x: box.minX + side / 2 - 0.5, y: box.maxY - 2.5))
+                    context.addLine(to: CGPoint(x: box.maxX - 2.5, y: box.minY + 3))
                     context.strokePath()
                 }
             case let .codeBlock(background, radius):
