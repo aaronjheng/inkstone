@@ -24,7 +24,7 @@ struct BlockStyle {
     /// Base attributes for a run of body text.
     static func body(theme: EditorTheme) -> BlockStyle {
         BlockStyle(
-            font: EditorFont.nsSystem(size: theme.bodyFontSize),
+            font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor,
             base: [:],
             decoration: []
@@ -42,15 +42,17 @@ struct BlockStyle {
 
     static func heading(theme: EditorTheme, level: Int) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(
-                size: theme.headingSize(level), weight: nsWeight(theme.headingWeight(level))
+            font: EditorFont.nsHeading(
+                theme: theme, level: level, weight: nsWeight(theme.headingWeight(level))
             ),
-            textColor: theme.text.nsColor
+            textColor: theme.headingTextColor?.nsColor ?? theme.text.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownHeading(
             lineHeight: theme.headingLineHeight(level),
             margin: theme.headingMargin
         )
+        let tracking = theme.headingTrackingAmount(level)
+        if tracking != 0 { style.base[.kern] = tracking }
         if let rule = theme.headingRule(level) {
             style.decoration.append(.headingRule(color: rule.nsColor))
         }
@@ -59,7 +61,7 @@ struct BlockStyle {
 
     static func listItem(theme: EditorTheme, ordered: Bool, depth: Int, marker: String) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(size: theme.bodyFontSize),
+            font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor
         )
         // `ul, ol { padding-left: 30px }` scaled by nesting.
@@ -81,7 +83,7 @@ struct BlockStyle {
 
     static func taskItem(theme: EditorTheme, depth: Int, checked: Bool) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(size: theme.bodyFontSize),
+            font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor
         )
         let indent = theme.listIndent * CGFloat(max(depth, 1))
@@ -100,12 +102,12 @@ struct BlockStyle {
 
     static func codeFence(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsMono(size: theme.codeFontSize),
+            font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
             textColor: theme.codeText.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownCode(
             lineHeight: theme.bodyLineHeight * theme.codeFontSize,
-            padding: theme.codePadding
+            padding: theme.codePaddingLeft ?? theme.codePadding
         )
         style.decoration.append(
             .codeBlock(background: theme.codeBlockBackground.nsColor, radius: EditorMetrics.radiusSmall)
@@ -124,14 +126,14 @@ struct BlockStyle {
     /// is lost by inheriting.
     static func collapsed(from base: BlockStyle, theme: EditorTheme) -> BlockStyle {
         var style = base
-        style.font = EditorFont.nsMono(size: theme.codeFontSize)
+        style.font = EditorFont.nsMono(theme: theme, size: theme.codeFontSize)
         style.decoration = []
         return style
     }
 
     static func table(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(size: theme.bodyFontSize),
+            font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownBody(
@@ -146,7 +148,7 @@ struct BlockStyle {
 
     static func horizontalRule(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(size: theme.bodyFontSize),
+            font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownRuleLine()
@@ -183,12 +185,12 @@ struct BlockStyle {
 
     static func htmlBlock(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsMono(size: theme.codeFontSize),
+            font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
             textColor: theme.codeText.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownCode(
             lineHeight: theme.bodyLineHeight * theme.codeFontSize,
-            padding: theme.codePadding
+            padding: theme.codePaddingLeft ?? theme.codePadding
         )
         style.decoration.append(
             .codeBlock(background: theme.rawBlockEditingBackground.nsColor, radius: EditorMetrics.radiusSmall)
@@ -198,12 +200,12 @@ struct BlockStyle {
 
     static func frontMatter(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsMono(size: theme.codeFontSize),
+            font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
             textColor: theme.quoteText.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownCode(
             lineHeight: theme.bodyLineHeight * theme.codeFontSize,
-            padding: theme.codePadding
+            padding: theme.codePaddingLeft ?? theme.codePadding
         )
         style.base[.backgroundColor] = theme.rawBlockEditingBackground.nsColor
         return style

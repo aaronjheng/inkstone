@@ -7,9 +7,9 @@ import Foundation
 /// and palette. Font families are the documented substitution: the originals ship
 /// as web fonts we do not bundle (DESIGN.md §7).
 ///
-/// One deliberate deviation: every `rootFontSize` sits 2pt below the original's,
-/// so the rendered document reads closer to native macOS text sizes; heading,
-/// code and spacing scales still apply on top of it unchanged.
+/// `rootFontSize` matches each theme's own `html { font-size }` exactly
+/// (16px for github/newsprint/night/gothic, 19px for whitey, and pixyll's
+/// 16px browser default), so body text renders at the same size as Typora.
 enum BuiltInTheme {
     static let all: [EditorTheme] = [github, newsprint, night, whitey, gothic, pixyll]
 
@@ -59,7 +59,7 @@ enum BuiltInTheme {
             plain: DynamicColor(0x333333, 0xC9D1D9),
             marker: DynamicColor(0xD94F8A, 0xFF7B9C)
         ),
-        rootFontSize: 14,
+        rootFontSize: 16,
         // `h1..h6 { font-size: 2.25em | 1.75em | 1.5em | 1.25em | 1em | 1em }`
         headingScales: [2.25, 1.75, 1.5, 1.25, 1.0, 1.0],
         headingWeights: [.bold, .bold, .bold, .bold, .bold, .bold],
@@ -98,7 +98,7 @@ enum BuiltInTheme {
         background: DynamicColor(0xFEFEFE, 0x1A1A1A),
         sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
         text: DynamicColor(0x3A3A3A, 0xD8D8D8),
-        link: DynamicColor(0x990000, 0xE06C6C),
+        link: DynamicColor(0x065588, 0xE06C6C),
         selection: DynamicColor(0xD6D0C8, 0x3A3A3A),
         marker: DynamicColor(0xBFBFBF, 0x6A6A6A),
         rawBlockEditingBackground: DynamicColor(0xF2EFE9, 0x242424),
@@ -131,14 +131,14 @@ enum BuiltInTheme {
             marker: DynamicColor(0x990000, 0xE06C6C)
         ),
         rootFontSize: 16,
-        headingScales: [1.9, 1.6, 1.35, 1.2, 1.05, 1.0],
+        headingScales: [1.875, 1.3125, 1.3125, 1.125, 1.0, 1.0],
         headingWeights: [.bold, .bold, .bold, .semibold, .semibold, .semibold],
-        headingLineHeights: [1.2, 1.25, 1.3, 1.35, 1.4, 1.4],
+        headingLineHeights: [1.3, 1.15, 1.15, 1.333, 1.5, 1.5],
         headingRules: [:],
-        bodyLineHeight: 1.6,
-        codeFontScale: 0.85,
-        contentMaxWidth: 700,
-        wideMaxWidth: 860,
+        bodyLineHeight: 1.5,
+        codeFontScale: 0.875,
+        contentMaxWidth: 640,
+        wideMaxWidth: 914,
         widestMaxWidth: 1000,
         wideBreakpoint: 1400,
         widestBreakpoint: 1800,
@@ -165,18 +165,25 @@ enum BuiltInTheme {
         // ride the generic chrome pair: the light-side F9F9F9 would sit beside
         // the dark editor under a light system appearance. It shares the
         // theme's own background instead.
-        sidebarBackground: DynamicColor(0x363B40, 0x363B40),
-        text: DynamicColor(0xCCCCCC, 0xCCCCCC),
-        link: DynamicColor(0x4B9FD5, 0x6CB6FF),
+        sidebarBackground: DynamicColor(0x2E3033, 0x2E3033),
+        // Night's sidebar is its own surface: `--side-bar-bg-color`,
+        // `--text-color`, `--active-file-bg-color`, `--item-hover-bg-color`.
+        sidebarForeground: DynamicColor(0xB8BFC6, 0xB8BFC6),
+        sidebarSecondary: DynamicColor(0xB7B7B7, 0xB7B7B7),
+        sidebarAccent: DynamicColor(0xB8BFC6, 0xB8BFC6),
+        sidebarSelection: DynamicColor(0x222222, 0x222222),
+        sidebarHover: DynamicColor(0x70717D, 0x70717D),
+        text: DynamicColor(0xB8BFC6, 0xB8BFC6),
+        link: DynamicColor(0xE0E0E0, 0xE0E0E0),
         selection: DynamicColor(0x4A5560, 0x4A5560),
         marker: DynamicColor(0x7E8B99, 0x7E8B99),
         rawBlockEditingBackground: DynamicColor(0x3B4147, 0x3B4147),
         headingChip: DynamicColor(0x5A636E, 0x5A636E),
         focusBlur: DynamicColor(0x5A636E, 0x5A636E),
         codeBlockBackground: DynamicColor(0x333333, 0x333333),
-        codeText: DynamicColor(0xCCCCCC, 0xCCCCCC),
+        codeText: DynamicColor(0xB8BFC6, 0xB8BFC6),
         inlineCodeBackground: DynamicColor(0x3A3F44, 0x3A3F44),
-        inlineCodeText: DynamicColor(0xCCCCCC, 0xCCCCCC),
+        inlineCodeText: DynamicColor(0xB8BFC6, 0xB8BFC6),
         quoteBar: DynamicColor(0x4B5259, 0x4B5259),
         quoteText: DynamicColor(0x999999, 0x999999),
         rule: DynamicColor(0x474D54, 0x474D54),
@@ -199,15 +206,25 @@ enum BuiltInTheme {
             plain: DynamicColor(0xCCCCCC, 0xCCCCCC),
             marker: DynamicColor(0xCEBCCA, 0xCEBCCA)
         ),
-        rootFontSize: 14,
-        // `36px | 28px | 24px | 20px | 18px | 16px` against a 16px root
-        headingScales: [2.25, 1.75, 1.5, 1.25, 1.125, 1.0],
+        rootFontSize: 16,
+        // Rem ratios taken straight from night.css (`2.5rem | 1.63rem | 1.17rem |
+        // 1.12rem | 0.97rem | 0.93rem`) against its 16px root, so Night matches Typora.
+        headingScales: [2.5, 1.63, 1.17, 1.12, 0.97, 0.93],
         headingWeights: [.regular, .bold, .bold, .regular, .bold, .regular],
-        // `26px | 26px | 26px | 26px | 26px | 26px` -> `1.625rem`
-        headingLineHeights: [1.625, 1.625, 1.625, 1.625, 1.625, 1.625],
+        // `2.75rem | 1.875rem | 1.5rem | 1.375rem | 1.25rem | 1.0rem`
+        headingLineHeights: [1.1, 1.15, 1.28, 1.23, 1.29, 1.08],
         headingRules: [:],
+        // `h1..h6 { color: #DEDEDE; font-family: "Lucida Grande", "Corbel" }`
+        // and `h1/h2/h3 { letter-spacing: -1.5px/-1px/-1px }`.
+        headingTextColor: DynamicColor(0xDEDEDE, 0xDEDEDE),
+        headingFontName: "Lucida Grande",
+        headingTracking: [-1.5, -1, -1, 0, 0, 0],
+        // `html, body { font-family: "Helvetica Neue", ... }`.
+        bodyFontName: "Helvetica Neue",
         bodyLineHeight: 1.625,
-        codeFontScale: 0.9,
+        codeFontScale: 0.875,
+        // `pre, code { font-family: Monaco, Consolas, ... }`.
+        codeFontName: "Monaco",
         contentMaxWidth: 914,
         wideMaxWidth: 1024,
         widestMaxWidth: 1200,
@@ -215,13 +232,15 @@ enum BuiltInTheme {
         widestBreakpoint: 1800,
         contentPadding: 30,
         contentBottomPadding: 100,
-        blockMargin: 16,
-        headingMargin: 20,
+        blockMargin: 24,
+        headingMargin: 24,
         listIndent: 30,
-        quoteIndent: 16,
+        quoteIndent: 30,
         quoteBarWidth: 4,
-        codePadding: 8,
-        tableCellPadding: 6
+        codePadding: 10,
+        // `pre.md-fences { padding: 10px 10px 10px 30px }`.
+        codePaddingLeft: 30,
+        tableCellPadding: 5
     )
 
     // MARK: - Whitey
@@ -234,7 +253,7 @@ enum BuiltInTheme {
         background: DynamicColor(0xFFFFFF, 0x2B2B2B),
         sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
         text: DynamicColor(0x4A4A4A, 0xD0D0D0),
-        link: DynamicColor(0x3B7BBF, 0x6CB6FF),
+        link: DynamicColor(0x2484C1, 0x6CB6FF),
         selection: DynamicColor(0xE4E4E4, 0x3A3A3A),
         marker: DynamicColor(0xC0C0C0, 0x6A6A6A),
         rawBlockEditingBackground: DynamicColor(0xF5F5F5, 0x262626),
@@ -266,14 +285,15 @@ enum BuiltInTheme {
             plain: DynamicColor(0x4A4A4A, 0xD0D0D0),
             marker: DynamicColor(0x777777, 0xB0B0B0)
         ),
-        rootFontSize: 17,
-        headingScales: [1.9, 1.6, 1.35, 1.2, 1.05, 1.0],
+        rootFontSize: 19,
+        headingScales: [3.0, 1.5, 1.17, 1.0, 1.0, 1.0],
         headingWeights: [.semibold, .semibold, .semibold, .regular, .regular, .regular],
-        headingLineHeights: [1.3, 1.35, 1.4, 1.4, 1.4, 1.4],
+        // `#write { line-height: 1.53 }` inherits into every heading.
+        headingLineHeights: [1.53, 1.53, 1.53, 1.53, 1.53, 1.53],
         headingRules: [:],
-        bodyLineHeight: 1.55,
-        codeFontScale: 0.85,
-        contentMaxWidth: 780,
+        bodyLineHeight: 1.53,
+        codeFontScale: 0.9,
+        contentMaxWidth: 960,
         wideMaxWidth: 1100,
         widestMaxWidth: 1240,
         wideBreakpoint: 1200,
@@ -297,7 +317,7 @@ enum BuiltInTheme {
         background: DynamicColor(0xFFFFFF, 0x1C1C1C),
         sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
         text: DynamicColor(0x333333, 0xD4D4D4),
-        link: DynamicColor(0x4B9FD5, 0x6CB6FF),
+        link: DynamicColor(0x990000, 0x6CB6FF),
         selection: DynamicColor(0xE0E0E0, 0x3A3A3A),
         marker: DynamicColor(0xC0BCB4, 0x6E6A62),
         rawBlockEditingBackground: DynamicColor(0xF4F2EE, 0x242422),
@@ -329,13 +349,13 @@ enum BuiltInTheme {
             plain: DynamicColor(0x333333, 0xD4D4D4),
             marker: DynamicColor(0x8B5A2B, 0xE5B978)
         ),
-        rootFontSize: 15,
-        headingScales: [2.0, 1.65, 1.4, 1.2, 1.05, 1.0],
+        rootFontSize: 16,
+        headingScales: [2.0, 1.5, 1.17, 1.0, 1.125, 1.0],
         headingWeights: [.semibold, .semibold, .semibold, .semibold, .semibold, .semibold],
-        headingLineHeights: [1.25, 1.3, 1.35, 1.4, 1.4, 1.4],
+        headingLineHeights: [2.0, 2.0, 1.35, 1.4, 1.4, 1.4],
         headingRules: [:],
-        bodyLineHeight: 1.7,
-        codeFontScale: 0.88,
+        bodyLineHeight: 1.75,
+        codeFontScale: 0.9,
         contentMaxWidth: 820,
         wideMaxWidth: 1000,
         widestMaxWidth: 1160,
@@ -360,7 +380,7 @@ enum BuiltInTheme {
         background: DynamicColor(0xFAFAFA, 0x222222),
         sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
         text: DynamicColor(0x3A3A3A, 0xD8D8D8),
-        link: DynamicColor(0x0076D1, 0x6CB6FF),
+        link: DynamicColor(0x463F5C, 0x6CB6FF),
         selection: DynamicColor(0xE0E0E0, 0x3A3A3A),
         marker: DynamicColor(0xBCBCBC, 0x666666),
         rawBlockEditingBackground: DynamicColor(0xF2F2F2, 0x262626),
@@ -392,13 +412,14 @@ enum BuiltInTheme {
             plain: DynamicColor(0x3A3A3A, 0xD8D8D8),
             marker: DynamicColor(0xA0A1A7, 0x7F848E)
         ),
-        rootFontSize: 14,
-        headingScales: [2.1, 1.7, 1.4, 1.15, 1.0, 1.0],
+        rootFontSize: 16,
+        headingScales: [3.25, 2.298, 1.625, 1.3, 1.125, 1.125],
         headingWeights: [.bold, .bold, .bold, .medium, .medium, .medium],
-        headingLineHeights: [1.25, 1.3, 1.35, 1.4, 1.4, 1.4],
+        headingLineHeights: [1.2, 1.2, 1.2, 1.2, 1.2, 1.2],
         headingRules: [1: DynamicColor(0xE8E8E8, 0x3A3A3A), 2: DynamicColor(0xE8E8E8, 0x3A3A3A)],
-        bodyLineHeight: 1.6,
-        codeFontScale: 0.9,
+        bodyLineHeight: 1.8,
+        bodyFontScale: 1.25,
+        codeFontScale: 1.0,
         contentMaxWidth: 860,
         wideMaxWidth: 1024,
         widestMaxWidth: 1200,

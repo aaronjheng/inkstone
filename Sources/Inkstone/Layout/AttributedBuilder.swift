@@ -405,7 +405,9 @@ struct AttributedBuilder {
             } else if ordered {
                 marker = "\(block.attributes.listStart > 0 ? block.attributes.listStart : 1). "
             } else {
-                marker = String(block.attributes.bulletChar) + " "
+                // The theme's own bullet, not the source's `-`/`*`: every Typora
+                // theme normalises the marker through `list-style-type`.
+                marker = "\(theme.listBullet) "
             }
             let style: BlockStyle
             if block.attributes.checked != nil {

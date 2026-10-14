@@ -20,6 +20,12 @@ struct EditorTheme: Sendable, Equatable {
 
     var background: DynamicColor
     var sidebarBackground: DynamicColor
+    /// Sidebar-only colours; `nil` falls back to the editor tokens.
+    var sidebarForeground: DynamicColor?
+    var sidebarSecondary: DynamicColor?
+    var sidebarAccent: DynamicColor?
+    var sidebarSelection: DynamicColor?
+    var sidebarHover: DynamicColor?
     var text: DynamicColor
     var link: DynamicColor
     var selection: DynamicColor
@@ -58,8 +64,27 @@ struct EditorTheme: Sendable, Equatable {
     var headingLineHeights: [CGFloat]
     /// Headings that carry a bottom rule, with its colour.
     var headingRules: [Int: DynamicColor]
+    /// Heading colour when the theme sets one (`h1..h6 { color: #DEDEDE }`);
+    /// `nil` falls back to `text`.
+    var headingTextColor: DynamicColor?
+    /// Named heading face when the theme sets one (`"Lucida Grande"` in night);
+    /// `nil` falls back to the system face.
+    var headingFontName: String?
+    /// Per-level `letter-spacing` from the theme (`h1 { letter-spacing: -1.5px }`);
+    /// `nil` falls back to zero tracking.
+    var headingTracking: [CGFloat]?
+    /// Named body face when the theme sets one (`"Helvetica Neue"` in night);
+    /// `nil` falls back to the system face.
+    var bodyFontName: String?
     var bodyLineHeight: CGFloat
+    /// Multiplier on `rootFontSize` for body text, for themes whose `body`
+    /// sizes itself independently of the `html` root (pixyll's
+    /// `p { font-size: 1.25rem }`).
+    var bodyFontScale: CGFloat
     var codeFontScale: CGFloat
+    /// Named code face when the theme sets one (`"Monaco"` in night);
+    /// `nil` falls back to the system mono face.
+    var codeFontName: String?
 
     // MARK: Metrics
 
@@ -74,15 +99,23 @@ struct EditorTheme: Sendable, Equatable {
     var blockMargin: CGFloat
     var headingMargin: CGFloat
     var listIndent: CGFloat
+    /// The glyph drawn for an unordered item. Every built-in theme ships `disc`:
+    /// Typora renders `disc` even where the theme CSS says `square` (its `#write`
+    /// base rules outrank the theme's bare `ul` selector), so matching the
+    /// rendered reference means drawing `•` everywhere.
+    var listBullet: Character
     var quoteIndent: CGFloat
     var quoteBarWidth: CGFloat
     var codePadding: CGFloat
+    /// Left padding for code blocks when the theme's padding is asymmetric
+    /// (`pre.md-fences { padding: 10px 10px 10px 30px }`); `nil` uses `codePadding`.
+    var codePaddingLeft: CGFloat?
     var tableCellPadding: CGFloat
 
     // MARK: Derived
 
-    var bodyFontSize: CGFloat { rootFontSize }
-    var codeFontSize: CGFloat { (rootFontSize * codeFontScale).rounded() }
+    var bodyFontSize: CGFloat { (rootFontSize * bodyFontScale).rounded() }
+    var codeFontSize: CGFloat { (bodyFontSize * codeFontScale).rounded() }
 
     func headingSize(_ level: Int) -> CGFloat {
         let index = min(max(level, 1), headingScales.count) - 1
@@ -104,6 +137,12 @@ struct EditorTheme: Sendable, Equatable {
 
     func headingRule(_ level: Int) -> DynamicColor? { headingRules[level] }
 
+    func headingTrackingAmount(_ level: Int) -> CGFloat {
+        guard let headingTracking, !headingTracking.isEmpty else { return 0 }
+        let index = min(max(level, 1), headingTracking.count) - 1
+        return headingTracking[index]
+    }
+
     /// The measure to use for a given viewport width, honouring the breakpoints.
     func contentWidth(for viewport: CGFloat) -> CGFloat {
         let usable = viewport - contentPadding * 2
@@ -120,6 +159,11 @@ struct EditorTheme: Sendable, Equatable {
         displayName: String,
         background: DynamicColor,
         sidebarBackground: DynamicColor = DynamicColor(0xF9F9F9, 0x212121),
+        sidebarForeground: DynamicColor? = nil,
+        sidebarSecondary: DynamicColor? = nil,
+        sidebarAccent: DynamicColor? = nil,
+        sidebarSelection: DynamicColor? = nil,
+        sidebarHover: DynamicColor? = nil,
         text: DynamicColor,
         link: DynamicColor,
         selection: DynamicColor,
@@ -145,8 +189,14 @@ struct EditorTheme: Sendable, Equatable {
         headingWeights: [Font.Weight],
         headingLineHeights: [CGFloat],
         headingRules: [Int: DynamicColor],
+        headingTextColor: DynamicColor? = nil,
+        headingFontName: String? = nil,
+        headingTracking: [CGFloat]? = nil,
+        bodyFontName: String? = nil,
         bodyLineHeight: CGFloat,
+        bodyFontScale: CGFloat = 1.0,
         codeFontScale: CGFloat,
+        codeFontName: String? = nil,
         contentMaxWidth: CGFloat,
         wideMaxWidth: CGFloat,
         widestMaxWidth: CGFloat,
@@ -157,15 +207,22 @@ struct EditorTheme: Sendable, Equatable {
         blockMargin: CGFloat,
         headingMargin: CGFloat,
         listIndent: CGFloat,
+        listBullet: Character = "•",
         quoteIndent: CGFloat,
         quoteBarWidth: CGFloat,
         codePadding: CGFloat,
+        codePaddingLeft: CGFloat? = nil,
         tableCellPadding: CGFloat
     ) {
         self.identifier = identifier
         self.displayName = displayName
         self.background = background
         self.sidebarBackground = sidebarBackground
+        self.sidebarForeground = sidebarForeground
+        self.sidebarSecondary = sidebarSecondary
+        self.sidebarAccent = sidebarAccent
+        self.sidebarSelection = sidebarSelection
+        self.sidebarHover = sidebarHover
         self.text = text
         self.link = link
         self.selection = selection
@@ -191,8 +248,14 @@ struct EditorTheme: Sendable, Equatable {
         self.headingWeights = headingWeights
         self.headingLineHeights = headingLineHeights
         self.headingRules = headingRules
+        self.headingTextColor = headingTextColor
+        self.headingFontName = headingFontName
+        self.headingTracking = headingTracking
+        self.bodyFontName = bodyFontName
         self.bodyLineHeight = bodyLineHeight
+        self.bodyFontScale = bodyFontScale
         self.codeFontScale = codeFontScale
+        self.codeFontName = codeFontName
         self.contentMaxWidth = contentMaxWidth
         self.wideMaxWidth = wideMaxWidth
         self.widestMaxWidth = widestMaxWidth
@@ -203,9 +266,11 @@ struct EditorTheme: Sendable, Equatable {
         self.blockMargin = blockMargin
         self.headingMargin = headingMargin
         self.listIndent = listIndent
+        self.listBullet = listBullet
         self.quoteIndent = quoteIndent
         self.quoteBarWidth = quoteBarWidth
         self.codePadding = codePadding
+        self.codePaddingLeft = codePaddingLeft
         self.tableCellPadding = tableCellPadding
     }
 
@@ -309,6 +374,7 @@ struct ThemeOverride: Codable, Sendable {
 
     var rootFontSize: CGFloat?
     var bodyLineHeight: CGFloat?
+    var bodyFontScale: CGFloat?
     var contentMaxWidth: CGFloat?
     var contentPadding: CGFloat?
     var listIndent: CGFloat?
@@ -343,6 +409,7 @@ struct ThemeOverride: Codable, Sendable {
         if let focusBlur { theme.focusBlur = focusBlur }
         if let rootFontSize { theme.rootFontSize = rootFontSize }
         if let bodyLineHeight { theme.bodyLineHeight = bodyLineHeight }
+        if let bodyFontScale { theme.bodyFontScale = bodyFontScale }
         if let contentMaxWidth { theme.contentMaxWidth = contentMaxWidth }
         if let contentPadding { theme.contentPadding = contentPadding }
         if let listIndent { theme.listIndent = listIndent }

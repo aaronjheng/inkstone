@@ -236,18 +236,25 @@ final class FileTreeModel {
     /// This used to resolve everything from the fixed system palette, which left
     /// the Files panel unthemed no matter which theme was active.
     func apply(theme: EditorTheme) {
-        accent = Color(nsColor: theme.link.nsColor)
-        foreground = Color(nsColor: theme.text.nsColor)
-        secondary = Color(nsColor: theme.syntax.comment.nsColor)
+        // Themes may override the sidebar's own colours (Typora's Night does);
+        // falling back keeps every other theme on the editor tokens.
+        accent = Color(nsColor: (theme.sidebarAccent ?? theme.link).nsColor)
+        foreground = Color(nsColor: (theme.sidebarForeground ?? theme.text).nsColor)
+        secondary = Color(nsColor: (theme.sidebarSecondary ?? theme.syntax.comment).nsColor)
         background = Color(nsColor: theme.sidebarBackground.nsColor)
         sidebarBackground = Color(nsColor: theme.sidebarBackground.nsColor)
-        selectionBackground = Color(nsColor: theme.selection.nsColor)
-        hover = Color(
-            nsColor: NSColor(name: nil) { appearance in
-                let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                let text = isDark ? theme.text.dark : theme.text.light
-                return text.withAlphaComponent(isDark ? 0.08 : 0.06)
-            })
+        selectionBackground = Color(nsColor: (theme.sidebarSelection ?? theme.selection).nsColor)
+        hover = {
+            if let hover = theme.sidebarHover {
+                return Color(nsColor: hover.nsColor)
+            }
+            return Color(
+                nsColor: NSColor(name: nil) { appearance in
+                    let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    let text = isDark ? theme.text.dark : theme.text.light
+                    return text.withAlphaComponent(isDark ? 0.08 : 0.06)
+                })
+        }()
         guide = Color(
             nsColor: NSColor(name: nil) { appearance in
                 let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua

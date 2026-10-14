@@ -133,8 +133,41 @@ enum EditorFont {
         .monospacedSystemFont(ofSize: size, weight: .regular)
     }
 
+    /// Body face. A theme that names a face (`night` uses Helvetica Neue,
+    /// which ships with macOS) gets it.
+    static func nsBody(theme: EditorTheme) -> NSFont {
+        if let name = theme.bodyFontName, let font = NSFont(name: name, size: theme.bodyFontSize) {
+            return font
+        }
+        return .systemFont(ofSize: theme.bodyFontSize)
+    }
+
+    /// Code face. A theme that names one (`night` uses Monaco) gets it; the
+    /// fallback is the system mono face.
+    static func nsMono(theme: EditorTheme, size: CGFloat) -> NSFont {
+        if let name = theme.codeFontName, let font = NSFont(name: name, size: size) {
+            return font
+        }
+        return .monospacedSystemFont(ofSize: size, weight: .regular)
+    }
+
     static func nsSystem(size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
         .systemFont(ofSize: size, weight: weight)
+    }
+
+    /// Heading face. A theme that names a face (`night` uses Lucida Grande,
+    /// which ships with macOS) gets it; the bold levels are converted with the
+    /// font manager so one family covers both weights.
+    static func nsHeading(theme: EditorTheme, level: Int, weight: NSFont.Weight) -> NSFont {
+        let size = theme.headingSize(level)
+        if let name = theme.headingFontName, let named = NSFont(name: name, size: size) {
+            if weight.rawValue >= NSFont.Weight.bold.rawValue {
+                let bold = NSFontManager.shared.convert(named, toHaveTrait: .boldFontMask)
+                if bold.fontName != named.fontName { return bold }
+            }
+            return named
+        }
+        return .systemFont(ofSize: size, weight: weight)
     }
 
     /// Math face: serif and italic, matching TeX's default variables.

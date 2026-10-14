@@ -79,7 +79,7 @@ struct InlineStyle {
     static func code(theme: EditorTheme, base: BlockStyle) -> Overrides {
         Overrides(
             attributes: [
-                .font: EditorFont.nsMono(size: theme.codeFontSize),
+                .font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
                 .foregroundColor: theme.inlineCodeText.nsColor,
                 .backgroundColor: theme.inlineCodeBackground.nsColor,
             ]
