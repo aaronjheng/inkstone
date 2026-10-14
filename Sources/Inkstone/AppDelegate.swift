@@ -668,12 +668,13 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             guard result == .OK, let saveURL = panel.url else { return }
             if saveURL.standardizedFileURL.path == url.standardizedFileURL.path { return }
             do {
-                // The save panel already asks before replacing; a silent pre-delete
-                // here destroyed the destination even when the move then failed.
                 if FileManager.default.fileExists(atPath: saveURL.path) {
-                    try FileManager.default.removeItem(at: saveURL)
+                    _ = try FileManager.default.replaceItemAt(
+                        saveURL, withItemAt: url, backupItemName: nil, options: []
+                    )
+                } else {
+                    try FileManager.default.moveItem(at: url, to: saveURL)
                 }
-                try FileManager.default.moveItem(at: url, to: saveURL)
             } catch {
                 self.present(error, for: window)
                 return
@@ -708,9 +709,12 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     alert.addButton(withTitle: "Replace")
                     alert.addButton(withTitle: "Cancel")
                     guard alert.runModal() == .alertFirstButtonReturn else { return }
-                    try FileManager.default.removeItem(at: destination)
+                    _ = try FileManager.default.replaceItemAt(
+                        destination, withItemAt: url, backupItemName: nil, options: []
+                    )
+                } else {
+                    try FileManager.default.moveItem(at: url, to: destination)
                 }
-                try FileManager.default.moveItem(at: url, to: destination)
             } catch {
                 self.present(error, for: window)
                 return
@@ -823,7 +827,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// state every time they open, so a mode flipped by one window is reflected
     /// everywhere. Static state computed at build time used to contradict the
     /// app after the first toggle.
-    public func menuNeedsUpdate(_ menu: NSMenu) {        if menu.title == "View" {
+    public func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu.title == "View" {
             refreshViewCheckmarks()
         } else if menu.title == "Themes" {
             refreshThemesMenu()
@@ -1044,6 +1049,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         for document in store.documents {
             document.applyEditorSettings(view)
             document.applyParseOptions(store.settings.settings.parseOptions)
+            document.autosaveInterval = store.autosaveInterval
         }
         // Single-root: a preference change re-resolves each window's fixed root
         // (pinned folders stay put) and refreshes the environment new tabs copy.

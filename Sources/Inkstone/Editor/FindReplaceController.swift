@@ -278,7 +278,10 @@ final class FindReplaceController: NSViewController {
             // to the next one rather than pretending the highlight is somewhere
             // else. At most one full lap: when every hit is unmappable, stop
             // instead of recursing around the ring until the stack blows.
-            guard skippedRanges < results.count else { skippedRanges = 0; return }
+            guard skippedRanges < results.count else {
+                skippedRanges = 0
+                return
+            }
             skippedRanges += 1
             select(index: (index + 1) % results.count, reveal: reveal)
             return

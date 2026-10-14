@@ -211,8 +211,7 @@ struct BlockStyle {
 
     static func definition(theme: EditorTheme) -> BlockStyle {
         var style = BlockStyle(
-            font: EditorFont.nsSystem(size: max(theme.bodyFontSize - 2, 10))
-            , textColor: theme.quoteText.nsColor
+            font: EditorFont.nsSystem(size: max(theme.bodyFontSize - 2, 10)), textColor: theme.quoteText.nsColor
         )
         style.base[.paragraphStyle] = NSParagraphStyle.markdownBody(
             lineHeight: theme.bodyLineHeight * max(theme.bodyFontSize - 2, 10),

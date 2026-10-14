@@ -189,35 +189,45 @@ final class FileTreeModel {
     var foreground: Color = .primary
     var secondary: Color = .secondary
     var background: Color = Color(
-        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? ThemePalette.neutralDark.secondaryBackground
-                : ThemePalette.systemLight.secondaryBackground
-        }))
+        nsColor: NSColor(
+            name: nil,
+            dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.secondaryBackground
+                    : ThemePalette.systemLight.secondaryBackground
+            }))
     var sidebarBackground: Color = Color(
-        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? ThemePalette.neutralDark.sidebarBackground
-                : ThemePalette.systemLight.sidebarBackground
-        }))
+        nsColor: NSColor(
+            name: nil,
+            dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.sidebarBackground
+                    : ThemePalette.systemLight.sidebarBackground
+            }))
     var selectionBackground: Color = Color(
-        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? ThemePalette.neutralDark.secondaryBackground
-                : ThemePalette.systemLight.secondaryBackground
-        }))
+        nsColor: NSColor(
+            name: nil,
+            dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.secondaryBackground
+                    : ThemePalette.systemLight.secondaryBackground
+            }))
     /// Neutral hover wash: adaptive, using palette base.
     var hover: Color = Color(
-        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return NSColor.labelColor.withAlphaComponent(isDark ? 0.08 : 0.06)
-        }))
+        nsColor: NSColor(
+            name: nil,
+            dynamicProvider: { appearance in
+                let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                return NSColor.labelColor.withAlphaComponent(isDark ? 0.08 : 0.06)
+            }))
     /// Faint rail between nesting levels, using palette base.
     var guide: Color = Color(
-        nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-            let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            return NSColor.secondaryLabelColor.withAlphaComponent(isDark ? 0.15 : 0.12)
-        }))
+        nsColor: NSColor(
+            name: nil,
+            dynamicProvider: { appearance in
+                let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                return NSColor.secondaryLabelColor.withAlphaComponent(isDark ? 0.15 : 0.12)
+            }))
 
     /// Theme tokens for the tree. `DynamicColor` is already appearance-dynamic,
     /// so a system-appearance switch still needs no re-render; only the

@@ -149,6 +149,7 @@ final class DocumentWindowController {
         editor = MarkdownTextView(theme: theme)
         scrollView = DocumentScrollView(textView: editor, theme: theme)
         outlinePanel = OutlineViewController()
+        outlinePanel.apply(theme: theme)
         documentContent = DocumentContentView(editor: scrollView, outline: outlinePanel.view)
         documentContent.apply(theme: theme)
 
@@ -338,6 +339,11 @@ final class DocumentWindowController {
         autosizeTimer?.invalidate()
         // A closing tab must not leave its find bar floating in the host window.
         if findVisible { findController.hide() }
+    }
+
+    @MainActor deinit {
+        autosaveTimer?.invalidate()
+        autosizeTimer?.invalidate()
     }
 
     // MARK: - Format commands

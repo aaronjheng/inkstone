@@ -16,73 +16,89 @@ enum AppThemeColor {
 
     static var windowBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.windowBackground
-                    : ThemePalette.systemLight.windowBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.windowBackground
+                        : ThemePalette.systemLight.windowBackground
+                }))
     }
 
     static var windowBackgroundNS: NSColor {
-        NSColor(name: nil, dynamicProvider: { appearance in
-            appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                ? ThemePalette.neutralDark.windowBackground
-                : ThemePalette.systemLight.windowBackground
-        })
+        NSColor(
+            name: nil,
+            dynamicProvider: { appearance in
+                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    ? ThemePalette.neutralDark.windowBackground
+                    : ThemePalette.systemLight.windowBackground
+            })
     }
 
     static var secondaryBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.secondaryBackground
-                    : ThemePalette.systemLight.secondaryBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.secondaryBackground
+                        : ThemePalette.systemLight.secondaryBackground
+                }))
     }
 
     static var sidebarBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.sidebarBackground
-                    : ThemePalette.systemLight.sidebarBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.sidebarBackground
+                        : ThemePalette.systemLight.sidebarBackground
+                }))
     }
 
     static var pillBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.pillBackground
-                    : ThemePalette.systemLight.pillBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.pillBackground
+                        : ThemePalette.systemLight.pillBackground
+                }))
     }
 
     static var codeBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.codeBackground
-                    : ThemePalette.systemLight.codeBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.codeBackground
+                        : ThemePalette.systemLight.codeBackground
+                }))
     }
 
     static var fieldHoverBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.fieldHoverBackground
-                    : ThemePalette.systemLight.fieldHoverBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.fieldHoverBackground
+                        : ThemePalette.systemLight.fieldHoverBackground
+                }))
     }
 
     static var fieldFocusBackground: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.fieldFocusBackground
-                    : ThemePalette.systemLight.fieldFocusBackground
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.fieldFocusBackground
+                        : ThemePalette.systemLight.fieldFocusBackground
+                }))
     }
 
     // MARK: Interactive washes
@@ -159,70 +175,84 @@ enum AppThemeColor {
     /// Keywords: `local`, `function`, `return`, `if`
     static var syntaxKey: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxKey
-                    : ThemePalette.systemLight.syntaxKey
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.syntaxKey
+                        : ThemePalette.systemLight.syntaxKey
+                }))
     }
 
     /// Built-in functions & API members.
     static var syntaxBuiltin: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxBuiltin
-                    : ThemePalette.systemLight.syntaxBuiltin
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.syntaxBuiltin
+                        : ThemePalette.systemLight.syntaxBuiltin
+                }))
     }
 
     /// String literals.
     static var syntaxString: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxString
-                    : ThemePalette.systemLight.syntaxString
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.syntaxString
+                        : ThemePalette.systemLight.syntaxString
+                }))
     }
 
     /// Numeric literals.
     static var syntaxNumber: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxNumber
-                    : ThemePalette.systemLight.syntaxNumber
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.syntaxNumber
+                        : ThemePalette.systemLight.syntaxNumber
+                }))
     }
 
     /// Boolean literals & named constants.
     static var syntaxBool: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxBool
-                    : ThemePalette.systemLight.syntaxBool
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.syntaxBool
+                        : ThemePalette.systemLight.syntaxBool
+                }))
     }
 
     /// Type-like tokens & JSON object keys.
     static var syntaxType: Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                    ? ThemePalette.neutralDark.syntaxType
-                    : ThemePalette.systemLight.syntaxType
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                        ? ThemePalette.neutralDark.syntaxType
+                        : ThemePalette.systemLight.syntaxType
+                }))
     }
 
     // MARK: Resolution helpers
 
     private static func adaptiveWash(_ lightAlpha: Double, _ darkAlpha: Double, baseColor: NSColor = .labelColor) -> Color {
         Color(
-            nsColor: NSColor(name: nil, dynamicProvider: { appearance in
-                let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-                return baseColor.withAlphaComponent(CGFloat(isDark ? darkAlpha : lightAlpha))
-            }))
+            nsColor: NSColor(
+                name: nil,
+                dynamicProvider: { appearance in
+                    let isDark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+                    return baseColor.withAlphaComponent(CGFloat(isDark ? darkAlpha : lightAlpha))
+                }))
     }
 }

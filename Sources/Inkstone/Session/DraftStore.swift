@@ -43,9 +43,13 @@ final class DraftStore {
         let fallback = support[0].appendingPathComponent("Inkstone/Drafts", isDirectory: true)
         let base = directory ?? fallback
         self.directory = base
-        try? FileManager.default.createDirectory(
-            at: base, withIntermediateDirectories: true
-        )
+        do {
+            try FileManager.default.createDirectory(
+                at: base, withIntermediateDirectories: true
+            )
+        } catch {
+            AppLogger.error("Failed to create drafts directory: \\(error)", category: "Drafts")
+        }
         drafts = readAll()
     }
 
@@ -171,7 +175,8 @@ final class DraftStore {
             let savedAt = attributes?[.modificationDate] as? Date ?? .distantPast
             let identifier = file.deletingPathExtension().lastPathComponent
             let source = paths[identifier].map { URL(fileURLWithPath: $0) }
-            let documentID = identifier.hasPrefix("untitled-")
+            let documentID =
+                identifier.hasPrefix("untitled-")
                 ? String(identifier.dropFirst("untitled-".count))
                 : nil
             out.append(

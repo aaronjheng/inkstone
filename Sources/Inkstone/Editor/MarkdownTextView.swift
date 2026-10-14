@@ -28,6 +28,10 @@ final class MarkdownTextView: NSTextView {
     /// Incremental-reparse state.
     var focusedBlockID: Int?
     private var reparseTimer: Timer?
+
+    @MainActor deinit {
+        reparseTimer?.invalidate()
+    }
     private var isReplacingForReparse = false
     /// Set while the caret is inside a collapsed run, so the clamp can be skipped
     /// once and not fight the user's own navigation.

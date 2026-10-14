@@ -78,6 +78,7 @@ final class EditorWindowController: NSWindowController, NSWindowDelegate, NSTabV
         tabStripHost.translatesAutoresizingMaskIntoConstraints = true
         contentRoot = ContentRootView(files: filesPanel.view, tabStrip: tabStripHost, tabArea: tabView)
         contentRoot?.apply(theme: theme)
+        filesPanel.apply(theme: theme)
         window.contentView = contentRoot
         // Never merged into a native tab group: the sidebar must stay put.
         window.tabbingMode = .disallowed

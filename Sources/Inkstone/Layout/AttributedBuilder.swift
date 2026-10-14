@@ -1221,7 +1221,7 @@ struct AttributedBuilder {
             guard !block.attributes.isSetext else { return }
             let heading = BlockStyle.heading(theme: theme, level: block.attributes.level)
             let style = BlockStyle.collapsed(from: heading, theme: theme)
-        let emitted = String(block.inlines.verbatim)
+            let emitted = String(block.inlines.verbatim)
             for line in block.source.split(separator: "\n", omittingEmptySubsequences: false) {
                 let text = String(line)
                 if text.trimmingCharacters(in: .whitespaces).isEmpty {
