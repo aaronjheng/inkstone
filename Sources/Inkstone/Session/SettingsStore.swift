@@ -37,6 +37,10 @@ enum LaunchOption: String, Codable, CaseIterable, Sendable {
 struct EditorSettings: Codable, Equatable, Sendable {
     // Appearance
     var themeIdentifier = "github"
+    /// The theme for dark mode, as Typora's separate light/dark theme pickers.
+    /// `nil` follows the light theme, which keeps a dynamic-palette theme like
+    /// GitHub rendering its own dark half.
+    var darkThemeIdentifier: String?
     var useCustomFontSize = false
     var customFontSize: Double = 16
     var wordsPerMinute = 382
@@ -86,7 +90,7 @@ struct EditorSettings: Codable, Equatable, Sendable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case themeIdentifier, useCustomFontSize, customFontSize, wordsPerMinute
+        case themeIdentifier, darkThemeIdentifier, useCustomFontSize, customFontSize, wordsPerMinute
         case sidebarFolderPath, autoPairBrackets, autoPairMarkdownSyntax
         case emojiAutocomplete, keepCaretInMiddle, indentSize, codeIndentSize
         case spellCheckEnabled, autoSaveInterval, showInvisibleCharacters
@@ -99,6 +103,7 @@ struct EditorSettings: Codable, Equatable, Sendable {
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         themeIdentifier = try container.decodeIfPresent(String.self, forKey: .themeIdentifier) ?? "github"
+        darkThemeIdentifier = try container.decodeIfPresent(String.self, forKey: .darkThemeIdentifier)
         useCustomFontSize = try container.decodeIfPresent(Bool.self, forKey: .useCustomFontSize) ?? false
         customFontSize = try container.decodeIfPresent(Double.self, forKey: .customFontSize) ?? 16
         wordsPerMinute = try container.decodeIfPresent(Int.self, forKey: .wordsPerMinute) ?? 382
@@ -278,7 +283,18 @@ final class SettingsStore {
 
     /// The theme named by the current settings, scaled by the font-size preference.
     func resolvedTheme() -> EditorTheme {
-        let base = BuiltInTheme.theme(named: settings.themeIdentifier) ?? BuiltInTheme.github
+        resolvedTheme(isDark: false)
+    }
+
+    /// The theme an appearance should show: the light theme in light mode, and
+    /// in dark mode the separately chosen dark theme, falling back to the light
+    /// theme when none was picked (Typora's "separate themes" model).
+    func resolvedTheme(isDark: Bool) -> EditorTheme {
+        var identifier = settings.themeIdentifier
+        if isDark, let dark = settings.darkThemeIdentifier {
+            identifier = dark
+        }
+        let base = BuiltInTheme.theme(named: identifier) ?? BuiltInTheme.github
         return base.scaled(by: settings.fontScale)
     }
 }
@@ -289,13 +305,34 @@ final class SettingsStore {
 final class ThemeManager {
     private(set) var theme: EditorTheme
     private let store: SettingsStore
+    /// Watches `NSApp.effectiveAppearance` so a system light/dark switch swaps
+    /// in the dark theme without waiting for a restart.
+    private var appearanceObservation: NSKeyValueObservation?
 
     /// Called on every change so the preferences window can reflect it.
     var onChange: ((EditorTheme) -> Void)?
 
     init(store: SettingsStore = .shared) {
         self.store = store
-        theme = store.resolvedTheme()
+        theme = store.resolvedTheme(isDark: Self.isDarkAppearance)
+        appearanceObservation = NSApp.observe(\.effectiveAppearance, options: [.new]) {
+            [weak self] _, _ in
+            MainActor.assumeIsolated { self?.appearanceDidChange() }
+        }
+    }
+
+    /// Whether the system (or a forced `NSApp.appearance`) is showing the dark
+    /// side of the palettes.
+    private static var isDarkAppearance: Bool {
+        NSApp.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+    }
+
+    private func appearanceDidChange() {
+        let next = store.resolvedTheme(isDark: Self.isDarkAppearance)
+        // A same-theme flip needs no re-render: the dynamic `NSColor`s have
+        // already followed the appearance on their own.
+        guard next != theme else { return }
+        apply()
     }
 
     /// The six built-ins plus any user themes found on disk.
@@ -303,8 +340,28 @@ final class ThemeManager {
         BuiltInTheme.all + userThemes()
     }
 
+    /// Typora's model: a pick applies to the appearance that is showing, so
+    /// choosing a theme at night sets the dark slot and leaves the day theme.
     func select(identifier: String) {
+        store.update {
+            if Self.isDarkAppearance {
+                $0.darkThemeIdentifier = identifier
+            } else {
+                $0.themeIdentifier = identifier
+            }
+        }
+        apply()
+    }
+
+    /// The preferences' light-mode picker.
+    func selectLightTheme(identifier: String) {
         store.update { $0.themeIdentifier = identifier }
+        apply()
+    }
+
+    /// The preferences' dark-mode picker; `nil` follows the light theme.
+    func selectDarkTheme(identifier: String?) {
+        store.update { $0.darkThemeIdentifier = identifier }
         apply()
     }
 
@@ -322,7 +379,7 @@ final class ThemeManager {
     }
 
     func apply() {
-        theme = store.resolvedTheme()
+        theme = store.resolvedTheme(isDark: Self.isDarkAppearance)
         onChange?(theme)
     }
 
