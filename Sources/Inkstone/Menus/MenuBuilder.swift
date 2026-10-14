@@ -13,6 +13,7 @@ enum MenuBuilder {
         main.addItem(applicationMenuItem(store: store))
         main.addItem(fileMenuItem(responder: responder, store: store))
         main.addItem(editMenuItem(responder: responder, store: store))
+        main.addItem(paragraphMenuItem(responder: responder))
         main.addItem(formatMenuItem(responder: responder))
         main.addItem(viewMenuItem(responder: responder, store: store))
         main.addItem(themesMenuItem(store: store))
@@ -83,7 +84,7 @@ enum MenuBuilder {
         ).target = responder
         menu.addItem(
             withTitle: "New Window", action: #selector(AppDelegate.newWindow(_:)), keyEquivalent: "n"
-        ).keyEquivalentModifierMask = [.command, .option]
+        ).keyEquivalentModifierMask = [.command, .shift]
         menu.items.last?.target = responder
         menu.addItem(
             withTitle: "Open…", action: #selector(AppDelegate.openDocument(_:)), keyEquivalent: "o"
@@ -185,25 +186,23 @@ enum MenuBuilder {
         // A nil action renders disabled and reads as a broken feature; the smart-
         // quote behaviour itself lives in the Editor pane, so the stub goes.
         menu.addItem(
-            withTitle: "Toggle Source Mode", action: #selector(AppDelegate.toggleSourceMode(_:)), keyEquivalent: "."
+            withTitle: "Toggle Source Mode", action: #selector(AppDelegate.toggleSourceMode(_:)), keyEquivalent: "/"
         ).target = responder
         item.submenu = menu
         item.title = menu.title
         return item
     }
 
-    // MARK: - Format
+    // MARK: - Paragraph
 
-    /// Typora's default macOS bindings, action by action.
+    /// Typora's block-level menu: headings, block inserts, lists, indent.
     ///
-    /// `Open Folder` yields ⌘⌥O to the numbered-list command (Typora's own
-    /// binding) and takes ⌘⇧O, which is where the original opens a folder
-    /// quickly anyway; `Clear Format` (⌘\) is not bound because the sidebar
-    /// already owns that key here.
+    /// Inline styles stay in `formatMenuItem`; everything here rewrites whole
+    /// lines via `FormatController`, except indent which the editor routes.
     @MainActor
-    private static func formatMenuItem(responder: AppDelegate) -> NSMenuItem {
+    private static func paragraphMenuItem(responder: AppDelegate) -> NSMenuItem {
         let item = NSMenuItem()
-        let menu = NSMenu(title: "Format")
+        let menu = NSMenu(title: "Paragraph")
 
         func entry(
             _ title: String, _ action: FormatAction, _ key: String,
@@ -226,28 +225,58 @@ enum MenuBuilder {
         entry("Increase Heading Level", .increaseHeading, "=")
         entry("Decrease Heading Level", .decreaseHeading, "-")
         menu.addItem(.separator())
+        entry("Table", .table, "t", [.command, .option])
+        entry("Code Fences", .codeBlock, "c", [.command, .option])
+        entry("Math Block", .mathBlock, "b", [.command, .option])
+        entry("Quote", .quote, "q", [.command, .option])
+        entry("Ordered List", .orderedList, "o", [.command, .option])
+        entry("Unordered List", .bulletList, "u", [.command, .option])
+        entry("Task List", .taskList, "x", [.command, .option])
+        menu.addItem(.separator())
+        entry("Indent", .indent, "[", .command)
+        entry("Outdent", .outdent, "]", .command)
+        menu.addItem(.separator())
+        entry("Horizontal Rule", .horizontalRule, "")
+        entry("Table of Contents", .tableOfContents, "")
+        entry("YAML Front Matter", .frontMatter, "")
+        item.submenu = menu
+        item.title = menu.title
+        return item
+    }
+
+    // MARK: - Format
+
+    /// Typora's inline-level menu: every entry wraps or unwraps the selection.
+    @MainActor
+    private static func formatMenuItem(responder: AppDelegate) -> NSMenuItem {
+        let item = NSMenuItem()
+        let menu = NSMenu(title: "Format")
+
+        func entry(
+            _ title: String, _ action: FormatAction, _ key: String,
+            _ modifiers: NSEvent.ModifierFlags = .command
+        ) {
+            let menuItem = menu.addItem(
+                withTitle: title,
+                action: #selector(AppDelegate.applyFormatting(_:)),
+                keyEquivalent: key
+            )
+            menuItem.keyEquivalentModifierMask = modifiers
+            menuItem.target = responder
+            menuItem.representedObject = action.rawValue
+        }
+
         entry("Bold", .bold, "b")
         entry("Italic", .italic, "i")
         entry("Underline", .underline, "u")
         entry("Inline Code", .inlineCode, "`", [.command, .shift])
         entry("Strikethrough", .strikethrough, "`", [.control, .shift])
         entry("Inline Math", .inlineMath, "m", [.command, .shift])
-        entry("Highlight", .highlight, "h")
+        entry("Highlight", .highlight, "")
+        menu.addItem(.separator())
         entry("Link", .link, "k")
         entry("Image", .image, "i", [.command, .control])
         entry("Clear Format", .clearFormat, "\\")
-        menu.addItem(.separator())
-        entry("Code Block", .codeBlock, "c", [.command, .option])
-        entry("Math Block", .mathBlock, "b", [.command, .option])
-        entry("Quote", .quote, "q", [.command, .option])
-        entry("Bullet List", .bulletList, "u", [.command, .option])
-        entry("Numbered List", .orderedList, "o", [.command, .option])
-        entry("Task List", .taskList, "x", [.command, .option])
-        entry("Table", .table, "t", [.command, .option])
-        menu.addItem(.separator())
-        entry("Horizontal Rule", .horizontalRule, "")
-        entry("Table of Contents", .tableOfContents, "")
-        entry("YAML Front Matter", .frontMatter, "")
         item.submenu = menu
         item.title = menu.title
         return item
@@ -260,19 +289,25 @@ enum MenuBuilder {
         let item = NSMenuItem()
         let menu = NSMenu(title: "View")
         menu.addItem(
-            withTitle: "Source Code Mode", action: #selector(AppDelegate.toggleSourceMode(_:)), keyEquivalent: "."
+            withTitle: "Source Code Mode", action: #selector(AppDelegate.toggleSourceMode(_:)), keyEquivalent: "/"
         ).target = responder
+        // Function-key equivalents: F8 is U+F70B, F9 is U+F70C.
         menu.addItem(
-            withTitle: "Focus Mode", action: #selector(AppDelegate.toggleFocusMode(_:)), keyEquivalent: ""
+            withTitle: "Focus Mode", action: #selector(AppDelegate.toggleFocusMode(_:)),
+            keyEquivalent: "\u{F70B}"
         ).target = responder
+        menu.items.last?.keyEquivalentModifierMask = []
         menu.addItem(
-            withTitle: "Typewriter Mode", action: #selector(AppDelegate.toggleTypewriterMode(_:)), keyEquivalent: ""
+            withTitle: "Typewriter Mode", action: #selector(AppDelegate.toggleTypewriterMode(_:)),
+            keyEquivalent: "\u{F70C}"
         ).target = responder
+        menu.items.last?.keyEquivalentModifierMask = []
         menu.addItem(
             withTitle: "Readonly Mode", action: #selector(AppDelegate.toggleReadonlyMode(_:)), keyEquivalent: ""
         ).target = responder
         menu.addItem(.separator())
-        // The original toggles its sidebar with ⌘\; the two panels join that family.
+        // Typora toggles its sidebar with ⌘⇧L; this project's three panels keep
+        // the ⌘\ family instead.
         for (title, action, key, modifiers) in [
             ("Sidebar", #selector(AppDelegate.toggleSidebar(_:)), "\\", NSEvent.ModifierFlags.command),
             ("Files", #selector(AppDelegate.toggleFiles(_:)), "\\", [.command, .shift]),
@@ -305,14 +340,16 @@ enum MenuBuilder {
         ).keyEquivalentModifierMask = [.command, .shift]
         menu.items.last?.target = responder
         menu.addItem(.separator())
+        // Typora leaves zoom unbound; ⌘0/⌘- already belong to Paragraph and
+        // ⌘+ is not a menu key, so these stay clickable-only.
         menu.addItem(
-            withTitle: "Actual Size", action: #selector(AppDelegate.actualSize(_:)), keyEquivalent: "0"
+            withTitle: "Actual Size", action: #selector(AppDelegate.actualSize(_:)), keyEquivalent: ""
         ).target = responder
         menu.addItem(
-            withTitle: "Zoom In", action: #selector(AppDelegate.zoomIn(_:)), keyEquivalent: "+"
+            withTitle: "Zoom In", action: #selector(AppDelegate.zoomIn(_:)), keyEquivalent: ""
         ).target = responder
         menu.addItem(
-            withTitle: "Zoom Out", action: #selector(AppDelegate.zoomOut(_:)), keyEquivalent: "-"
+            withTitle: "Zoom Out", action: #selector(AppDelegate.zoomOut(_:)), keyEquivalent: ""
         ).target = responder
         menu.addItem(.separator())
         menu.addItem(

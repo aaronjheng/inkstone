@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// The commands the Format menu and its Typora key equivalents dispatch.
+/// The commands the Paragraph and Format menus dispatch.
 ///
 /// Raw values ride along as the menu items' `representedObject`, so one action
 /// covers every entry: `AppDelegate` looks the value up and hands it to the
