@@ -21,8 +21,7 @@ build:
         -scheme Inkstone \
         -configuration '{{ configuration }}' \
         -derivedDataPath '{{ derived_data }}' \
-        -allowProvisioningUpdates \
-        "CODE_SIGN_STYLE=${CODE_SIGN_STYLE:-Automatic}" \
+        "CODE_SIGN_STYLE=${CODE_SIGN_STYLE:-Manual}" \
         "CODE_SIGN_IDENTITY=${CODE_SIGN_IDENTITY:--}" \
         "DEVELOPMENT_TEAM=${DEVELOPMENT_TEAM:-}" \
         ONLY_ACTIVE_ARCH=YES build
