@@ -4,14 +4,24 @@ import SwiftTreeSitter
 import TreeSitterBash
 import TreeSitterC
 import TreeSitterCPP
+import TreeSitterCSS
+import TreeSitterCSharp
 import TreeSitterGo
 import TreeSitterHTML
+import TreeSitterHaskell
 import TreeSitterJSON
 import TreeSitterJava
+import TreeSitterKotlin
+import TreeSitterLua
+import TreeSitterPHP
+import TreeSitterPython
+import TreeSitterRuby
 import TreeSitterRust
 import TreeSitterSwift
 import TreeSitterTSX
 import TreeSitterTypeScript
+import TreeSitterXML
+import TreeSitterYAML
 
 /// Applies token colours to fenced code with tree-sitter.
 ///
@@ -30,6 +40,7 @@ final class CodeHighlighter {
     /// The bundled grammars. The raw value is the cache key.
     private enum Grammar: String {
         case swift, typescript, tsx, cLanguage, cpp, java, go, rust, html, json, bash
+        case python, ruby, php, csharp, css, haskell, kotlin, yaml, lua, xml
 
         /// The resource bundle SwiftPM builds for a grammar package. The
         /// pattern is `<Package>_<Target>`; TypeScript's TSX parser is the
@@ -38,6 +49,17 @@ final class CodeHighlighter {
             self == .tsx
                 ? "TreeSitterTypeScript_TreeSitterTSX"
                 : "TreeSitter\(packageName)_TreeSitter\(packageName)"
+        }
+
+        /// Relative directories inside the bundle that may hold
+        /// `highlights.scm`, in probe order. XML copies `queries/xml` rather
+        /// than `queries`, so its own folder comes first.
+        var queryDirectories: [String] {
+            let standard = ["queries", "Contents/Resources/queries"]
+            switch self {
+            case .xml: return ["xml", "Contents/Resources/xml"] + standard
+            default: return standard
+            }
         }
 
         private var packageName: String {
@@ -53,6 +75,16 @@ final class CodeHighlighter {
             case .html: "HTML"
             case .json: "JSON"
             case .bash: "Bash"
+            case .python: "Python"
+            case .ruby: "Ruby"
+            case .php: "PHP"
+            case .csharp: "CSharp"
+            case .css: "CSS"
+            case .haskell: "Haskell"
+            case .kotlin: "Kotlin"
+            case .yaml: "YAML"
+            case .lua: "Lua"
+            case .xml: "XML"
             }
         }
     }
@@ -62,7 +94,8 @@ final class CodeHighlighter {
     private static let aliases: [String: Grammar] = [
         "swift": .swift,
         "typescript": .typescript, "ts": .typescript,
-        "tsx": .tsx,
+        "javascript": .typescript, "js": .typescript,
+        "tsx": .tsx, "jsx": .tsx,
         "c": .cLanguage, "h": .cLanguage,
         "cpp": .cpp, "c++": .cpp, "cc": .cpp, "cxx": .cpp,
         "hpp": .cpp, "hxx": .cpp, "hh": .cpp,
@@ -72,6 +105,16 @@ final class CodeHighlighter {
         "html": .html, "xhtml": .html,
         "json": .json, "jsonc": .json,
         "bash": .bash, "sh": .bash, "shell": .bash, "zsh": .bash, "console": .bash,
+        "python": .python, "py": .python, "python3": .python,
+        "ruby": .ruby, "rb": .ruby,
+        "php": .php,
+        "csharp": .csharp, "cs": .csharp, "c#": .csharp,
+        "css": .css,
+        "haskell": .haskell, "hs": .haskell,
+        "kotlin": .kotlin, "kt": .kotlin,
+        "yaml": .yaml, "yml": .yaml,
+        "lua": .lua,
+        "xml": .xml,
     ]
 
     /// A grammar's language object and the highlight query that colours it.
@@ -174,6 +217,16 @@ final class CodeHighlighter {
         case .html: Language(tree_sitter_html())
         case .json: Language(tree_sitter_json())
         case .bash: Language(tree_sitter_bash())
+        case .python: Language(tree_sitter_python())
+        case .ruby: Language(tree_sitter_ruby())
+        case .php: Language(tree_sitter_php())
+        case .csharp: Language(tree_sitter_c_sharp())
+        case .css: Language(tree_sitter_css())
+        case .haskell: Language(tree_sitter_haskell())
+        case .kotlin: Language(tree_sitter_kotlin())
+        case .yaml: Language(tree_sitter_yaml())
+        case .lua: Language(tree_sitter_lua())
+        case .xml: Language(tree_sitter_xml())
         }
     }
 
@@ -185,14 +238,18 @@ final class CodeHighlighter {
     private static func highlightQuery(for grammar: Grammar, language: Language) -> Query? {
         guard let bundle = Bundle.main.url(forResource: grammar.bundleName, withExtension: "bundle")
         else { return nil }
-        let direct = bundle.appendingPathComponent("queries", isDirectory: true)
-        let nested = bundle.appendingPathComponent(
-            "Contents/Resources/queries", isDirectory: true
-        )
-        let directory = FileManager.default.fileExists(atPath: direct.path) ? direct : nested
-        return try? Query(
-            language: language, url: directory.appendingPathComponent("highlights.scm")
-        )
+        for relative in grammar.queryDirectories {
+            let url =
+                bundle
+                .appendingPathComponent(relative, isDirectory: true)
+                .appendingPathComponent("highlights.scm")
+            if FileManager.default.fileExists(atPath: url.path),
+                let query = try? Query(language: language, url: url)
+            {
+                return query
+            }
+        }
+        return nil
     }
 
     /// A parser is reusable across parses; one per grammar keeps the language

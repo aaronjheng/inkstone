@@ -1,0 +1,23 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+
+  - package-ecosystem: swift
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    ignore:
+      # swift-tree-sitter only allows tree-sitter < 0.26. Remove after upstream relaxes the constraint.
+      - dependency-name: github.com/tree-sitter/tree-sitter
+    groups:
+      swift:
+        patterns:
+          - "*"

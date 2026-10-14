@@ -20,6 +20,16 @@
 		A1000000000000000000006B /* TreeSitterRust in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000007B /* TreeSitterRust */; };
 		A1000000000000000000006D /* TreeSitterSwift in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000007D /* TreeSitterSwift */; };
 		A1000000000000000000006E /* TreeSitterTypeScript in Frameworks */ = {isa = PBXBuildFile; productRef = A1000000000000000000007E /* TreeSitterTypeScript */; };
+		A10000000000000000000030 /* TreeSitterPython in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000040 /* TreeSitterPython */; };
+		A10000000000000000000031 /* TreeSitterRuby in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000041 /* TreeSitterRuby */; };
+		A10000000000000000000032 /* TreeSitterPHP in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000042 /* TreeSitterPHP */; };
+		A10000000000000000000033 /* TreeSitterCSharp in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000043 /* TreeSitterCSharp */; };
+		A10000000000000000000034 /* TreeSitterCSS in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000044 /* TreeSitterCSS */; };
+		A10000000000000000000035 /* TreeSitterHaskell in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000045 /* TreeSitterHaskell */; };
+		A10000000000000000000036 /* TreeSitterKotlin in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000046 /* TreeSitterKotlin */; };
+		A10000000000000000000037 /* TreeSitterYAML in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000047 /* TreeSitterYAML */; };
+		A10000000000000000000038 /* TreeSitterLua in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000048 /* TreeSitterLua */; };
+		A10000000000000000000039 /* TreeSitterXML in Frameworks */ = {isa = PBXBuildFile; productRef = A10000000000000000000049 /* TreeSitterXML */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -50,6 +60,16 @@
 				A1000000000000000000006B /* TreeSitterRust in Frameworks */,
 				A1000000000000000000006D /* TreeSitterSwift in Frameworks */,
 				A1000000000000000000006E /* TreeSitterTypeScript in Frameworks */,
+				A10000000000000000000030 /* TreeSitterPython in Frameworks */,
+				A10000000000000000000031 /* TreeSitterRuby in Frameworks */,
+				A10000000000000000000032 /* TreeSitterPHP in Frameworks */,
+				A10000000000000000000033 /* TreeSitterCSharp in Frameworks */,
+				A10000000000000000000034 /* TreeSitterCSS in Frameworks */,
+				A10000000000000000000035 /* TreeSitterHaskell in Frameworks */,
+				A10000000000000000000036 /* TreeSitterKotlin in Frameworks */,
+				A10000000000000000000037 /* TreeSitterYAML in Frameworks */,
+				A10000000000000000000038 /* TreeSitterLua in Frameworks */,
+				A10000000000000000000039 /* TreeSitterXML in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -115,6 +135,16 @@
 				A1000000000000000000007B /* TreeSitterRust */,
 				A1000000000000000000007D /* TreeSitterSwift */,
 				A1000000000000000000007E /* TreeSitterTypeScript */,
+				A10000000000000000000040 /* TreeSitterPython */,
+				A10000000000000000000041 /* TreeSitterRuby */,
+				A10000000000000000000042 /* TreeSitterPHP */,
+				A10000000000000000000043 /* TreeSitterCSharp */,
+				A10000000000000000000044 /* TreeSitterCSS */,
+				A10000000000000000000045 /* TreeSitterHaskell */,
+				A10000000000000000000046 /* TreeSitterKotlin */,
+				A10000000000000000000047 /* TreeSitterYAML */,
+				A10000000000000000000048 /* TreeSitterLua */,
+				A10000000000000000000049 /* TreeSitterXML */,
 			);
 			productName = Inkstone;
 			productReference = A10000000000000000000001 /* Inkstone.app */;
@@ -156,6 +186,16 @@
 				A1000000000000000000008B /* XCRemoteSwiftPackageReference "tree-sitter-rust" */,
 				A1000000000000000000008D /* XCRemoteSwiftPackageReference "tree-sitter-swift" */,
 				A1000000000000000000008E /* XCRemoteSwiftPackageReference "tree-sitter-typescript" */,
+				A10000000000000000000090 /* XCRemoteSwiftPackageReference "tree-sitter-python" */,
+				A10000000000000000000091 /* XCRemoteSwiftPackageReference "tree-sitter-ruby" */,
+				A10000000000000000000092 /* XCRemoteSwiftPackageReference "tree-sitter-php" */,
+				A10000000000000000000093 /* XCRemoteSwiftPackageReference "tree-sitter-c-sharp" */,
+				A10000000000000000000094 /* XCRemoteSwiftPackageReference "tree-sitter-css" */,
+				A10000000000000000000095 /* XCRemoteSwiftPackageReference "tree-sitter-haskell" */,
+				A10000000000000000000096 /* XCRemoteSwiftPackageReference "tree-sitter-kotlin" */,
+				A10000000000000000000097 /* XCRemoteSwiftPackageReference "tree-sitter-yaml" */,
+				A10000000000000000000098 /* XCRemoteSwiftPackageReference "tree-sitter-lua" */,
+				A10000000000000000000099 /* XCRemoteSwiftPackageReference "tree-sitter-xml" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A10000000000000000000007 /* Products */;
@@ -395,6 +435,96 @@
 				minimumVersion = 0.23.2;
 			};
 		};
+		/* 0.25.0 gates scanner.c behind a FileManager check that Xcode's
+		   manifest evaluation fails, leaving the scanner unlinked. */
+		A10000000000000000000090 /* XCRemoteSwiftPackageReference "tree-sitter-python" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter/tree-sitter-python";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.23.6;
+			};
+		};
+		A10000000000000000000091 /* XCRemoteSwiftPackageReference "tree-sitter-ruby" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter/tree-sitter-ruby";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.23.1;
+			};
+		};
+		A10000000000000000000092 /* XCRemoteSwiftPackageReference "tree-sitter-php" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter/tree-sitter-php";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.25.1;
+			};
+		};
+		A10000000000000000000093 /* XCRemoteSwiftPackageReference "tree-sitter-c-sharp" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter/tree-sitter-c-sharp";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.23.5;
+			};
+		};
+		/* 0.25.0 gates scanner.c behind a FileManager check that Xcode's
+		   manifest evaluation fails, leaving the scanner unlinked. */
+		A10000000000000000000094 /* XCRemoteSwiftPackageReference "tree-sitter-css" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter/tree-sitter-css";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.23.2;
+			};
+		};
+		A10000000000000000000095 /* XCRemoteSwiftPackageReference "tree-sitter-haskell" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter/tree-sitter-haskell";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.24.1;
+			};
+		};
+		A10000000000000000000096 /* XCRemoteSwiftPackageReference "tree-sitter-kotlin" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/fwcd/tree-sitter-kotlin";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.3.8;
+			};
+		};
+		/* tree-sitter-yaml pinned to 0.6.x: 0.7.x is unusable under Xcode
+		   (0.7.1+ gates scanner.c behind a FileManager check that fails
+		   manifest evaluation; 0.7.0 depends on the renamed ChimeHQ
+		   SwiftTreeSitter URL). */
+		A10000000000000000000097 /* XCRemoteSwiftPackageReference "tree-sitter-yaml" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter-grammars/tree-sitter-yaml";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.6.1;
+			};
+		};
+		/* 0.5.0/0.4.x gate scanner.c behind a FileManager check that Xcode's
+		   manifest evaluation fails, leaving the scanner unlinked. */
+		A10000000000000000000098 /* XCRemoteSwiftPackageReference "tree-sitter-lua" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter-grammars/tree-sitter-lua";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.3.0;
+			};
+		};
+		A10000000000000000000099 /* XCRemoteSwiftPackageReference "tree-sitter-xml" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/tree-sitter-grammars/tree-sitter-xml";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 0.7.0;
+			};
+		};
 /* End XCRemoteSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
@@ -452,6 +582,56 @@
 			isa = XCSwiftPackageProductDependency;
 			package = A1000000000000000000008E /* XCRemoteSwiftPackageReference "tree-sitter-typescript" */;
 			productName = TreeSitterTypeScript;
+		};
+		A10000000000000000000040 /* TreeSitterPython */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000090 /* XCRemoteSwiftPackageReference "tree-sitter-python" */;
+			productName = TreeSitterPython;
+		};
+		A10000000000000000000041 /* TreeSitterRuby */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000091 /* XCRemoteSwiftPackageReference "tree-sitter-ruby" */;
+			productName = TreeSitterRuby;
+		};
+		A10000000000000000000042 /* TreeSitterPHP */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000092 /* XCRemoteSwiftPackageReference "tree-sitter-php" */;
+			productName = TreeSitterPHP;
+		};
+		A10000000000000000000043 /* TreeSitterCSharp */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000093 /* XCRemoteSwiftPackageReference "tree-sitter-c-sharp" */;
+			productName = TreeSitterCSharp;
+		};
+		A10000000000000000000044 /* TreeSitterCSS */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000094 /* XCRemoteSwiftPackageReference "tree-sitter-css" */;
+			productName = TreeSitterCSS;
+		};
+		A10000000000000000000045 /* TreeSitterHaskell */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000095 /* XCRemoteSwiftPackageReference "tree-sitter-haskell" */;
+			productName = TreeSitterHaskell;
+		};
+		A10000000000000000000046 /* TreeSitterKotlin */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000096 /* XCRemoteSwiftPackageReference "tree-sitter-kotlin" */;
+			productName = TreeSitterKotlin;
+		};
+		A10000000000000000000047 /* TreeSitterYAML */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000097 /* XCRemoteSwiftPackageReference "tree-sitter-yaml" */;
+			productName = TreeSitterYAML;
+		};
+		A10000000000000000000048 /* TreeSitterLua */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000098 /* XCRemoteSwiftPackageReference "tree-sitter-lua" */;
+			productName = TreeSitterLua;
+		};
+		A10000000000000000000049 /* TreeSitterXML */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = A10000000000000000000099 /* XCRemoteSwiftPackageReference "tree-sitter-xml" */;
+			productName = TreeSitterXML;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
