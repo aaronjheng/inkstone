@@ -460,14 +460,14 @@ private struct FileTree: View {
                         .frame(width: 1)
                         .offset(x: guideOffset(level))
                 }
-                HStack(spacing: 6) {
+                HStack(spacing: 4) {
                     Group {
                         if item.isDirectory {
                             Image(systemName: item.isExpanded ? "arrowtriangle.down.fill" : "arrowtriangle.right.fill")
                                 .font(.system(size: 9))
-                                .frame(width: 11)
+                                .frame(width: chevronSlot)
                         } else {
-                            Color.clear.frame(width: 11, height: 1)
+                            Color.clear.frame(width: chevronSlot, height: 1)
                         }
                     }
                     Image(systemName: item.isDirectory ? "folder.fill" : "doc.text.fill")
@@ -526,6 +526,11 @@ private struct FileTree: View {
         indentOffset(level) + chevronSlot / 2
     }
 
-    private let indentStep: CGFloat = 16
-    private let chevronSlot: CGFloat = 11
+    // Typora nests each `.file-tree-node` inside its parent's
+    // `.file-node-children` with a constant `padding-left: 8px`, so every
+    // depth compounds by exactly 8px.
+    private let indentStep: CGFloat = 8
+    // Typora: `.file-node-open-state { min-width: 8px }`,
+    // `.file-node-icon { margin-right: 4px }`.
+    private let chevronSlot: CGFloat = 8
 }
