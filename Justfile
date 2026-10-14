@@ -40,3 +40,9 @@ install: build
     @rm -rf ~/Applications/Inkstone.app
     @cp -R '{{ app_bundle }}' ~/Applications/Inkstone.app
     @echo 'Installed to ~/Applications/Inkstone.app'
+
+uninstall:
+    @osascript -e 'quit app "Inkstone"' 2>/dev/null || true
+    @n=0; while pgrep -x Inkstone >/dev/null 2>&1 && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done
+    @rm -rf ~/Applications/Inkstone.app
+    @echo 'Uninstalled ~/Applications/Inkstone.app'
