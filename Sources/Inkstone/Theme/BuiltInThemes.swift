@@ -25,7 +25,15 @@ enum BuiltInTheme {
         identifier: "github",
         displayName: "GitHub",
         background: DynamicColor(0xFFFFFF, 0x333B44),
-        sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
+        // `.mac-seamless-mode #typora-sidebar { background-color: #fafafa }`.
+        sidebarBackground: DynamicColor(0xFAFAFA, 0x212121),
+        // `--control-text-color: #777` is the item colour; the dark half
+        // keeps the theme's editor text (github.css has no dark-side values).
+        sidebarForeground: DynamicColor(0x777777, 0xCCCCCC),
+        // github.css leaves the active-file pair to Typora's base styles: an
+        // `#eeeeee` row with a `#777` leading bar; text stays the item colour.
+        sidebarAccent: DynamicColor(0x777777, 0x777777),
+        sidebarSelection: DynamicColor(0xEEEEEE, 0x3E4451),
         text: DynamicColor(0x333333, 0xCCCCCC),
         link: DynamicColor(0x4183C4, 0x6CB6FF),
         selection: DynamicColor(0xDAE3EA, 0x3E4451),
@@ -96,7 +104,19 @@ enum BuiltInTheme {
         identifier: "newsprint",
         displayName: "Newsprint",
         background: DynamicColor(0xFEFEFE, 0x1A1A1A),
-        sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
+        // `#typora-sidebar { background-color: #f3f2ee }` — the warm paper
+        // surface, not the generic chrome grey; no dark-side value in the CSS.
+        sidebarBackground: DynamicColor(0xF3F2EE, 0x212121),
+        // `--control-text-color: #444`.
+        sidebarForeground: DynamicColor(0x444444, 0xD8D8D8),
+        // Base-style leading bar (newsprint.css leaves
+        // `--active-file-border-color` unset).
+        sidebarAccent: DynamicColor(0x777777, 0x777777),
+        // `--active-file-bg-color: rgba(32, 43, 51, 0.63)` (the second
+        // declaration wins over `#dadada`), baked opaque over the sidebar
+        // surface; `--active-file-text-color: white`.
+        sidebarSelection: DynamicColor(0x70777C, 0x20272C),
+        sidebarSelectionText: DynamicColor(0xFFFFFF, 0xFFFFFF),
         text: DynamicColor(0x3A3A3A, 0xD8D8D8),
         link: DynamicColor(0x065588, 0xE06C6C),
         selection: DynamicColor(0xD6D0C8, 0x3A3A3A),
@@ -167,12 +187,18 @@ enum BuiltInTheme {
         // theme's own background instead.
         sidebarBackground: DynamicColor(0x2E3033, 0x2E3033),
         // Night's sidebar is its own surface: `--side-bar-bg-color`,
-        // `--text-color`, `--active-file-bg-color`, `--item-hover-bg-color`.
-        sidebarForeground: DynamicColor(0xB8BFC6, 0xB8BFC6),
+        // `--control-text-color`, `--active-file-bg-color`,
+        // `--active-file-text-color`, `--active-file-border-color`,
+        // `--item-hover-bg-color`, `--item-hover-text-color`.
+        sidebarForeground: DynamicColor(0xB7B7B7, 0xB7B7B7),
         sidebarSecondary: DynamicColor(0xB7B7B7, 0xB7B7B7),
-        sidebarAccent: DynamicColor(0xB8BFC6, 0xB8BFC6),
+        // `--active-file-border-color: #8d8df0`, Typora's leading bar on the
+        // selected row.
+        sidebarAccent: DynamicColor(0x8D8DF0, 0x8D8DF0),
         sidebarSelection: DynamicColor(0x222222, 0x222222),
+        sidebarSelectionText: DynamicColor(0xFFFFFF, 0xFFFFFF),
         sidebarHover: DynamicColor(0x70717D, 0x70717D),
+        sidebarHoverText: DynamicColor(0xFFFFFF, 0xFFFFFF),
         text: DynamicColor(0xB8BFC6, 0xB8BFC6),
         link: DynamicColor(0xE0E0E0, 0xE0E0E0),
         selection: DynamicColor(0x4A5560, 0x4A5560),
@@ -252,6 +278,11 @@ enum BuiltInTheme {
         displayName: "Whitey",
         background: DynamicColor(0xFFFFFF, 0x2B2B2B),
         sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
+        // Whitey defines no sidebar vars at all: the base defaults are `#777`
+        // control text and an `#eeeeee` active row with a `#777` leading bar.
+        sidebarForeground: DynamicColor(0x777777, 0xD0D0D0),
+        sidebarAccent: DynamicColor(0x777777, 0x777777),
+        sidebarSelection: DynamicColor(0xEEEEEE, 0x3A3A3A),
         text: DynamicColor(0x4A4A4A, 0xD0D0D0),
         link: DynamicColor(0x2484C1, 0x6CB6FF),
         selection: DynamicColor(0xE4E4E4, 0x3A3A3A),
@@ -316,6 +347,12 @@ enum BuiltInTheme {
         displayName: "Gothic",
         background: DynamicColor(0xFFFFFF, 0x1C1C1C),
         sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
+        // `--control-text-color: #777`; base-style `#777` leading bar.
+        sidebarForeground: DynamicColor(0x777777, 0xD4D4D4),
+        sidebarAccent: DynamicColor(0x777777, 0x777777),
+        // `--active-file-bg-color: #f3f3f3`; the CSS has no dark-side
+        // counterpart, so the dark half keeps the theme's own selection.
+        sidebarSelection: DynamicColor(0xF3F3F3, 0x3A3A3A),
         text: DynamicColor(0x333333, 0xD4D4D4),
         link: DynamicColor(0x990000, 0x6CB6FF),
         selection: DynamicColor(0xE0E0E0, 0x3A3A3A),
@@ -378,7 +415,15 @@ enum BuiltInTheme {
         identifier: "pixyll",
         displayName: "Pixyll",
         background: DynamicColor(0xFAFAFA, 0x222222),
-        sidebarBackground: DynamicColor(0xF9F9F9, 0x212121),
+        // `.html-for-mac #typora-sidebar { background-color: white }`.
+        sidebarBackground: DynamicColor(0xFFFFFF, 0x212121),
+        // `--control-text-color: #777`; the active-file pair comes from
+        // Typora's base styles (pixyll.css leaves both unset).
+        sidebarForeground: DynamicColor(0x777777, 0xD8D8D8),
+        sidebarAccent: DynamicColor(0x777777, 0x777777),
+        sidebarSelection: DynamicColor(0xEEEEEE, 0x3A3A3A),
+        // `#typora-sidebar { font-size: 1rem !important }` → 16pt rows.
+        sidebarFontSize: 16,
         text: DynamicColor(0x3A3A3A, 0xD8D8D8),
         link: DynamicColor(0x463F5C, 0x6CB6FF),
         selection: DynamicColor(0xE0E0E0, 0x3A3A3A),

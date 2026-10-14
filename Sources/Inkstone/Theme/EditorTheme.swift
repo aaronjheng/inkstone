@@ -20,12 +20,23 @@ struct EditorTheme: Sendable, Equatable {
 
     var background: DynamicColor
     var sidebarBackground: DynamicColor
-    /// Sidebar-only colours; `nil` falls back to the editor tokens.
+    /// Sidebar-only colours; `nil` falls back to the editor tokens. Each maps
+    /// one Typora sidebar variable: foreground `--control-text-color` (the
+    /// item colour; `nil` falls back to `text`), accent
+    /// `--active-file-border-color` (the leading bar on the selected row;
+    /// `nil` draws none), selection `--active-file-bg-color`, selectionText
+    /// `--active-file-text-color`, hover `--item-hover-bg-color`, hoverText
+    /// `--item-hover-text-color`.
     var sidebarForeground: DynamicColor?
     var sidebarSecondary: DynamicColor?
     var sidebarAccent: DynamicColor?
     var sidebarSelection: DynamicColor?
+    var sidebarSelectionText: DynamicColor?
     var sidebarHover: DynamicColor?
+    var sidebarHoverText: DynamicColor?
+    /// Sidebar item font size; `nil` is the 14pt base (pixyll sets
+    /// `#typora-sidebar { font-size: 1rem }` → 16pt).
+    var sidebarFontSize: CGFloat?
     var text: DynamicColor
     var link: DynamicColor
     var selection: DynamicColor
@@ -163,7 +174,10 @@ struct EditorTheme: Sendable, Equatable {
         sidebarSecondary: DynamicColor? = nil,
         sidebarAccent: DynamicColor? = nil,
         sidebarSelection: DynamicColor? = nil,
+        sidebarSelectionText: DynamicColor? = nil,
         sidebarHover: DynamicColor? = nil,
+        sidebarHoverText: DynamicColor? = nil,
+        sidebarFontSize: CGFloat? = nil,
         text: DynamicColor,
         link: DynamicColor,
         selection: DynamicColor,
@@ -222,7 +236,10 @@ struct EditorTheme: Sendable, Equatable {
         self.sidebarSecondary = sidebarSecondary
         self.sidebarAccent = sidebarAccent
         self.sidebarSelection = sidebarSelection
+        self.sidebarSelectionText = sidebarSelectionText
         self.sidebarHover = sidebarHover
+        self.sidebarHoverText = sidebarHoverText
+        self.sidebarFontSize = sidebarFontSize
         self.text = text
         self.link = link
         self.selection = selection

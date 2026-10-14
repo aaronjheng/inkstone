@@ -185,7 +185,9 @@ final class FileTreeModel {
     /// than a set: only one row can be under the pointer at a time, and a set
     /// would go stale whenever the pointer leaves without a row clearing it.
     var hoveredPath: String?
-    var accent: Color = .accentColor
+    /// The selected row's leading bar (`--active-file-border-color`); `nil`
+    /// draws no bar, which is every theme but Night.
+    var accent: Color?
     var foreground: Color = .primary
     var secondary: Color = .secondary
     var background: Color = Color(
@@ -212,6 +214,12 @@ final class FileTreeModel {
                     ? ThemePalette.neutralDark.secondaryBackground
                     : ThemePalette.systemLight.secondaryBackground
             }))
+    /// Selected / hovered row text (`--active-file-text-color`,
+    /// `--item-hover-text-color`); defaults to the normal row colour.
+    var selectionText: Color = .primary
+    var hoverText: Color = .primary
+    /// Row font size; themes may scale it (pixyll's sidebar is `1rem`).
+    var fontSize: CGFloat = 14
     /// Neutral hover wash: adaptive, using palette base.
     var hover: Color = Color(
         nsColor: NSColor(
@@ -237,13 +245,22 @@ final class FileTreeModel {
     /// the Files panel unthemed no matter which theme was active.
     func apply(theme: EditorTheme) {
         // Themes may override the sidebar's own colours (Typora's Night does);
-        // falling back keeps every other theme on the editor tokens.
-        accent = Color(nsColor: (theme.sidebarAccent ?? theme.link).nsColor)
+        // falling back keeps every other theme on the editor tokens. The accent
+        // is the one exception: Typora draws the selected row's leading bar
+        // only when the theme declares `--active-file-border-color`, so `nil`
+        // stays `nil` rather than borrowing the link colour.
+        accent = theme.sidebarAccent.map { Color(nsColor: $0.nsColor) }
         foreground = Color(nsColor: (theme.sidebarForeground ?? theme.text).nsColor)
         secondary = Color(nsColor: (theme.sidebarSecondary ?? theme.syntax.comment).nsColor)
         background = Color(nsColor: theme.sidebarBackground.nsColor)
         sidebarBackground = Color(nsColor: theme.sidebarBackground.nsColor)
         selectionBackground = Color(nsColor: (theme.sidebarSelection ?? theme.selection).nsColor)
+        selectionText = Color(
+            nsColor: (theme.sidebarSelectionText ?? theme.sidebarForeground ?? theme.text).nsColor
+        )
+        hoverText = Color(
+            nsColor: (theme.sidebarHoverText ?? theme.sidebarForeground ?? theme.text).nsColor)
+        fontSize = theme.sidebarFontSize ?? 14
         hover = {
             if let hover = theme.sidebarHover {
                 return Color(nsColor: hover.nsColor)
@@ -411,20 +428,20 @@ private struct FileTree: View {
 
     private var folderRow: some View {
         HStack(spacing: 4) {
-            Image(systemName: "folder")
-                .font(.system(size: 11))
+            Image(systemName: "folder.fill")
+                .font(.system(size: 12))
             Text(model.rootName)
                 .lineLimit(1)
                 .truncationMode(.head)
             Spacer(minLength: 0)
         }
-        .font(.system(size: 13, weight: .semibold))
-        .foregroundStyle(model.secondary)
+        .font(.system(size: model.fontSize))
+        .foregroundStyle(model.foreground)
         // Lined up with the depth-0 chevron below, so the root folder sits in
         // the same column as the branches it contains.
         .padding(.leading, indentOffset(0))
         .padding(.trailing, 10)
-        .padding(.vertical, 7)
+        .padding(.vertical, 8)
     }
 
     private func row(_ item: FileTreeModel.Row) -> some View {
@@ -446,27 +463,26 @@ private struct FileTree: View {
                 HStack(spacing: 6) {
                     Group {
                         if item.isDirectory {
-                            Image(systemName: item.isExpanded ? "chevron.down" : "chevron.right")
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(model.secondary)
+                            Image(systemName: item.isExpanded ? "arrowtriangle.down.fill" : "arrowtriangle.right.fill")
+                                .font(.system(size: 9))
                                 .frame(width: 11)
                         } else {
                             Color.clear.frame(width: 11, height: 1)
                         }
                     }
-                    Image(systemName: item.isDirectory ? "folder" : "doc.text")
+                    Image(systemName: item.isDirectory ? "folder.fill" : "doc.text.fill")
                         .font(.system(size: 12))
                     Text(item.name)
-                        .font(.system(size: 14))
+                        .font(.system(size: model.fontSize))
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer(minLength: 0)
                 }
                 .padding(.leading, indentOffset(item.depth))
                 .padding(.trailing, 10)
-                .padding(.vertical, 7)
+                .padding(.vertical, 8)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .foregroundStyle(model.foreground)
+                .foregroundStyle(rowForeground(isCurrent: isCurrent, path: item.url.path))
                 .background(
                     rowBackground(isCurrent: isCurrent, path: item.url.path)
                 )
@@ -480,11 +496,22 @@ private struct FileTree: View {
         .buttonStyle(.plain)
     }
 
+    private func rowForeground(isCurrent: Bool, path: String) -> Color {
+        if isCurrent { return model.selectionText }
+        if model.hoveredPath == path { return model.hoverText }
+        return model.foreground
+    }
+
     @ViewBuilder
     private func rowBackground(isCurrent: Bool, path: String) -> some View {
         ZStack(alignment: .leading) {
             if isCurrent {
                 Rectangle().fill(model.selectionBackground)
+                // Typora's `--active-file-border-color`: a short bar flush with
+                // the sidebar's left edge (Night's is `#8d8df0`).
+                if let accent = model.accent {
+                    Rectangle().fill(accent).frame(width: 3)
+                }
             } else if model.hoveredPath == path {
                 Rectangle().fill(model.hover)
             }
