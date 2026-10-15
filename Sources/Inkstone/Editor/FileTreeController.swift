@@ -684,7 +684,7 @@ private struct FileTree: View {
     /// VS Code hangs each level's guide just left of that level's twistie
     /// column, so a subtree's rows read as hanging off their parent's chevron.
     private func guideOffset(_ level: Int) -> CGFloat {
-        indentOffset(level) - 2
+        indentOffset(level) + 8
     }
 
     // VS Code's tree rhythm: a 16px twistie column and a 16px indent step per

@@ -8,11 +8,16 @@ import Foundation
 /// focused window, which runs it against the editor.
 enum FormatAction: String {
     case bold, italic, underline, inlineCode, strikethrough, highlight, inlineMath
+    case superscript, `subscript`
     case link, image, clearFormat
     case heading1, heading2, heading3, heading4, heading5, heading6
     case paragraph, increaseHeading, decreaseHeading
     case quote, bulletList, orderedList, taskList
     case codeBlock, mathBlock, table, horizontalRule, tableOfContents, frontMatter
+    case footnote
+    case tableRowAbove, tableRowBelow, tableDeleteRow
+    case tableColumnLeft, tableColumnRight, tableDeleteColumn
+    case tableAlignLeft, tableAlignCenter, tableAlignRight
     case indent, outdent
 
     /// The command for a heading level, for menus that build rows in a loop.
@@ -61,6 +66,8 @@ enum FormatController {
         case .strikethrough: return toggleInline(.strikethrough, in: text, range: range)
         case .highlight: return toggleInline(.highlight, in: text, range: range)
         case .inlineMath: return toggleInline(.inlineMath, in: text, range: range)
+        case .superscript: return toggleInline(.superscript, in: text, range: range)
+        case .`subscript`: return toggleInline(.`subscript`, in: text, range: range)
         case .link: return insertLink(in: text, range: range)
         case .image: return insertImage(in: text, range: range)
         case .clearFormat: return clearFormat(in: text, range: range)
@@ -83,6 +90,16 @@ enum FormatController {
         case .horizontalRule: return insertHorizontalRule(in: text, range: range)
         case .tableOfContents: return insertTableOfContents(in: text, range: range)
         case .frontMatter: return insertFrontMatter(in: text, range: range)
+        case .footnote: return insertFootnote(in: text, range: range)
+        case .tableRowAbove: return insertTableRow(above: true, in: text, range: range)
+        case .tableRowBelow: return insertTableRow(above: false, in: text, range: range)
+        case .tableDeleteRow: return deleteTableRow(in: text, range: range)
+        case .tableColumnLeft: return insertTableColumn(left: true, in: text, range: range)
+        case .tableColumnRight: return insertTableColumn(left: false, in: text, range: range)
+        case .tableDeleteColumn: return deleteTableColumn(in: text, range: range)
+        case .tableAlignLeft: return alignTableColumn(.left, in: text, range: range)
+        case .tableAlignCenter: return alignTableColumn(.center, in: text, range: range)
+        case .tableAlignRight: return alignTableColumn(.right, in: text, range: range)
         // Indentation needs the caret's column inside its line, which is a
         // property of the view rather than the text; the editor routes these.
         case .indent, .outdent: return noOp
@@ -93,6 +110,7 @@ enum FormatController {
 
     enum InlineKind {
         case bold, italic, underline, code, strikethrough, highlight, inlineMath
+        case superscript, `subscript`
 
         /// Candidate pairs, longest first: `**` must be tried before `*`, or
         /// `**bold**` would be mistaken for italic.
@@ -105,6 +123,8 @@ enum FormatController {
             case .strikethrough: return [("~~", "~~"), ("~", "~")]
             case .highlight: return [("==", "==")]
             case .inlineMath: return [("$", "$")]
+            case .superscript: return [("^", "^")]
+            case .`subscript`: return [("~", "~")]
             }
         }
     }
@@ -445,7 +465,7 @@ enum FormatController {
     private static func unwrapFirst(in body: inout String) -> Bool {
         for kind in [
             InlineKind.bold, .italic, .underline, .code, .strikethrough, .highlight,
-            .inlineMath,
+            .inlineMath, .superscript, .`subscript`,
         ] {
             for (open, close) in kind.pairs {
                 guard let openRange = body.range(of: open) else { continue }
@@ -505,6 +525,363 @@ enum FormatController {
             text: block,
             selection: NSRange(location: caret, length: 0)
         )
+    }
+
+    // MARK: - Footnote
+
+    /// Inserts a `[^n]` reference at the caret and its definition at the end of
+    /// the document, where the original puts it.
+    ///
+    /// The number is one past the highest numeric reference already in the
+    /// buffer, so repeated inserts never collide. A selection becomes the
+    /// definition's body and is replaced by the reference. The rewrite spans
+    /// from the caret to the end of the document - the only shape `Edit` can
+    /// express for two distant insertions - so it stays one undo step.
+    private static func insertFootnote(in text: String, range: NSRange) -> Edit {
+        let ns = text as NSString
+        let location = min(max(range.location, 0), ns.length)
+        let length = min(range.length, ns.length - location)
+        let selected = length > 0 ? ns.substring(with: NSRange(location: location, length: length)) : ""
+
+        var number = 0
+        if let pattern = try? NSRegularExpression(pattern: #"\[\^(\d+)\]"#, options: []) {
+            for match in pattern.matches(in: text, range: NSRange(location: 0, length: ns.length))
+            where match.numberOfRanges > 1 {
+                number = max(number, Int(ns.substring(with: match.range(at: 1))) ?? 0)
+            }
+        }
+        number += 1
+
+        let tail = ns.substring(from: location + length)
+        // The definition goes at the very end. When the caret is already
+        // there it still needs its own block: probing `text` found the blank
+        // line the reference sits on and emitted nothing, gluing `[^n][^n]:`.
+        let separator: String
+        if tail.isEmpty {
+            separator = "\n\n"
+        } else if tail.hasSuffix("\n\n") { separator = "" } else if tail.hasSuffix("\n") {
+            separator = "\n"
+        } else { separator = "\n\n" }
+        let ref = "[^\(number)]"
+        return Edit(
+            range: NSRange(location: location, length: ns.length - location),
+            text: ref + tail + separator + "[^\(number)]: " + selected,
+            selection: NSRange(location: location + (ref as NSString).length, length: 0)
+        )
+    }
+
+    // MARK: - Task checkbox
+
+    /// Flips a task item's `[ ]` / `[x]` marker on the line holding `location`.
+    ///
+    /// The caller hit-tests the painted checkbox; this only rewrites the one
+    /// flag character, so every offset survives and the incoming selection is
+    /// kept verbatim.
+    static func toggleTask(at location: Int, selection: NSRange, in text: String) -> Edit {
+        let ns = text as NSString
+        let caret = min(max(location, 0), ns.length)
+        var lineStart = caret
+        while lineStart > 0 && ns.character(at: lineStart - 1) != 10 { lineStart -= 1 }
+        var lineEnd = caret
+        while lineEnd < ns.length && ns.character(at: lineEnd) != 10 { lineEnd += 1 }
+        let line = ns.substring(with: NSRange(location: lineStart, length: lineEnd - lineStart)) as NSString
+        var flag: Int?
+        var index = 0
+        while index + 2 < line.length {
+            if line.character(at: index) == 91 {
+                let middle = line.character(at: index + 1)
+                if (middle == 32 || middle == 120 || middle == 88) && line.character(at: index + 2) == 93 {
+                    flag = lineStart + index + 1
+                    break
+                }
+            }
+            index += 1
+        }
+        guard let marker = flag else { return noOp }
+        let replacement = ns.character(at: marker) == 32 ? "x" : " "
+        let clamped =
+            NSMaxRange(selection) <= ns.length
+            ? selection : NSRange(location: min(selection.location, ns.length), length: 0)
+        return Edit(range: NSRange(location: marker, length: 1), text: replacement, selection: clamped)
+    }
+
+    // MARK: - Pipe table operations
+    /// A pipe table under the caret, addressed in buffer coordinates.
+    private struct PipeTable {
+        /// Source lines: header, delimiter, then body rows, `\r` stripped.
+        var lines: [String]
+        /// Whole table span in the buffer, without a trailing newline.
+        var range: NSRange
+        var alignments: [TableState.ColumnAlignment]
+        var columnCount: Int
+        /// Caret's row: 0 is the header, 1 the delimiter, 2+ the body.
+        var caretRow: Int
+        var caretColumn: Int
+        /// Any row ended `\r\n`: rewritten rows keep the carriage return so a
+        /// CRLF table is not silently converted to LF.
+        var usesCarriageReturn: Bool
+    }
+
+    /// Whether `location` sits on a pipe table. The context menu uses this to
+    /// decide if the table operations apply, instead of offering dead items.
+    static func containsTable(at location: Int, in text: String) -> Bool {
+        pipeTable(at: location, in: text) != nil
+    }
+
+    /// The pipe table holding `location`, or `nil` when the caret is not on one.
+    ///
+    /// Expansion mirrors the parser: contiguous non-blank lines containing `|`,
+    /// validated by the same recogniser, so an operation never fires on text the
+    /// renderer shows as a paragraph.
+    private static func pipeTable(at location: Int, in text: String) -> PipeTable? {
+        let ns = text as NSString
+        let caret = min(max(location, 0), ns.length)
+        var lineStart = caret
+        while lineStart > 0 && ns.character(at: lineStart - 1) != 10 { lineStart -= 1 }
+        var lineEnd = caret
+        while lineEnd < ns.length && ns.character(at: lineEnd) != 10 { lineEnd += 1 }
+        let caretLine = ns.substring(with: NSRange(location: lineStart, length: lineEnd - lineStart))
+        guard caretLine.contains("|") else { return nil }
+
+        var top = lineStart
+        var scan = top
+        while scan > 0 {
+            let previousEnd = scan - 1
+            var previousStart = previousEnd
+            while previousStart > 0 && ns.character(at: previousStart - 1) != 10 {
+                previousStart -= 1
+            }
+            let previous = ns.substring(
+                with: NSRange(location: previousStart, length: previousEnd - previousStart)
+            )
+            guard !previous.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, previous.contains("|") else { break }
+            top = previousStart
+            scan = previousStart
+        }
+        var bottom = lineEnd
+        scan = bottom
+        while scan < ns.length {
+            let nextStart = scan + 1
+            guard nextStart <= ns.length else { break }
+            var nextEnd = nextStart
+            while nextEnd < ns.length && ns.character(at: nextEnd) != 10 { nextEnd += 1 }
+            let next =
+                nextStart < nextEnd
+                ? ns.substring(with: NSRange(location: nextStart, length: nextEnd - nextStart)) : ""
+            guard !next.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, next.contains("|") else { break }
+            bottom = nextEnd
+            scan = nextEnd
+        }
+
+        var lines: [String] = []
+        var starts: [Int] = []
+        var offset = top
+        // A table starts its block: prose directly above means these rows are
+        // lazy paragraph continuation (the parser has no table check in
+        // `terminatesParagraph`), not a table the renderer shows.
+        guard top <= 1 || ns.character(at: top - 2) == 10 else { return nil }
+        while offset <= bottom {
+            var stop = offset
+            while stop < bottom && ns.character(at: stop) != 10 { stop += 1 }
+            lines.append(ns.substring(with: NSRange(location: offset, length: stop - offset)))
+            starts.append(offset)
+            if stop >= bottom { break }
+            offset = stop + 1
+        }
+        // The parser strips `\r` before matching; recognising the raw lines
+        // would disagree with it on column counts (and every rewrite after).
+        // Untouched rows replay verbatim, so only recognition works stripped.
+        let stripped = lines.map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
+        guard stripped.count >= 2,
+            let parsed = TableRecognizer.match(rows: stripped, at: 0)
+        else { return nil }
+        // The recogniser stops the table at a second delimiter row or a row
+        // without pipes; only its rows are the table.
+        let rowCount = parsed.rowTexts.count
+        guard rowCount >= 2 else { return nil }
+        var caretRow: Int?
+        for index in 0..<rowCount where starts[index] == lineStart { caretRow = index }
+        guard let row = caretRow else { return nil }
+        let alignments = parsed.alignments
+        let caretStripped = caretLine.hasSuffix("\r") ? String(caretLine.dropLast()) : caretLine
+        let end = starts[rowCount - 1] + (lines[rowCount - 1] as NSString).length
+        return PipeTable(
+            lines: Array(stripped.prefix(rowCount)),
+            range: NSRange(location: top, length: end - top),
+            alignments: alignments,
+            columnCount: alignments.count,
+            caretRow: row,
+            caretColumn: columnIndex(
+                in: caretStripped, caretOffset: min(caret - lineStart, (caretStripped as NSString).length),
+                columns: alignments.count),
+            usesCarriageReturn: lines.contains { $0.hasSuffix("\r") }
+        )
+    }
+
+    /// Which cell the caret sits in: unescaped pipes before it, minus the
+    /// leading pipe when the row opens with one.
+    private static func columnIndex(in line: String, caretOffset: Int, columns: Int) -> Int {
+        guard columns > 0 else { return 0 }
+        let ns = line as NSString
+        let caret = min(max(caretOffset, 0), ns.length)
+        var pipesBefore = 0
+        var index = 0
+        while index < caret {
+            // A backslash escapes the next character, `\|` included.
+            if ns.character(at: index) == 92 {
+                index += 2
+                continue
+            }
+            if ns.character(at: index) == 124 { pipesBefore += 1 }
+            index += 1
+        }
+        let leading = line.trimmingCharacters(in: .whitespaces).hasPrefix("|")
+        return min(max(pipesBefore - (leading ? 1 : 0), 0), columns - 1)
+    }
+
+    /// UTF-16 offset of the `column`-th cell's content start within `line`.
+    private static func cellContentOffset(in line: String, column: Int) -> Int {
+        let ns = line as NSString
+        let length = ns.length
+        var pipes: [Int] = []
+        var index = 0
+        while index < length {
+            if ns.character(at: index) == 92 {
+                index += 2
+                continue
+            }
+            if ns.character(at: index) == 124 { pipes.append(index) }
+            index += 1
+        }
+        let leading = line.trimmingCharacters(in: .whitespaces).hasPrefix("|")
+        let afterPipe: Int
+        if leading {
+            guard column < pipes.count else { return length }
+            afterPipe = pipes[column] + 1
+        } else if column == 0 {
+            afterPipe = 0
+        } else {
+            guard column - 1 < pipes.count else { return length }
+            afterPipe = pipes[column - 1] + 1
+        }
+        var content = afterPipe
+        while content < length && (ns.character(at: content) == 32 || ns.character(at: content) == 9) {
+            content += 1
+        }
+        return min(content, length)
+    }
+
+    private static func paddedCells(_ row: String, count: Int) -> [String] {
+        var cells = TableRecognizer.split(row)
+        while cells.count < count { cells.append("") }
+        return cells
+    }
+
+    private static func pipeRow(_ cells: [String]) -> String {
+        // Cells arrive unescaped (`\|` became `|` in the split); a bare pipe
+        // would split the cell again on rewrite and change what it says.
+        let escaped = cells.map { $0.replacingOccurrences(of: "|", with: "\\|") }
+        return "| " + escaped.joined(separator: " | ") + " |"
+    }
+
+    private static func alignmentMarker(_ alignment: TableState.ColumnAlignment) -> String {
+        switch alignment {
+        case .none: return "---"
+        case .left: return ":---"
+        case .center: return ":---:"
+        case .right: return "---:"
+        }
+    }
+
+    /// Rewrites the whole table span and parks the caret at the target cell's
+    /// content start. Untouched rows keep their exact source; only inserted or
+    /// structurally changed rows are emitted canonically.
+    private static func finishTableEdit(
+        table: PipeTable, lines: [String], row: Int, column: Int, columns: Int
+    ) -> Edit {
+        let final = table.usesCarriageReturn ? lines.map { $0 + "\r" } : lines
+        let text = final.joined(separator: "\n")
+        let starts = lineStarts(of: final, from: table.range.location)
+        let targetRow = min(max(row, 0), final.count - 1)
+        let targetColumn = min(max(column, 0), max(columns - 1, 0))
+        let caret = starts[targetRow] + cellContentOffset(in: final[targetRow], column: targetColumn)
+        return Edit(range: table.range, text: text, selection: NSRange(location: caret, length: 0))
+    }
+
+    /// An empty row above or below the caret's row. On the header or the
+    /// delimiter row the new row becomes the first body row, as in the original.
+    private static func insertTableRow(above: Bool, in text: String, range: NSRange) -> Edit {
+        guard let table = pipeTable(at: range.location, in: text) else { return noOp }
+        var lines = table.lines
+        let empty = pipeRow(Array(repeating: "", count: table.columnCount))
+        let anchor = table.caretRow <= 1 ? 2 : (above ? table.caretRow : table.caretRow + 1)
+        let index = min(anchor, lines.count)
+        lines.insert(empty, at: index)
+        return finishTableEdit(table: table, lines: lines, row: index, column: table.caretColumn, columns: table.columnCount)
+    }
+
+    /// Drops the caret's body row. The header and delimiter rows are not
+    /// deletable this way; deleting them would unmake the table.
+    private static func deleteTableRow(in text: String, range: NSRange) -> Edit {
+        guard let table = pipeTable(at: range.location, in: text) else { return noOp }
+        guard table.caretRow >= 2 else { return noOp }
+        var lines = table.lines
+        lines.remove(at: table.caretRow)
+        return finishTableEdit(
+            table: table, lines: lines, row: min(table.caretRow, lines.count - 1),
+            column: table.caretColumn, columns: table.columnCount)
+    }
+
+    /// An empty column left or right of the caret's column, across every row.
+    private static func insertTableColumn(left: Bool, in text: String, range: NSRange) -> Edit {
+        guard let table = pipeTable(at: range.location, in: text) else { return noOp }
+        let at = left ? table.caretColumn : table.caretColumn + 1
+        var alignments = table.alignments
+        alignments.insert(.none, at: min(at, alignments.count))
+        var lines = table.lines
+        for index in lines.indices where index != 1 {
+            var cells = paddedCells(lines[index], count: table.columnCount)
+            cells.insert("", at: min(at, cells.count))
+            lines[index] = pipeRow(cells)
+        }
+        lines[1] = pipeRow(alignments.map(alignmentMarker))
+        return finishTableEdit(table: table, lines: lines, row: table.caretRow, column: at, columns: table.columnCount + 1)
+    }
+
+    /// Drops the caret's column. The last column stays: a table needs at least one.
+    private static func deleteTableColumn(in text: String, range: NSRange) -> Edit {
+        guard let table = pipeTable(at: range.location, in: text) else { return noOp }
+        guard table.columnCount > 1 else { return noOp }
+        let at = min(table.caretColumn, table.columnCount - 1)
+        var alignments = table.alignments
+        if at < alignments.count { alignments.remove(at: at) }
+        var lines = table.lines
+        for index in lines.indices where index != 1 {
+            var cells = paddedCells(lines[index], count: table.columnCount)
+            if at < cells.count { cells.remove(at: at) }
+            lines[index] = pipeRow(cells)
+        }
+        lines[1] = pipeRow(alignments.map(alignmentMarker))
+        return finishTableEdit(
+            table: table, lines: lines, row: table.caretRow,
+            column: min(at, table.columnCount - 2), columns: table.columnCount - 1)
+    }
+
+    /// Rewrites the delimiter cell for the caret's column. An already-applied
+    /// alignment is a no-op, so the menu stays truthful.
+    private static func alignTableColumn(
+        _ alignment: TableState.ColumnAlignment, in text: String, range: NSRange
+    ) -> Edit {
+        guard let table = pipeTable(at: range.location, in: text) else { return noOp }
+        var alignments = table.alignments
+        let at = min(table.caretColumn, alignments.count - 1)
+        guard at >= 0, alignments[at] != alignment else { return noOp }
+        alignments[at] = alignment
+        var lines = table.lines
+        lines[1] = pipeRow(alignments.map(alignmentMarker))
+        return finishTableEdit(
+            table: table, lines: lines, row: table.caretRow,
+            column: table.caretColumn, columns: table.columnCount)
     }
 
     // MARK: - Line plumbing

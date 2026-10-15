@@ -107,6 +107,12 @@ enum BlockDecorator {
                     text, in: lineRect, width: width, alignment: alignment,
                     theme: theme, context: context)
             case let .taskCheckbox(checked, width):
+                // One box on the first line: without the guard every fragment
+                // of a wrapped item drew its own, while hit-testing only knows
+                // the first.
+                guard let start = blockStart(of: blockID, in: layout),
+                    lineCharRange.location == start
+                else { break }
                 let side: CGFloat = 12
                 let box = CGRect(
                     x: lineRect.minX + width - side * 1.9,
@@ -204,10 +210,47 @@ enum BlockDecorator {
                     grid, top: lineRect.minY + margin, left: lineRect.minX,
                     width: lineRect.width, theme: theme, context: context
                 )
+            case .emojiGlyph:
+                // Painted from the block's first line only; every fragment of
+                // the block would otherwise draw every glyph once each.
+                guard let start = blockStart(of: blockID, in: layout),
+                    lineCharRange.location == start
+                else { break }
+                paintEmojiGlyphs(in: view, blockID: blockID, layout: layout, theme: theme)
+            case let .frontMatterTable(front):
+                // Painted like a table: from the first line only, and skipped
+                // while focused, when the source is showing.
+                guard isPainted(lineCharRange, in: view) else { break }
+                guard let start = blockStart(of: blockID, in: layout),
+                    lineCharRange.location == start
+                else { break }
+                let margin =
+                    (view.textStorage?.attribute(
+                        .paragraphStyle, at: start, effectiveRange: nil
+                    ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+                paintFrontMatter(
+                    front, top: lineRect.minY + margin, left: lineRect.minX,
+                    width: lineRect.width, theme: theme, context: context
+                )
             case let .tocPlaceholder(color):
                 drawMarker(
                     "[Table of Contents]", in: lineRect, width: lineRect.width,
                     alignment: .left, theme: theme, context: context, color: color)
+            case let .tocEntries(entries):
+                // Painted like a table: only from the block's first line, and
+                // only while the block is not focused (focus reveals the source).
+                guard isPainted(lineCharRange, in: view) else { break }
+                guard let start = blockStart(of: blockID, in: layout),
+                    lineCharRange.location == start
+                else { break }
+                let margin =
+                    (view.textStorage?.attribute(
+                        .paragraphStyle, at: start, effectiveRange: nil
+                    ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+                paintTOC(
+                    entries, top: lineRect.minY + margin, left: lineRect.minX,
+                    width: lineRect.width, theme: theme, context: context
+                )
             }
         }
     }
@@ -323,6 +366,194 @@ enum BlockDecorator {
                 )
                 context.restoreGState()
             }
+        }
+    }
+
+    /// Paints one row per heading, stacked down from `top`: the same row
+    /// geometry the builder reserved through the paragraph style, so rows and
+    /// hit-testing agree on where each entry sits.
+    @MainActor
+    private static func paintTOC(
+        _ entries: [MarkdownDocument.Heading], top: CGFloat, left: CGFloat,
+        width: CGFloat, theme: EditorTheme, context: CGContext
+    ) {
+        let rowHeight = theme.bodyLineHeight * theme.bodyFontSize
+        let font = EditorFont.nsSystem(size: theme.bodyFontSize)
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        for (index, entry) in entries.enumerated() {
+            let rowTop = top + CGFloat(index) * rowHeight
+            let indent = CGFloat(max(entry.level - 1, 0)) * 20
+            let run = NSAttributedString(
+                string: entry.text.isEmpty ? "(untitled)" : entry.text,
+                attributes: [
+                    .font: font,
+                    .foregroundColor: theme.text.nsColor,
+                    .paragraphStyle: style,
+                ]
+            )
+            let measured = run.boundingRect(
+                with: CGSize(width: CGFloat.greatestFiniteMagnitude, height: rowHeight),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            ).size
+            context.saveGState()
+            context.clip(
+                to: CGRect(x: left + indent, y: rowTop, width: max(0, width - indent), height: rowHeight)
+            )
+            run.draw(
+                with: NSRect(
+                    x: left + indent, y: rowTop + max(0, (rowHeight - measured.height) / 2),
+                    width: max(0, width - indent), height: measured.height
+                ),
+                options: [.usesLineFragmentOrigin], context: nil
+            )
+            context.restoreGState()
+        }
+    }
+
+    /// Paints every emoji glyph of a block over its hidden `:name:` source.
+    ///
+    /// Positions come from the hidden name runs themselves: null glyphs carry
+    /// no advance but keep their pen position, so the glyph draws exactly where
+    /// the source sits, mid-line included. An element revealed under the caret
+    /// shows its source instead and is skipped here.
+    ///
+    /// All geometry is container-based: `boundingRect(forGlyphRange:)` for the
+    /// pen position, `lineFragmentRect(forGlyphAt:)` for the line box the glyph
+    /// centres in. `location(forGlyphAt:)` is deliberately not used - it
+    /// returns fragment-relative baseline coordinates, which drew every glyph
+    /// near the container origin.
+    @MainActor
+    private static func paintEmojiGlyphs(
+        in view: MarkdownTextView, blockID: Int, layout: LayoutOutput, theme: EditorTheme
+    ) {
+        guard let manager = view.layoutManager, let container = view.textContainer,
+            let storage = view.textStorage
+        else { return }
+        let inset = view.textContainerInset
+        for node in layout.inlineNodes where node.blockID == blockID && node.kind == .emoji {
+            guard node.contentRange.length > 0,
+                NSMaxRange(node.contentRange) <= storage.length
+            else { continue }
+            // Revealed markers mean the caret is inside: source, not glyph.
+            let hidden =
+                storage.attribute(
+                    MarkdownAttribute.hidden, at: node.contentRange.location, effectiveRange: nil
+                ) as? Bool
+            guard hidden == true else { continue }
+            let name = (storage.string as NSString).substring(with: node.contentRange)
+            let glyph = EmojiCatalog.glyph(for: name)
+            guard !glyph.isEmpty else { continue }
+            // The run's own font, so headings draw heading-sized glyphs; the
+            // system falls back to the colour-emoji face for the scalars.
+            let font =
+                (storage.attribute(.font, at: node.contentRange.location, effectiveRange: nil)
+                    as? NSFont) ?? EditorFont.nsSystem(size: theme.bodyFontSize)
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: font,
+                .foregroundColor: theme.text.nsColor,
+            ]
+            let glyphs = manager.glyphRange(
+                forCharacterRange: node.contentRange, actualCharacterRange: nil
+            )
+            guard glyphs.length > 0 else { continue }
+            let bounds = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            let fragment = manager.lineFragmentRect(
+                forGlyphAt: glyphs.location, effectiveRange: nil
+            )
+            let size = (glyph as NSString).size(withAttributes: attributes)
+            let point = NSPoint(
+                x: bounds.minX + inset.width,
+                y: fragment.minY + inset.height + max(0, (fragment.height - size.height) / 2)
+            )
+            (glyph as NSString).draw(at: point, withAttributes: attributes)
+        }
+    }
+
+    /// Paints a front matter block's key/value rows, stacked down from `top`.
+    /// Row tops come from the layout's own heights - fence rows collapsed -
+    /// so the rows sit on the source lines they stand in for.
+    @MainActor
+    private static func paintFrontMatter(
+        _ front: FrontMatterLayout, top: CGFloat, left: CGFloat, width: CGFloat,
+        theme: EditorTheme, context: CGContext
+    ) {
+        let font = EditorFont.nsSystem(size: theme.bodyFontSize)
+        let keyFont = NSFont.systemFont(ofSize: theme.bodyFontSize, weight: .semibold)
+        let style = NSMutableParagraphStyle()
+        style.lineBreakMode = .byTruncatingTail
+        // The key column fits the longest key, capped so a pathological key
+        // cannot eat the values.
+        var keyWidth: CGFloat = 0
+        for row in front.rows where !row.isFence && !row.key.isEmpty {
+            keyWidth = max(
+                keyWidth,
+                (row.key as NSString).size(withAttributes: [.font: keyFont]).width
+            )
+        }
+        keyWidth = min(keyWidth + 16, max(width * 0.35, 0))
+        var cursor = top
+        for row in front.rows {
+            let height =
+                row.isFence ? FrontMatterLayout.collapsedFenceLineHeight : front.rowHeight
+            defer { cursor += height }
+            guard !row.isFence else { continue }
+            if row.key.isEmpty {
+                // No colon: running text across the whole measure, one line.
+                let run = NSAttributedString(
+                    string: row.value,
+                    attributes: [
+                        .font: font, .foregroundColor: theme.text.nsColor,
+                        .paragraphStyle: style,
+                    ]
+                )
+                let measured = run.boundingRect(
+                    with: CGSize(width: max(1, width), height: front.rowHeight),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading]
+                ).size
+                context.saveGState()
+                context.clip(to: CGRect(x: left, y: cursor, width: width, height: height))
+                run.draw(
+                    with: NSRect(
+                        x: left, y: cursor + max(0, (height - measured.height) / 2),
+                        width: width, height: measured.height
+                    ),
+                    options: [.usesLineFragmentOrigin], context: nil
+                )
+                context.restoreGState()
+                continue
+            }
+            let key = NSAttributedString(
+                string: row.key,
+                attributes: [.font: keyFont, .foregroundColor: theme.marker.nsColor]
+            )
+            let value = NSAttributedString(
+                string: row.value,
+                attributes: [
+                    .font: font, .foregroundColor: theme.text.nsColor,
+                    .paragraphStyle: style,
+                ]
+            )
+            let keySize = key.size()
+            let valueWidth = max(0, width - keyWidth)
+            let valueHeight = value.boundingRect(
+                with: CGSize(width: max(1, valueWidth), height: height),
+                options: [.usesLineFragmentOrigin, .usesFontLeading]
+            ).size.height
+            context.saveGState()
+            context.clip(to: CGRect(x: left, y: cursor, width: width, height: height))
+            key.draw(
+                at: NSPoint(
+                    x: left, y: cursor + max(0, (height - keySize.height) / 2)
+                ))
+            value.draw(
+                with: NSRect(
+                    x: left + keyWidth, y: cursor + max(0, (height - valueHeight) / 2),
+                    width: valueWidth, height: valueHeight
+                ),
+                options: [.usesLineFragmentOrigin], context: nil
+            )
+            context.restoreGState()
         }
     }
 

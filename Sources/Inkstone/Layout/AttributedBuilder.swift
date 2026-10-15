@@ -32,6 +32,9 @@ struct AttributedBuilder {
 
     func build(_ document: MarkdownDocument) -> LayoutOutput {
         let state = BuildState(theme: theme, context: context)
+        // The `[TOC]` block renders every heading, wherever it sits, so the
+        // list is resolved once up front rather than per block.
+        state.headings = document.headings
         let result = NSMutableAttributedString()
         for (index, block) in document.blocks.enumerated() {
             if index > 0 {
@@ -121,6 +124,8 @@ struct AttributedBuilder {
 
         /// Reference-image destinations, keyed by block, resolved once by the caller.
         var referenceDestination: [Int: String] = [:]
+        /// Every heading in the document, for the `[TOC]` block to paint.
+        var headings: [MarkdownDocument.Heading] = []
 
         /// The blank-line text that precedes a block, appended verbatim.
         ///
@@ -251,16 +256,9 @@ struct AttributedBuilder {
                     block: block, depth: depth
                 )
             case .toc:
-                register([.tocPlaceholder(color: theme.quoteText.nsColor)], for: block.id)
-                emitHidden(
-                    block.source, into: result, style: BlockStyle.definition(theme: theme),
-                    block: block, depth: depth
-                )
+                appendTOC(block, into: result, depth: depth)
             case .frontMatter:
-                emitHidden(
-                    block.source, into: result, style: BlockStyle.frontMatter(theme: theme),
-                    block: block, depth: depth
-                )
+                appendFrontMatter(block, into: result, depth: depth)
             case .linkDefinition, .footnoteDefinition:
                 // Definitions render weakly, with only the `[` and `]` markers
                 // marked as syntax so the editor can reveal them on focus.
@@ -656,8 +654,78 @@ struct AttributedBuilder {
             }
         }
 
-        /// Emits text that carries no glyphs because a decoration draws it instead.
+        /// A live table of contents: the `[TOC]` source stays in the buffer but
+        /// takes no space, and the decoration layer paints one row per heading.
         ///
+        /// The painted route mirrors pipe tables - `md.painted` included, so
+        /// focusing the block brings the source back for editing. The single
+        /// source line reserves the whole list's height through its paragraph
+        /// style: TextKit sizes the line box from it, and the rows are drawn
+        /// into that box top to bottom.
+        private func appendTOC(_ block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
+            guard !headings.isEmpty else {
+                register([.tocPlaceholder(color: theme.quoteText.nsColor)], for: block.id)
+                emitHidden(
+                    block.source, into: result, style: BlockStyle.definition(theme: theme),
+                    block: block, depth: depth
+                )
+                return
+            }
+            register([.tocEntries(headings)], for: block.id)
+            let rowHeight = theme.bodyLineHeight * theme.bodyFontSize
+            let paragraph = NSParagraphStyle.markdownBody(
+                lineHeight: rowHeight * CGFloat(headings.count),
+                spacing: theme.blockMargin
+            )
+            var style = BlockStyle.definition(theme: theme)
+            style.base[.paragraphStyle] = paragraph
+            appendPainted(block.source, into: result, style: style, block: block, depth: depth)
+        }
+
+        /// A front matter block as a metadata table: every source line is
+        /// emitted painted and hidden, fences collapsed, so the decoration
+        /// layer can draw key/value rows over them. Focusing the block flips
+        /// the attributes back through the same machinery pipe tables use.
+        private func appendFrontMatter(
+            _ block: BlockNode, into result: NSMutableAttributedString, depth: Int
+        ) {
+            var rows = block.source.split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+            if rows.last?.isEmpty == true { rows.removeLast() }
+            let front = FrontMatterLayout.parse(
+                source: block.source,
+                rowHeight: theme.bodyLineHeight * theme.bodyFontSize
+            )
+            register([.frontMatterTable(front)], for: block.id)
+            // The separator newline gets the row it *precedes*, as with tables:
+            // TextKit sizes a line from the paragraph style at the line's first
+            // character, and that character is the previous line's terminator.
+            for (index, row) in rows.enumerated() {
+                let paragraph = front.paragraphStyle(
+                    forSourceRow: index, revealed: false,
+                    spacing: index == 0 ? theme.blockMargin : 0
+                )
+                if index > 0 {
+                    result.append(
+                        NSAttributedString(
+                            string: "\n",
+                            attributes: [
+                                .paragraphStyle: paragraph
+                            ]))
+                }
+                var rowStyle = BlockStyle.frontMatter(theme: theme)
+                rowStyle.base[.paragraphStyle] = paragraph
+                appendPainted(row, into: result, style: rowStyle, block: block, depth: depth)
+            }
+            if block.source.hasSuffix("\n") {
+                appendPainted(
+                    "", into: result,
+                    style: BlockStyle.frontMatter(theme: theme), block: block, depth: depth
+                )
+            }
+        }
+
+        /// Emits text that carries no glyphs because a decoration draws it instead.        ///
         /// `md.painted` is what lets focus bring the source back: `MarkerVisibility`
         /// reads it and unhides the block the caret is in.
         private func appendPainted(
@@ -1017,12 +1085,16 @@ struct AttributedBuilder {
                     node, contentStart: contentStart, contentEnd: result.length,
                     plainStart: plainCursor, block: block
                 )
-            case .emoji, .html, .ruby:
-                let start = result.length
-                append(
-                    node.verbatim, runAttributes(style, block: block, depth: depth), to: result
-                )
-                if node.kind == .emoji {
+            case .emoji:
+                let glyph = EmojiCatalog.glyph(for: node.payload)
+                if glyph.isEmpty {
+                    // Outside the curated table: the shortcode stays verbatim,
+                    // as before.
+                    let start = result.length
+                    append(
+                        node.verbatim, runAttributes(style, block: block, depth: depth),
+                        to: result
+                    )
                     recordPlain(
                         node,
                         contentStart: start + node.prefix.utf16.count,
@@ -1030,8 +1102,53 @@ struct AttributedBuilder {
                         plainStart: plainCursor, block: block
                     )
                 } else {
-                    plainCursor += node.plainText.utf16.count
+                    // The buffer keeps the `:name:` source byte for byte; the
+                    // glyph is painted over it by the decoration layer. Colons
+                    // and name are markers of one inline element, so focusing
+                    // it reveals the source exactly like any other delimiter.
+                    let inlineIndex = inlineNodes.count
+                    let hiddenStyle = BlockStyle.collapsed(from: style, theme: theme)
+                    appendHiddenRun(
+                        node.prefix, role: .emoji, into: result, style: hiddenStyle,
+                        block: block, depth: depth, inlineIndex: inlineIndex
+                    )
+                    let start = result.length
+                    let plainStart = plainCursor
+                    appendHiddenRun(
+                        node.payload, role: .emoji, into: result, style: hiddenStyle,
+                        block: block, depth: depth, inlineIndex: inlineIndex
+                    )
+                    let contentEnd = result.length
+                    plainCursor = plainStart + node.payload.utf16.count
+                    // The range covers the whole element, markers included:
+                    // a caret beside a zero-width colon still counts as
+                    // inside, so focus reveals the source generously.
+                    let elementEnd = result.length + node.suffix.utf16.count
+                    inlineNodes.append(
+                        InlineRange(
+                            index: inlineIndex, kind: node.kind,
+                            range: NSRange(location: start, length: elementEnd - start),
+                            blockID: block.id,
+                            plainRange: NSRange(
+                                location: plainStart, length: node.payload.utf16.count
+                            ),
+                            contentRange: NSRange(
+                                location: start, length: contentEnd - start
+                            )
+                        )
+                    )
+                    appendHiddenRun(
+                        node.suffix, role: .emoji, into: result, style: hiddenStyle,
+                        block: block, depth: depth, inlineIndex: inlineIndex
+                    )
+                    register([.emojiGlyph], for: block.id)
                 }
+            case .html, .ruby:
+                let start = result.length
+                append(
+                    node.verbatim, runAttributes(style, block: block, depth: depth), to: result
+                )
+                plainCursor += node.plainText.utf16.count
             }
         }
 

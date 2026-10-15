@@ -36,10 +36,11 @@ final class OutlineViewController: NSViewController {
 
     func update(
         headings: [MarkdownDocument.Heading],
-        counts: (words: Int, characters: Int),
+        counts: Counter.Count,
+        selectionWords: Int?,
         scrollTo current: MarkdownDocument.Heading?
     ) {
-        model.update(headings: headings, counts: counts, current: current)
+        model.update(headings: headings, counts: counts, selectionWords: selectionWords, current: current)
     }
 }
 
@@ -65,6 +66,10 @@ final class OutlineModel {
     private(set) var entries: [Entry] = []
     private(set) var words = 0
     private(set) var characters = 0
+    private(set) var charactersNoSpaces = 0
+    private(set) var lines = 0
+    private(set) var readingMinutes = 0
+    private(set) var selectionWords: Int?
     private(set) var activeID: Int?
     /// Collapsed section heads, keyed by block. Only meaningful in
     /// `.collapsible` mode.
@@ -101,11 +106,16 @@ final class OutlineModel {
     /// level-1 is a child of that level-1 even if a level-2 sits between them.
     func update(
         headings: [MarkdownDocument.Heading],
-        counts: (words: Int, characters: Int),
+        counts: Counter.Count,
+        selectionWords: Int?,
         current: MarkdownDocument.Heading?
     ) {
         words = counts.words
         characters = counts.characters
+        charactersNoSpaces = counts.charactersNoSpaces
+        lines = counts.lines
+        readingMinutes = counts.readingMinutes
+        self.selectionWords = selectionWords
         var openLevels: [Int] = []
         var result: [Entry] = []
         for heading in headings {
@@ -235,6 +245,10 @@ private struct Outline: View {
     /// expanding child (the `Spacer` above when empty, the `ScrollView` when
     /// not) gets centred in its hosting view, which left the whole panel
     /// floating in a void of background.
+    ///
+    /// Clicking it pops the full counts; the footer itself stays one line.
+    @State private var showCounts = false
+
     private var footer: some View {
         HStack(spacing: 4) {
             Text("\(model.words) words")
@@ -246,6 +260,11 @@ private struct Outline: View {
         .padding(.horizontal, 20)
         .padding(.vertical, 6)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .contentShape(Rectangle())
+        .onTapGesture { showCounts = true }
+        .popover(isPresented: $showCounts) {
+            WordCountDetails(model: model)
+        }
         .contextMenu { outlinePanelMenu(model) }
     }
 
@@ -343,6 +362,39 @@ private struct Outline: View {
     }
 }
 
+/// The full counts behind the outline footer's one line.
+private struct WordCountDetails: View {
+    let model: OutlineModel
+
+    var body: some View {
+        Grid(alignment: .leading, horizontalSpacing: 16, verticalSpacing: 4) {
+            row("Words", "\(model.words)")
+            row("Characters", "\(model.characters)")
+            row("Without spaces", "\(model.charactersNoSpaces)")
+            row("Lines", "\(model.lines)")
+            row("Reading time", readingTime)
+            if let selected = model.selectionWords {
+                Divider()
+                row("Selected", "\(selected) words")
+            }
+        }
+        .font(.system(size: 12))
+        .padding(12)
+        .frame(minWidth: 200)
+    }
+
+    private var readingTime: String {
+        guard model.words > 0 else { return "–" }
+        return model.readingMinutes > 0 ? "~\(model.readingMinutes) min" : "Less than a minute"
+    }
+
+    private func row(_ label: String, _ value: String) -> some View {
+        GridRow {
+            Text(label).foregroundStyle(model.secondary)
+            Text(value).gridColumnAlignment(.trailing)
+        }
+    }
+}
 /// Typora's outline context menu, shared by the rows, the footer and the
 /// empty state so it works anywhere in the panel.
 @MainActor

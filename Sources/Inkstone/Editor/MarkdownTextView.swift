@@ -818,23 +818,48 @@ final class MarkdownTextView: NSTextView {
         storage.endEditing()
     }
 
-    /// Paragraph styles for the buffer's rows of a table block, or `nil` when the
-    /// block is not one.
+    /// Paragraph styles for the buffer's rows of a painted block, or `nil`
+    /// when the block is not one.
     private func paragraphStyles(
         for blockID: Int, rows: Int, revealed: Bool
     ) -> [NSParagraphStyle]? {
         guard let plans = layout.decorations[blockID] else { return nil }
         var grid: TableGrid?
+        var front: FrontMatterLayout?
         for plan in plans {
             if case let .tableGrid(found) = plan { grid = found }
+            if case let .frontMatterTable(found) = plan { front = found }
         }
-        guard let grid else { return nil }
-        return (0..<rows).map { index in
-            grid.paragraphStyle(
-                forSourceRow: index, revealed: revealed,
-                spacing: index == 0 ? theme.blockMargin : 0
-            )
+        if let grid {
+            return (0..<rows).map { index in
+                grid.paragraphStyle(
+                    forSourceRow: index, revealed: revealed,
+                    spacing: index == 0 ? theme.blockMargin : 0
+                )
+            }
         }
+        if let front {
+            return (0..<rows).map { index in
+                front.paragraphStyle(
+                    forSourceRow: index, revealed: revealed,
+                    spacing: index == 0 ? theme.blockMargin : 0
+                )
+            }
+        }
+        // A table of contents paints `count` rows into one source line; the
+        // revealed source is one ordinary line again.
+        for plan in plans {
+            if case let .tocEntries(entries) = plan {
+                let rowHeight = theme.bodyLineHeight * theme.bodyFontSize
+                return (0..<rows).map { _ in
+                    NSParagraphStyle.markdownBody(
+                        lineHeight: revealed ? rowHeight : rowHeight * CGFloat(max(entries.count, 1)),
+                        spacing: theme.blockMargin
+                    )
+                }
+            }
+        }
+        return nil
     }
 
     /// Splits a range into the sub-ranges that contain no newline.
@@ -969,6 +994,124 @@ final class MarkdownTextView: NSTextView {
         insertText(text, replacementRange: selectedRange())
     }
 
+    /// Pastes clipboard HTML as Markdown, as the original does.
+    ///
+    /// The stock `paste:` also accepts the RTF/HTML flavours, and those carry
+    /// attributes this editor has no meaning for - fonts and colours that would
+    /// sit in a buffer that must stay Markdown source. HTML goes through the
+    /// converter; RTF without HTML is reduced to its markers; anything else
+    /// falls back to plain text, which is always safe.
+    override func paste(_ sender: Any?) {
+        let board = NSPasteboard.general
+        if let data = board.data(forType: .html),
+            let html = String(data: data, encoding: .utf8) ?? String(data: data, encoding: .utf16),
+            !html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+            let markdown = HTMLToMarkdown.convert(html)
+            if !markdown.isEmpty {
+                insertText(markdown, replacementRange: selectedRange())
+                return
+            }
+        }
+        if let markdown = markdownFromRichPasteboard(), !markdown.isEmpty {
+            insertText(markdown, replacementRange: selectedRange())
+            return
+        }
+        pasteAsPlainText(sender)
+    }
+
+    /// Reduces pasted RTF/RTFD to Markdown markers: bold, italic, underline,
+    /// strikethrough, monospace and links. Colours, sizes and attachments have
+    /// no Markdown form and are dropped; images stay out by design.
+    private func markdownFromRichPasteboard() -> String? {
+        let board = NSPasteboard.general
+        let data =
+            board.data(forType: .rtf) ?? board.data(forType: .rtfd)
+        guard let data else { return nil }
+        guard
+            let content = try? NSAttributedString(
+                data: data,
+                options: [
+                    .documentType: board.data(forType: .rtf) != nil
+                        ? NSAttributedString.DocumentType.rtf
+                        : NSAttributedString.DocumentType.rtfd
+                ],
+                documentAttributes: nil
+            ),
+            !content.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return nil }
+        let ns = content.string as NSString
+        // Paragraph ranges first: markers wrap runs, joins split paragraphs.
+        var boundaries = [0]
+        var cursor = 0
+        while cursor < ns.length {
+            if ns.character(at: cursor) == 10 { boundaries.append(cursor + 1) }
+            cursor += 1
+        }
+        boundaries.append(ns.length)
+        var paragraphs: [String] = []
+        for index in 0..<boundaries.count - 1 {
+            let range = NSRange(
+                location: boundaries[index], length: boundaries[index + 1] - boundaries[index]
+            )
+            let marked = markedRuns(in: content, range: range)
+            let trimmed = marked.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { paragraphs.append(trimmed) }
+        }
+        guard !paragraphs.isEmpty else { return nil }
+        return paragraphs.joined(separator: "\n\n")
+    }
+
+    /// One paragraph with its attribute runs wrapped in markers.
+    private func markedRuns(in content: NSAttributedString, range: NSRange) -> String {
+        var out = ""
+        content.enumerateAttributes(in: range, options: []) { attributes, run, _ in
+            var text = (content.string as NSString).substring(with: run)
+            guard !text.isEmpty else { return }
+            if attributes[.attachment] != nil { return }
+            var open = ""
+            var close = ""
+            if let font = attributes[.font] as? NSFont {
+                let traits = font.fontDescriptor.symbolicTraits
+                if traits.contains(.bold) {
+                    open += "**"
+                    close = "**" + close
+                }
+                if traits.contains(.italic) {
+                    open += "*"
+                    close = "*" + close
+                }
+                // A fixed-pitch run pasted from code is code.
+                if font.isFixedPitch {
+                    open += "`"
+                    close = "`" + close
+                }
+            }
+            if let link = attributes[.link] as? URL, !link.absoluteString.isEmpty {
+                open += "["
+                close = "](\(link.absoluteString))" + close
+            } else if let link = attributes[.link] as? String, !link.isEmpty {
+                open += "["
+                close = "](\(link))" + close
+            }
+            if (attributes[.underlineStyle] as? Int) == NSUnderlineStyle.single.rawValue {
+                open += "<u>"
+                close = "</u>" + close
+            }
+            if let strike = attributes[.strikethroughStyle] as? Int,
+                strike == NSUnderlineStyle.single.rawValue
+                    || strike == NSUnderlineStyle.double.rawValue
+                    || strike == NSUnderlineStyle.thick.rawValue
+            {
+                open += "~~"
+                close = "~~" + close
+            }
+            text = text.replacingOccurrences(of: "\n", with: " ")
+            out += open + text + close
+        }
+        return out
+    }
+
     override func moveWordLeft(_ sender: Any?) {
         super.moveWordLeft(sender)
         setSelectedRange(clampedSelection(selectedRange()))
@@ -1026,6 +1169,325 @@ final class MarkdownTextView: NSTextView {
     func formatIndent(outdent: Bool) {
         guard !isReadonly else { return }
         applyIndent(outdent: outdent)
+    }
+
+    // MARK: - Mouse interaction
+
+    /// Handed to the session layer: a ⌘-clicked relative link, resolved against
+    /// the document's folder. `Editor/` may not reach into `Session/`, so the
+    /// view never opens these itself.
+    var onOpenURL: ((URL) -> Void)?
+    /// Buffer offset the context menu was built for; menu actions fire later.
+    private var contextMenuLocation = 0
+    /// Task block armed by a mouseDown on its checkbox, toggled on mouseUp.
+    private var pendingCheckboxBlock: Int?
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        // Caps lock and the fn key ride along in the device-independent flags
+        // but change nothing about a click; leaving them in made every
+        // single-click affordance silently die under caps lock.
+        let flags = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        if flags.contains(.command) {
+            if openLink(at: characterIndex(at: point)) { return }
+        } else if event.clickCount == 1, flags.isEmpty {
+            // A table of contents navigates even in readonly mode; toggling a
+            // checkbox is an edit and stays behind the readonly gate.
+            if let entry = tocEntryHit(at: point) {
+                jumpToTOCEntry(entry)
+                return
+            }
+            if !isReadonly, let blockID = taskCheckboxHit(at: point) {
+                pendingCheckboxBlock = blockID
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if let blockID = pendingCheckboxBlock {
+            pendingCheckboxBlock = nil
+            let point = convert(event.locationInWindow, from: nil)
+            if taskCheckboxHit(at: point) == blockID {
+                toggleTaskCheckbox(blockID)
+                return
+            }
+        }
+        super.mouseUp(with: event)
+    }
+
+    /// Buffer offset under `point`, clamped into the storage.
+    private func characterIndex(at point: NSPoint) -> Int {
+        guard let layoutManager, let container = textContainer, let storage = textStorage,
+            storage.length > 0
+        else { return 0 }
+        let inContainer = NSPoint(
+            x: point.x - textContainerInset.width, y: point.y - textContainerInset.height
+        )
+        let glyph = layoutManager.glyphIndex(for: inContainer, in: container)
+        return min(layoutManager.characterIndexForGlyph(at: glyph), storage.length - 1)
+    }
+
+    /// The task block whose painted checkbox holds `point`, mirroring the
+    /// decoration layer's geometry exactly (see `BlockDecorator`).
+    private func taskCheckboxHit(at point: NSPoint) -> Int? {
+        guard let layoutManager, let storage = textStorage, storage.length > 0 else { return nil }
+        let location = characterIndex(at: point)
+        guard let block = layout.block(containing: location), block.kind == .taskItem,
+            block.range.length > 0,
+            let width = layout.decorations[block.id]?.compactMap({ plan -> CGFloat? in
+                if case let .taskCheckbox(_, width) = plan { return width }
+                return nil
+            }).first
+        else { return nil }
+        let firstGlyph = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: block.range.location, length: 1),
+            actualCharacterRange: nil
+        )
+        let fragment = layoutManager.lineFragmentRect(
+            forGlyphAt: firstGlyph.location, effectiveRange: nil
+        )
+        let line = fragment.offsetBy(dx: textContainerInset.width, dy: textContainerInset.height)
+        let side: CGFloat = 12
+        let box = CGRect(
+            x: line.minX + width - side * 1.9, y: line.midY - side / 2,
+            width: side, height: side
+        )
+        return box.insetBy(dx: -5, dy: -5).contains(point) ? block.id : nil
+    }
+
+    private func toggleTaskCheckbox(_ blockID: Int) {
+        guard let storage = textStorage, let range = bufferRange(forBlock: blockID) else { return }
+        apply(
+            FormatController.toggleTask(at: range.location, selection: selectedRange(), in: storage.string)
+        )
+    }
+
+    /// What a ⌘-click found: a URL to open, or a footnote to jump to.
+    private enum ClickTarget {
+        case url(String)
+        case footnote(String)
+    }
+
+    /// Opens the link under `location`. Returns whether one was there, so the
+    /// click can fall through to normal selection when it was not.
+    @discardableResult
+    private func openLink(at location: Int) -> Bool {
+        guard let target = linkTarget(at: location) else { return false }
+        switch target {
+        case .url(let string): open(urlString: string)
+        case .footnote(let label): jumpToFootnote(label)
+        }
+        return true
+    }
+
+    /// The link under `location`, found by re-lexing its verbatim slice: the
+    /// layout knows ranges, the node tree knows destinations, and the slice is
+    /// what joins them without a stored cross-reference.
+    private func linkTarget(at location: Int) -> ClickTarget? {
+        guard let storage = textStorage, storage.length > 0 else { return nil }
+        let chain = layout.inlineChain(at: min(location, storage.length - 1))
+        let kinds: [InlineKind] = [.link, .refLink, .autolink, .footnoteRef]
+        guard let element = chain.first(where: { kinds.contains($0.kind) }),
+            NSMaxRange(element.range) <= storage.length
+        else { return nil }
+        let slice = (storage.string as NSString).substring(with: element.range)
+        guard let node = InlineLexer.parse(slice).first else { return nil }
+        switch node.kind {
+        case .link, .autolink:
+            let destination = node.attributes.destination ?? node.payload
+            return destination.isEmpty ? nil : .url(destination)
+        case .refLink:
+            guard let reference = node.attributes.reference?.lowercased(), !reference.isEmpty else {
+                return nil
+            }
+            let destination = document.linkDefinitions[reference]?.attributes.definitionDestination ?? ""
+            return destination.isEmpty ? nil : .url(destination)
+        case .footnoteRef:
+            guard let label = node.attributes.reference, !label.isEmpty else { return nil }
+            return .footnote(label)
+        default:
+            return nil
+        }
+    }
+
+    private func open(urlString: String) {
+        let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, !trimmed.hasPrefix("#") else { return }
+        let lower = trimmed.lowercased()
+        if lower.hasPrefix("http://") || lower.hasPrefix("https://")
+            || lower.hasPrefix("mailto:") || lower.hasPrefix("ftp://")
+        {
+            if let url = URL(string: trimmed) { NSWorkspace.shared.open(url) }
+            return
+        }
+        if trimmed.hasPrefix("file://"), let url = URL(string: trimmed) {
+            onOpenURL?(url)
+            return
+        }
+        if trimmed.hasPrefix("/") {
+            onOpenURL?(URL(fileURLWithPath: trimmed))
+            return
+        }
+        let base = completionDirectory ?? imagePainter.baseDirectory
+        guard let base else { return }
+        onOpenURL?(base.appendingPathComponent(trimmed))
+    }
+
+    private func jumpToFootnote(_ label: String) {
+        let definitions = document.footnoteDefinitions
+        let node =
+            definitions[label] ?? definitions.first { $0.key.lowercased() == label.lowercased() }?.value
+        guard let node, let range = bufferRange(forBlock: node.id) else { return }
+        setSelectedRange(NSRange(location: range.location, length: 0))
+        scrollRangeToVisible(range)
+    }
+
+    /// The TOC entry under `point`, using the same row geometry the builder
+    /// reserved and the painter drew, so clicks land on the row they hit.
+    private func tocEntryHit(at point: NSPoint) -> MarkdownDocument.Heading? {
+        guard let layoutManager, let storage = textStorage, storage.length > 0 else { return nil }
+        let location = characterIndex(at: point)
+        guard let block = layout.block(containing: location), block.kind == .toc,
+            block.range.length > 0,
+            let entries = layout.decorations[block.id]?.compactMap(
+                { plan -> [MarkdownDocument.Heading]? in
+                    if case let .tocEntries(entries) = plan { return entries }
+                    return nil
+                }
+            ).first,
+            !entries.isEmpty
+        else { return nil }
+        let firstGlyph = layoutManager.glyphRange(
+            forCharacterRange: NSRange(location: block.range.location, length: 1),
+            actualCharacterRange: nil
+        )
+        let fragment = layoutManager.lineFragmentRect(
+            forGlyphAt: firstGlyph.location, effectiveRange: nil
+        )
+        let line = fragment.offsetBy(dx: textContainerInset.width, dy: textContainerInset.height)
+        let margin =
+            (storage.attribute(.paragraphStyle, at: block.range.location, effectiveRange: nil)
+            as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+        let rowHeight = theme.bodyLineHeight * theme.bodyFontSize
+        guard rowHeight > 0 else { return nil }
+        let index = Int((point.y - (line.minY + margin)) / rowHeight)
+        guard entries.indices.contains(index) else { return nil }
+        return entries[index]
+    }
+
+    private func jumpToTOCEntry(_ entry: MarkdownDocument.Heading) {
+        guard let range = bufferRange(forBlock: entry.blockID) else { return }
+        setSelectedRange(NSRange(location: range.location, length: 0))
+        scrollRangeToVisible(range)
+    }
+
+    // MARK: - Context menu
+
+    /// Typora-style right-click menu: link actions on a link, table operations
+    /// in a table, and the everyday edit/format items otherwise.
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard let storage = textStorage else { return super.menu(for: event) }
+        let point = convert(event.locationInWindow, from: nil)
+        contextMenuLocation = characterIndex(at: point)
+        // The actions below run on the selection, so a right-click outside it
+        // moves the caret there first - otherwise Cut and the table operations
+        // would act on a stale range the user is not pointing at.
+        if !NSLocationInRange(contextMenuLocation, selectedRange()) {
+            setSelectedRange(NSRange(location: contextMenuLocation, length: 0))
+            contextMenuLocation = selectedRange().location
+        }
+        let text = storage.string
+        let menu = NSMenu()
+
+        if let target = linkTarget(at: contextMenuLocation) {
+            switch target {
+            case .url:
+                let open = menu.addItem(
+                    withTitle: "Open Link", action: #selector(openContextLink), keyEquivalent: ""
+                )
+                open.target = self
+                let copy = menu.addItem(
+                    withTitle: "Copy Link Address", action: #selector(copyContextLink),
+                    keyEquivalent: ""
+                )
+                copy.target = self
+            case .footnote:
+                let jump = menu.addItem(
+                    withTitle: "Jump to Footnote", action: #selector(jumpContextFootnote),
+                    keyEquivalent: ""
+                )
+                jump.target = self
+            }
+            menu.addItem(.separator())
+        }
+
+        for (title, selector) in [
+            ("Cut", #selector(NSText.cut(_:))),
+            ("Copy", #selector(NSText.copy(_:))),
+            ("Paste", #selector(NSText.paste(_:))),
+            ("Paste as Plain Text", #selector(NSTextView.pasteAsPlainText(_:))),
+            ("Select All", #selector(NSText.selectAll(_:))),
+        ] {
+            menu.addItem(withTitle: title, action: selector, keyEquivalent: "")
+        }
+        menu.addItem(.separator())
+
+        for (title, action) in [
+            ("Bold", FormatAction.bold),
+            ("Italic", FormatAction.italic),
+            ("Strikethrough", FormatAction.strikethrough),
+            ("Inline Code", FormatAction.inlineCode),
+            ("Link", FormatAction.link),
+        ] {
+            let item = menu.addItem(
+                withTitle: title, action: #selector(applyContextFormat(_:)), keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = action.rawValue
+        }
+
+        if FormatController.containsTable(at: contextMenuLocation, in: storage.string) {
+            menu.addItem(.separator())
+            for (title, action) in [
+                ("Insert Row Above", FormatAction.tableRowAbove),
+                ("Insert Row Below", FormatAction.tableRowBelow),
+                ("Delete Row", FormatAction.tableDeleteRow),
+                ("Insert Column Left", FormatAction.tableColumnLeft),
+                ("Insert Column Right", FormatAction.tableColumnRight),
+                ("Delete Column", FormatAction.tableDeleteColumn),
+            ] {
+                let item = menu.addItem(
+                    withTitle: title, action: #selector(applyContextFormat(_:)), keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = action.rawValue
+            }
+        }
+        return menu
+    }
+
+    @objc func applyContextFormat(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+            let action = FormatAction(rawValue: raw)
+        else { return }
+        format { FormatController.edit(for: action, in: $0, range: $1) }
+    }
+
+    @objc func openContextLink() {
+        openLink(at: contextMenuLocation)
+    }
+
+    @objc func copyContextLink() {
+        guard case .url(let string) = linkTarget(at: contextMenuLocation) else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
+    }
+
+    @objc func jumpContextFootnote() {
+        guard case .footnote(let label) = linkTarget(at: contextMenuLocation) else { return }
+        jumpToFootnote(label)
     }
 }
 

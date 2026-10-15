@@ -781,13 +781,32 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
     }
 
+    /// Table operations enable only on a table: elsewhere they would be a
+    /// silent no-op, and a menu must not offer those. Everything else stays
+    /// enabled; validation here covers only the items this target owns.
+    public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        guard let raw = menuItem.representedObject as? String,
+            let action = FormatAction(rawValue: raw)
+        else { return true }
+        switch action {
+        case .tableRowAbove, .tableRowBelow, .tableDeleteRow,
+            .tableColumnLeft, .tableColumnRight, .tableDeleteColumn,
+            .tableAlignLeft, .tableAlignCenter, .tableAlignRight:
+            guard let editor = store.focusedWindow?.editor,
+                let text = editor.textStorage?.string
+            else { return false }
+            return FormatController.containsTable(at: editor.selectedRange().location, in: text)
+        default:
+            return true
+        }
+    }
+
     /// One action for every Format-menu entry.
     ///
     /// The command rides on the item's `representedObject` rather than needing a
     /// selector per row: adding a command is then a `MenuBuilder` line and a
     /// `FormatController` case, not three files.
-    @objc func applyFormatting(_ sender: Any?) {
-        guard let item = sender as? NSMenuItem,
+    @objc func applyFormatting(_ sender: Any?) {        guard let item = sender as? NSMenuItem,
             let raw = item.representedObject as? String,
             let action = FormatAction(rawValue: raw)
         else { return }
@@ -872,6 +891,7 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private enum UtilityPanel: Hashable {
         case about
         case license
+        case reference
     }
 
     private var utilityWindows: [UtilityPanel: NSWindow] = [:]
@@ -895,6 +915,19 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             resizable: true
         ) {
             LicenseView()
+        }
+    }
+
+    /// The Help menu's reference: the syntax this editor parses, in a
+    /// window rather than a dead menu item.
+    @objc func openReference(_ sender: Any?) {
+        openUtilityWindow(
+            .reference,
+            title: "Markdown Reference",
+            contentSize: NSSize(width: 560, height: 520),
+            resizable: true
+        ) {
+            MarkdownReferenceView()
         }
     }
 

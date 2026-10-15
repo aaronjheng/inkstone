@@ -35,9 +35,13 @@ public enum HTMLWriter {
             "<div class=\"markdown-body\">",
         ]
         var out = header.joined(separator: "\n") + "\n"
+        // Heading anchors and the TOC list share one slug table, so every
+        // `#anchor` the TOC emits exists on its heading - including when the
+        // `[TOC]` block sits above the headings it lists.
+        let anchors = anchorIDs(for: document.headings)
         for block in document.blocks {
             if block.kind == .frontMatter && !includeFrontMatter { continue }
-            out.append(write(block: block, depth: 0))
+            out.append(write(block: block, depth: 0, headings: document.headings, anchors: anchors))
             out.append("\n")
         }
         out.append("</div>\n</body>\n</html>\n")
@@ -46,7 +50,10 @@ public enum HTMLWriter {
 
     // MARK: - Blocks
 
-    private static func write(block: BlockNode, depth: Int) -> String {
+    private static func write(
+        block: BlockNode, depth: Int, headings: [MarkdownDocument.Heading],
+        anchors: [Int: String]
+    ) -> String {
         let pad = String(repeating: "  ", count: depth)
         let inlines = html(inlines: block.inlines)
 
@@ -55,22 +62,23 @@ public enum HTMLWriter {
             return ""
         case .heading:
             let level = max(1, min(6, block.attributes.level))
-            return "\(pad)<h\(level)>\(inlines)</h\(level)>\n"
+            let anchor = anchors[block.id].map { " id=\"\(escape($0))\"" } ?? ""
+            return "\(pad)<h\(level)\(anchor)>\(inlines)</h\(level)>\n"
         case .paragraph:
             return "\(pad)<p>\(inlines)</p>\n"
         case .blockquote:
-            return "\(pad)<blockquote>\n\(nested(block, depth: depth))\(pad)</blockquote>\n"
+            return "\(pad)<blockquote>\n\(nested(block, depth: depth, headings: headings, anchors: anchors))\(pad)</blockquote>\n"
         case .list:
             let tag = block.attributes.isOrdered ? "ol" : "ul"
-            return "\(pad)<\(tag)>\n\(nested(block, depth: depth))\(pad)</\(tag)>\n"
+            return "\(pad)<\(tag)>\n\(nested(block, depth: depth, headings: headings, anchors: anchors))\(pad)</\(tag)>\n"
         case .listItem:
-            return "\(pad)<li>\(inlines)\n\(nested(block, depth: depth))\(pad)</li>\n"
+            return "\(pad)<li>\(inlines)\n\(nested(block, depth: depth, headings: headings, anchors: anchors))\(pad)</li>\n"
         case .taskItem:
             let checked = block.attributes.checked == true
             let box = "<input type=\"checkbox\" disabled\(checked ? " checked" : "")> "
             let tag = checked ? " checked" : ""
             return "\(pad)<li class=\"task-list-item\"\(tag)>\(box)\(inlines)\n"
-                + "\(nested(block, depth: depth))\(pad)</li>\n"
+                + "\(nested(block, depth: depth, headings: headings, anchors: anchors))\(pad)</li>\n"
         case .fences:
             let language = block.attributes.language
             let attribute = language.isEmpty ? "" : " class=\"language-\(escape(language))\""
@@ -88,7 +96,7 @@ public enum HTMLWriter {
             // "convert" it without an HTML parser would be to get it wrong.
             return block.source
         case .toc:
-            return "\(pad)<div class=\"toc\"></div>\n"
+            return writeTOC(headings: headings, anchors: anchors, depth: depth)
         case .linkDefinition:
             return ""
         case .footnoteDefinition:
@@ -105,9 +113,13 @@ public enum HTMLWriter {
         }
     }
 
-    private static func nested(_ block: BlockNode, depth: Int) -> String {
+    private static func nested(
+        _ block: BlockNode, depth: Int, headings: [MarkdownDocument.Heading],
+        anchors: [Int: String]
+    ) -> String {
         guard !block.children.isEmpty else { return "" }
-        return block.children.map { write(block: $0, depth: depth + 1) }.joined()
+        return block.children.map { write(block: $0, depth: depth + 1, headings: headings, anchors: anchors) }
+            .joined()
     }
 
     private static func write(table block: BlockNode, depth: Int) -> String {
@@ -129,9 +141,55 @@ public enum HTMLWriter {
         return out + "\(pad)  </tbody>\n\(pad)</table>\n"
     }
 
+    private static func writeTOC(
+        headings: [MarkdownDocument.Heading], anchors: [Int: String], depth: Int
+    ) -> String {
+        let pad = String(repeating: "  ", count: depth)
+        guard !headings.isEmpty else { return "\(pad)<div class=\"toc\"></div>\n" }
+        var out = "\(pad)<nav class=\"toc\">\n\(pad)  <ul>\n"
+        for heading in headings {
+            let anchor = anchors[heading.blockID] ?? slug(heading.text)
+            let level = max(1, min(6, heading.level))
+            out +=
+                "\(pad)    <li class=\"toc-h\(level)\">"
+                + "<a href=\"#\(escape(anchor))\">\(escape(heading.text))</a></li>\n"
+        }
+        return out + "\(pad)  </ul>\n\(pad)</nav>\n"
+    }
+
+    /// One anchor per heading, GitHub-style: later duplicates get `-1`, `-2`.
+    private static func anchorIDs(for headings: [MarkdownDocument.Heading]) -> [Int: String] {
+        var used: [String: Int] = [:]
+        var result: [Int: String] = [:]
+        for heading in headings {
+            let base = slug(heading.text)
+            let count = used[base, default: 0]
+            used[base] = count + 1
+            result[heading.blockID] = count == 0 ? base : "\(base)-\(count)"
+        }
+        return result
+    }
+
+    /// Lowercase, spaces to dashes, punctuation dropped. CJK ideographs are
+    /// alphanumeric and survive, which keeps non-Latin headings linkable.
+    private static func slug(_ text: String) -> String {
+        var out = ""
+        for scalar in text.lowercased().unicodeScalars {
+            if scalar == " " || scalar == "-" {
+                out.append("-")
+            } else if CharacterSet.alphanumerics
+                .contains(scalar) || scalar == "_"
+            {
+                out.append(Character(scalar))
+            }
+        }
+        while out.contains("--") { out = out.replacingOccurrences(of: "--", with: "-") }
+        let trimmed = out.trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return trimmed.isEmpty ? "section" : trimmed
+    }
+
     /// Every row of a pipe table, cells split by the same recognizer the parser
-    /// and the painted grid use.
-    ///
+    /// and the painted grid use.    ///
     /// This used to be a private re-implementation with its own delimiter rule
     /// (three dashes minimum, where the parser accepts one), so a valid GFM table
     /// like `|-|-|` rendered in the editor and silently vanished from the export.
@@ -202,7 +260,9 @@ public enum HTMLWriter {
                 return "<sup id=\"fnref-\(escape(reference))\">"
                     + "<a href=\"#fn-\(escape(reference))\">\(escape(reference))</a></sup>"
             case .emoji:
-                return "<span class=\"emoji\">\(escape(node.payload))</span>"
+                let glyph = EmojiCatalog.glyph(for: node.payload)
+                return glyph.isEmpty
+                    ? "<span class=\"emoji\">\(escape(node.payload))</span>" : escape(glyph)
             case .html:
                 return node.verbatim
             case .ruby:

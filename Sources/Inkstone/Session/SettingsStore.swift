@@ -63,9 +63,9 @@ struct EditorSettings: Codable, Equatable, Sendable {
     // Markdown
     var strictMarkdown = false
     var enableInlineMath = true
-    var enableSubscript = false
-    var enableSuperscript = false
-    var enableHighlight = false
+    var enableSubscript = true
+    var enableSuperscript = true
+    var enableHighlight = true
     var enableAlert = true
     var enableStrike = true
     var noAutoLink = false
@@ -119,9 +119,10 @@ struct EditorSettings: Codable, Equatable, Sendable {
         showInvisibleCharacters = try container.decodeIfPresent(Bool.self, forKey: .showInvisibleCharacters) ?? false
         strictMarkdown = try container.decodeIfPresent(Bool.self, forKey: .strictMarkdown) ?? false
         enableInlineMath = try container.decodeIfPresent(Bool.self, forKey: .enableInlineMath) ?? true
-        enableSubscript = try container.decodeIfPresent(Bool.self, forKey: .enableSubscript) ?? false
-        enableSuperscript = try container.decodeIfPresent(Bool.self, forKey: .enableSuperscript) ?? false
-        enableHighlight = try container.decodeIfPresent(Bool.self, forKey: .enableHighlight) ?? false
+        enableSubscript = try container.decodeIfPresent(Bool.self, forKey: .enableSubscript) ?? true
+        enableSuperscript =
+            try container.decodeIfPresent(Bool.self, forKey: .enableSuperscript) ?? true
+        enableHighlight = try container.decodeIfPresent(Bool.self, forKey: .enableHighlight) ?? true
         enableAlert = try container.decodeIfPresent(Bool.self, forKey: .enableAlert) ?? true
         enableStrike = try container.decodeIfPresent(Bool.self, forKey: .enableStrike) ?? true
         noAutoLink = try container.decodeIfPresent(Bool.self, forKey: .noAutoLink) ?? false
@@ -277,7 +278,8 @@ final class SettingsStore {
             focus: false,
             readonly: false,
             showInvisibleCharacters: settings.showInvisibleCharacters,
-            showHiddenFiles: settings.showHiddenFiles
+            showHiddenFiles: settings.showHiddenFiles,
+            spellCheck: settings.spellCheckEnabled
         )
     }
 

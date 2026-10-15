@@ -416,6 +416,25 @@ final class AppStore {
         document.onOpenCommitted = { [weak self] url, documentID in
             self?.drafts.clear(sourceURL: url, documentID: documentID)
         }
+        // A ⌘-clicked relative link: Markdown opens as a tab in the link's
+        // own window, everything else goes to the Finder.
+        document.onOpenLink = { [weak self, weak document] url in
+            guard let self else { return }
+            let markdownExtensions = ["md", "markdown", "mdown", "txt"]
+            if url.isFileURL, markdownExtensions.contains(url.pathExtension.lowercased()),
+                FileManager.default.fileExists(atPath: url.path)
+            {
+                if let document,
+                    let owner = self.hosts.first(where: { $0.documents.contains { $0 === document } })
+                {
+                    self.open(url, in: owner)
+                } else {
+                    self.open(url)
+                }
+                return
+            }
+            NSWorkspace.shared.open(url)
+        }
         document.markSessionWired()
     }
 }

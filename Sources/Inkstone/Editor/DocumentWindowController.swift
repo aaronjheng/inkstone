@@ -18,6 +18,7 @@ struct EditorSettingsView {
     var readonly = false
     var showInvisibleCharacters = false
     var showHiddenFiles = false
+    var spellCheck = true
 }
 
 /// A scroll view that lets the document run under the title bar.
@@ -159,6 +160,9 @@ final class DocumentWindowController {
         editor.onTextChange = { [weak self] _ in
             self?.markDirty()
         }
+        editor.onOpenURL = { [weak self] url in
+            self?.onOpenLink?(url)
+        }
         // Path completion looks next to the document; an unsaved document looks next to
         // nothing and simply offers no candidates.
         let folder = url?.deletingLastPathComponent() ?? environment.sidebarFolder
@@ -279,6 +283,9 @@ final class DocumentWindowController {
     /// Filled in by `AppStore`: `Editor/` may not reach into `Session/`.
     var onWriteDraft: ((DraftSnapshot) -> Void)?
     var onSaveCommitted: ((URL?, String?) -> Void)?
+    /// A ⌘-clicked relative link the view resolved against the document's
+    /// folder, for the session layer to open as a tab or in the Finder.
+    var onOpenLink: ((URL) -> Void)?
     /// Fired after `open(_:)` replaces the buffer, so the session layer can
     /// drop the recovery draft of whatever the tab held before.
     var onOpenCommitted: ((URL, String) -> Void)?
@@ -498,6 +505,7 @@ final class DocumentWindowController {
         editor.isFocusModeEnabled = settings.focus
         editor.isReadonly = settings.readonly
         editor.showsInvisibleCharacters = settings.showInvisibleCharacters
+        editor.isContinuousSpellCheckingEnabled = settings.spellCheck
         editor.needsDisplay = true
         updateStatus()
     }
@@ -561,15 +569,20 @@ final class DocumentWindowController {
         let speed = environment.wordsPerMinute
         let total = Counter.count(editor.document.plainText, wordsPerMinute: speed)
         let selection = editor.selectedText
-        if selection.isEmpty {
-            statusText = total.summary
-        } else {
-            let part = Counter.selection(selection, wordsPerMinute: speed)
+        // Counted once and shared: the status line and the outline popover
+        // report the same selection.
+        let part =
+            selection.isEmpty
+            ? nil : Counter.selection(selection, wordsPerMinute: speed)
+        if let part {
             statusText = "\(part.words) of \(total.words) \(total.words == 1 ? "word" : "words") · \(total.characters) characters"
+        } else {
+            statusText = total.summary
         }
         outlinePanel.update(
             headings: editor.document.headings,
-            counts: (words: total.words, characters: total.characters),
+            counts: total,
+            selectionWords: part?.words,
             scrollTo: currentHeading()
         )
     }

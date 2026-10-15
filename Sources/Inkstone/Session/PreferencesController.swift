@@ -430,6 +430,7 @@ private struct EditorPane: View {
         Form {
             Section {
                 Toggle("Show invisible characters", isOn: toggle(\.showInvisibleCharacters))
+                Toggle("Check spelling", isOn: toggle(\.spellCheckEnabled))
                 Toggle("Auto-pair brackets", isOn: toggle(\.autoPairBrackets))
                 Toggle("Auto-pair Markdown syntax", isOn: toggle(\.autoPairMarkdownSyntax))
                 Toggle("Smart quotes", isOn: toggle(\.smartQuotes))

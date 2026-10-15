@@ -5,9 +5,12 @@ Native macOS Markdown editor
 ## Features
 
 - **Live WYSIWYG** — Markdown renders as you type; syntax markers collapse to zero-width glyphs and reappear under the caret, while the buffer stays byte-for-byte the source you typed
-- **Faithful Round Trip** — custom CommonMark-adjacent parser with Typora extensions; tables, math blocks, HTML blocks and `[TOC]` are painted in place over their real source
+- **Faithful Round Trip** — custom CommonMark-adjacent parser with Typora extensions; tables, math blocks, HTML blocks, front matter metadata and a live `[TOC]` are painted in place over their real source
 - **Focus & Typewriter Modes** — focus dims everything outside the current block; typewriter keeps the caret centred; readonly mode available
-- **Input Rules & Completion** — auto-pairing of brackets and Markdown delimiters, smart punctuation, list continuation, Tab/Shift-Tab indent; `:shortcode` emoji and path completion inside links
+- **Input Rules & Completion** — auto-pairing of brackets and Markdown delimiters, smart punctuation, list continuation, Tab/Shift-Tab indent; `:shortcode` emoji rendered as glyphs, with path completion inside links
+- **Table Editing** — insert/delete rows and columns, align columns, insert footnotes; subscript and superscript toggles in the Format menu
+- **Pointer & Context Menu** — click task checkboxes to toggle, ⌘-click links to open (footnotes jump in place), right-click for Open/Copy link, quick formatting and table operations
+- **Paste as Markdown** — clipboard HTML from browsers lands as Markdown source (headings, lists, tables, code, links); RTF reduces to its markers instead of leaking styled text into the buffer
 - **Code Highlighting** — fenced blocks coloured by built-in tokenizers: C-like, shell, SQL, markup, CSS, YAML, INI
 - **Files Panel** — folder tree of Markdown files with the current file marked; draggable divider
 - **Outline Panel** — heading tree with jump-to-heading and the caret's section tracked live

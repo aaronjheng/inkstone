@@ -253,6 +253,17 @@ enum DecorationPlan {
     case inlineCode(background: NSColor, radius: CGFloat)
     case alertBox(title: String, background: NSColor, border: NSColor)
     case tocPlaceholder(color: NSColor)
+    /// A live table of contents: one painted row per heading, drawn by the
+    /// decoration layer over the block's hidden `[TOC]` source - the same
+    /// painted route pipe tables take, including focus revealing the source.
+    case tocEntries([MarkdownDocument.Heading])
+    /// An emoji shortcode paints its glyph over the hidden `:name:` source.
+    /// The plan only triggers the per-block paint; ranges come from the
+    /// block's `.emoji` inline nodes, so one plan covers the whole block.
+    case emojiGlyph
+    /// A front matter block's parsed rows, painted as a metadata table over
+    /// the hidden source - the same painted route pipe tables take.
+    case frontMatterTable(FrontMatterLayout)
     /// A pipe table's cells, painted by the decoration layer.
     ///
     /// The rows hold no visible glyphs; see `TableGrid` for why the columns cannot be

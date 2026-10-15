@@ -18,7 +18,7 @@ enum MenuBuilder {
         main.addItem(viewMenuItem(responder: responder, store: store))
         main.addItem(themesMenuItem(store: store))
         main.addItem(windowMenuItem())
-        main.addItem(helpMenuItem())
+        main.addItem(helpMenuItem(responder: responder))
         return main
     }
 
@@ -239,6 +239,34 @@ enum MenuBuilder {
         entry("Horizontal Rule", .horizontalRule, "")
         entry("Table of Contents", .tableOfContents, "")
         entry("YAML Front Matter", .frontMatter, "")
+        entry("Footnote", .footnote, "")
+        menu.addItem(.separator())
+        // Table cell operations live in a submenu here, as in the original's
+        // table context menu: the Paragraph menu only inserts a table.
+        let tableItem = NSMenuItem(title: "Edit Table", action: nil, keyEquivalent: "")
+        let tableMenu = NSMenu(title: "Edit Table")
+        func tableEntry(_ title: String, _ action: FormatAction) {
+            let row = tableMenu.addItem(
+                withTitle: title,
+                action: #selector(AppDelegate.applyFormatting(_:)),
+                keyEquivalent: ""
+            )
+            row.target = responder
+            row.representedObject = action.rawValue
+        }
+        tableEntry("Insert Row Above", .tableRowAbove)
+        tableEntry("Insert Row Below", .tableRowBelow)
+        tableEntry("Delete Row", .tableDeleteRow)
+        tableMenu.addItem(.separator())
+        tableEntry("Insert Column Left", .tableColumnLeft)
+        tableEntry("Insert Column Right", .tableColumnRight)
+        tableEntry("Delete Column", .tableDeleteColumn)
+        tableMenu.addItem(.separator())
+        tableEntry("Align Left", .tableAlignLeft)
+        tableEntry("Align Center", .tableAlignCenter)
+        tableEntry("Align Right", .tableAlignRight)
+        tableItem.submenu = tableMenu
+        menu.addItem(tableItem)
         item.submenu = menu
         item.title = menu.title
         return item
@@ -273,6 +301,8 @@ enum MenuBuilder {
         entry("Strikethrough", .strikethrough, "`", [.control, .shift])
         entry("Inline Math", .inlineMath, "m", [.command, .shift])
         entry("Highlight", .highlight, "")
+        entry("Subscript", .`subscript`, "")
+        entry("Superscript", .superscript, "")
         menu.addItem(.separator())
         entry("Link", .link, "k")
         entry("Image", .image, "i", [.command, .control])
@@ -434,12 +464,13 @@ enum MenuBuilder {
     }
 
     @MainActor
-    private static func helpMenuItem() -> NSMenuItem {
+    private static func helpMenuItem(responder: AppDelegate) -> NSMenuItem {
         let item = NSMenuItem()
         let menu = NSMenu(title: "Help")
         menu.addItem(
-            withTitle: "Markdown Reference", action: #selector(NSApplication.showHelp(_:)), keyEquivalent: ""
-        )
+            withTitle: "Markdown Reference", action: #selector(AppDelegate.openReference(_:)),
+            keyEquivalent: ""
+        ).target = responder
         item.submenu = menu
         item.title = menu.title
         NSApp.helpMenu = menu

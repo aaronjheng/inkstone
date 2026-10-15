@@ -150,6 +150,9 @@ enum MarkerRole {
     case footnoteOpen
     case footnoteClose
     case mathDelimiter
+    /// An emoji shortcode's colons and name: hidden while idle, revealed with
+    /// the element under the caret like every other inline delimiter.
+    case emoji
 
     /// Whether the marker is hidden while the caret is elsewhere.
     ///

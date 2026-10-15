@@ -131,10 +131,17 @@ public struct InlineLexer {
             return matchLinkOrFootnote(at: start)
         case "*", "_":
             return matchEmphasis(at: start, delimiter: character)
-        case "~" where options.enableStrike:
-            return matchStrike(at: start)
-        case "~" where options.enableSubscript:
-            return matchSubSuper(at: start, kind: .sub)
+        case "~" where options.enableStrike || options.enableSubscript:
+            // `~~` is strikethrough and `~…~` is subscript; strike is tried
+            // first so `~~x~~` does not lex as nested subscripts. Trying strike
+            // never consumes on failure, so falling through to subscript is safe.
+            if options.enableStrike, let strike = matchStrike(at: start) {
+                return strike
+            }
+            if options.enableSubscript {
+                return matchSubSuper(at: start, kind: .sub)
+            }
+            return nil
         case "^" where options.enableSuperscript:
             return matchSubSuper(at: start, kind: .sup)
         case "=" where options.enableHighlight:
