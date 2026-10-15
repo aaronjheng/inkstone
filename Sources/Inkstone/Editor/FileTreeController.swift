@@ -479,41 +479,17 @@ private struct FileTree: View {
         .background(model.sidebarBackground)
     }
 
-    /// The title row: centred label with the "New File" action at the edge.
-    /// The button used to live in a `toolbar` view that no body composed, so the
-    /// affordance wired through `onCreateFile` never appeared on screen.
+    /// Typora-style header: the title is centred across the panel's width.
+    /// The standalone "+" button is gone; "New File" stays reachable through the
+    /// context menus (header, empty area, folder rows).
     private var header: some View {
-        HStack(spacing: 8) {
-            Text("Files")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(model.secondary)
-            Spacer(minLength: 0)
-            newFileButton
-        }
-        .padding(.leading, 16)
-        .padding(.trailing, 10)
-        .padding(.vertical, 4)
-        // Typora pops the folder menu from the panel's empty spots too.
-        .contextMenu { panelMenu(target: model.rootURL) }
-    }
-
-    @ViewBuilder
-    private var newFileButton: some View {
-        if let onCreateFile {
-            Button {
-                onCreateFile()
-            } label: {
-                Image(systemName: "plus")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(width: 20, height: 20)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
+        Text("Files")
+            .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(model.secondary)
-            .help("New File")
-            .accessibilityLabel("New File")
-            .accessibilityHint("Creates a new Markdown file in the current folder")
-        }
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(.vertical, 4)
+            // Typora pops the folder menu from the panel's empty spots too.
+            .contextMenu { panelMenu(target: model.rootURL) }
     }
 
     private var folderRow: some View {
