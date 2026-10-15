@@ -52,6 +52,14 @@ enum MarkdownAttribute {
     /// decorations without walking the tree.
     static let blockDepth = NSAttributedString.Key("md.blockDepth")
 
+    /// `md.subBlock` - the `BlockNode.id` of a block whose lines sit inside a list
+    /// item's own line range: a nested list, a quote, a code fence, a second
+    /// paragraph. `md.block` keeps naming the owning item, so focus, reparse and
+    /// painted-block reveal all see one block exactly as before; the decoration
+    /// layer scopes the nested block's chrome (bullet, quote bar, code background)
+    /// to the lines that carry this key instead.
+    static let subBlock = NSAttributedString.Key("md.subBlock")
+
     /// Reads the hidden flag at `location` in an O(1)-amortised way.
     static func isHidden(_ storage: NSTextStorage, at location: Int) -> Bool {
         guard location >= 0, location < storage.length else { return false }

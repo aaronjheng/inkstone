@@ -806,7 +806,8 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     /// The command rides on the item's `representedObject` rather than needing a
     /// selector per row: adding a command is then a `MenuBuilder` line and a
     /// `FormatController` case, not three files.
-    @objc func applyFormatting(_ sender: Any?) {        guard let item = sender as? NSMenuItem,
+    @objc func applyFormatting(_ sender: Any?) {
+        guard let item = sender as? NSMenuItem,
             let raw = item.representedObject as? String,
             let action = FormatAction(rawValue: raw)
         else { return }

@@ -559,9 +559,13 @@ enum FormatController {
         let separator: String
         if tail.isEmpty {
             separator = "\n\n"
-        } else if tail.hasSuffix("\n\n") { separator = "" } else if tail.hasSuffix("\n") {
+        } else if tail.hasSuffix("\n\n") {
+            separator = ""
+        } else if tail.hasSuffix("\n") {
             separator = "\n"
-        } else { separator = "\n\n" }
+        } else {
+            separator = "\n\n"
+        }
         let ref = "[^\(number)]"
         return Edit(
             range: NSRange(location: location, length: ns.length - location),

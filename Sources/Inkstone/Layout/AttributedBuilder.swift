@@ -221,7 +221,9 @@ struct AttributedBuilder {
                     )
                 }
             case .list:
-                appendList(block, into: result, depth: depth)
+                // build() already emitted the block separator, so the list's first
+                // line is preceded.
+                appendList(block, into: result, depth: depth, firstLinePreceded: true)
             case .listItem, .taskItem:
                 appendListItem(block, into: result, depth: depth)
             case .fences:
@@ -316,96 +318,125 @@ struct AttributedBuilder {
             )
         }
 
-        private func appendList(_ block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
-            // The separator between two items is whatever the source had there - one
-            // newline normally, two when a blank line separated them. The parser keeps
-            // such a pair in one list block, so emitting a fixed single newline lost the
-            // blank line. Each item's own text still comes from its child nodes, so
-            // inline styling inside items is preserved.
-            var cursor = block.source.startIndex
+        private func appendList(
+            _ block: BlockNode, into result: NSMutableAttributedString, depth: Int,
+            raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false
+        ) {
+            // The parser strips each item's container indentation before parsing it,
+            // so children know their own lines but not the whitespace that preceded
+            // them in the file. `raw` hands those lines back: one per line of the
+            // list's own source, byte-identical to the file. At the top level the
+            // list's source lines *are* the raw lines.
+            let sourceLines = block.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            let rawLines = raw ?? sourceLines
+            guard !block.children.isEmpty else {
+                if !firstLinePreceded { result.append(NSAttributedString(string: "\n")) }
+                emitPlain(
+                    rawLines.joined(separator: "\n"), into: result,
+                    style: BlockStyle.paragraph(theme: theme),
+                    block: owner ?? block, depth: depth
+                )
+                return
+            }
+            // The list owns the breaks before its lines: `beginLine` emits one before
+            // every line except the very first when `firstLinePreceded` says that line
+            // continues the caller's (a nested list that opens on its item's marker
+            // line); the top-level call is preceded by build()'s block separator.
+            var pendingFirstLine = true
+            func beginLine() {
+                if !(pendingFirstLine && firstLinePreceded) {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                pendingFirstLine = false
+            }
+            var lineCursor = 0
+            // The list's own leading blank lines - its leading text when it sits as a
+            // child inside an item - come out first; handing them to the first item's
+            // slice would desynchronise the item's pairing and drop bytes.
+            while lineCursor < rawLines.count, isBlankLine(rawLines[lineCursor]) {
+                beginLine()
+                result.append(NSAttributedString(string: rawLines[lineCursor]))
+                lineCursor += 1
+            }
             for (index, item) in block.children.enumerated() {
+                // The blank lines between two items reach the buffer verbatim. This
+                // used to be `itemSeparator`, reading the same lines out of the
+                // list's source; walking the raw lines instead also covers the tail
+                // after the last item, which the old loop dropped - a blank line
+                // between two lists of different flavours lands *inside* the first
+                // list's source slice, and dropping it merged the lists on save.
                 if index > 0 {
-                    let separator = itemSeparator(in: block.source, from: cursor)
-                    if !separator.isEmpty {
-                        result.append(NSAttributedString(string: separator))
+                    while lineCursor < rawLines.count, isBlankLine(rawLines[lineCursor]) {
+                        beginLine()
+                        result.append(NSAttributedString(string: rawLines[lineCursor]))
+                        lineCursor += 1
                     }
                 }
-                if let found = block.source.range(of: item.source, range: cursor..<block.source.endIndex) {
-                    cursor = found.upperBound
-                }
+                let itemLines = (item.leadingText + item.source)
+                    .split(separator: "\n", omittingEmptySubsequences: false).count
+                let sliceEnd = min(lineCursor + itemLines, rawLines.count)
+                guard sliceEnd > lineCursor else { break }
+                beginLine()
                 appendListItem(
                     item, into: result, depth: depth,
-                    parentIsOrdered: block.attributes.isOrdered, position: index + 1
+                    parentIsOrdered: block.attributes.isOrdered,
+                    raw: Array(rawLines[lineCursor..<sliceEnd]), owner: owner,
+                    // The break before the item's first line is beginLine's; the item
+                    // starts straight into its marker.
+                    firstLinePreceded: true
                 )
+                lineCursor = sliceEnd
             }
-            if block.children.isEmpty {
-                emitPlain(
-                    block.source, into: result, style: BlockStyle.paragraph(theme: theme),
-                    block: block, depth: depth
-                )
+            // Whatever the items did not consume still belongs to the buffer.
+            for line in rawLines[lineCursor...] {
+                beginLine()
+                result.append(NSAttributedString(string: line))
             }
-        }
-
-        /// The text between two list items: line breaks, and the whole of any *blank*
-        /// line between them.
-        ///
-        /// It must stop at the indentation of the next content line, because that
-        /// indentation is part of the next item's own source. Taking the whole
-        /// whitespace run duplicated it, so ` * one` / ` * two` came back as
-        /// ` * one` / `  * two` - one byte of drift per item, which is the kind of bug
-        /// that only shows up as a corrupted save.
-        private func itemSeparator(in source: String, from cursor: String.Index) -> String {
-            var out = ""
-            var index = cursor
-            while index < source.endIndex {
-                let character = source[index]
-                if character == "\n" {
-                    out.append(character)
-                    index = source.index(after: index)
-                    continue
-                }
-                if character == " " || character == "\t" || character == "\r" {
-                    // Consume the run, then keep it only if the line it sits on is blank.
-                    var scan = index
-                    while scan < source.endIndex,
-                        source[scan] == " " || source[scan] == "\t" || source[scan] == "\r"
-                    {
-                        scan = source.index(after: scan)
-                    }
-                    if scan < source.endIndex, source[scan] == "\n" {
-                        out += source[index..<scan]
-                        out.append("\n")
-                        index = source.index(after: scan)
-                        continue
-                    }
-                    break
-                }
-                break
-            }
-            return out
         }
 
         private func appendListItem(
             _ block: BlockNode, into result: NSMutableAttributedString, depth: Int,
-            parentIsOrdered: Bool? = nil, position: Int = 1
+            parentIsOrdered: Bool? = nil,
+            raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false
         ) {
-            guard let first = block.children.first else {
+            let sourceLines = block.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            let rawLines = raw ?? sourceLines
+            // The item's lines keep `md.block` pointing at the enclosing item the
+            // editor already tracks - focus, reparse and painted-block reveal see one
+            // block, exactly as before. Nested children only add `md.subBlock`.
+            let visualBlock = owner ?? block
+            let selfSubBlock: Int? = visualBlock.id == block.id ? nil : block.id
+            let savedBlockOverride = renderedBlockOverride
+            let savedSubBlock = renderedSubBlock
+            renderedBlockOverride = visualBlock
+            renderedSubBlock = selfSubBlock
+            defer {
+                renderedBlockOverride = savedBlockOverride
+                renderedSubBlock = savedSubBlock
+            }
+
+            guard let first = block.children.first, !sourceLines.isEmpty else {
+                // An item with no children - `- ` alone - has no structure to render.
+                if !firstLinePreceded { result.append(NSAttributedString(string: "\n")) }
                 emitPlain(
-                    block.source, into: result, style: BlockStyle.paragraph(theme: theme),
-                    block: block, depth: depth
+                    rawLines.joined(separator: "\n"), into: result,
+                    style: BlockStyle.paragraph(theme: theme), block: visualBlock, depth: depth
                 )
                 return
             }
             let ordered = parentIsOrdered ?? block.attributes.isOrdered
             let marker: String
             if let checked = block.attributes.checked {
-                marker = checked ? "x" : " "
+                // Drawn text only - the buffer keeps the source's `- [x] ` bytes, and
+                // the decoration right-aligns the glyph against the text column, so
+                // no trailing space here: it would widen the marker-to-text gap.
+                marker = checked ? "x" : ""
             } else if ordered {
-                marker = "\(block.attributes.listStart > 0 ? block.attributes.listStart : 1). "
+                marker = "\(block.attributes.listStart > 0 ? block.attributes.listStart : 1)."
             } else {
                 // The theme's own bullet, not the source's `-`/`*`: every Typora
                 // theme normalises the marker through `list-style-type`.
-                marker = "\(theme.listBullet) "
+                marker = String(theme.listBullet)
             }
             let style: BlockStyle
             if block.attributes.checked != nil {
@@ -418,6 +449,23 @@ struct AttributedBuilder {
                 )
             }
             register(style.decoration, for: block.id)
+            // The item's text column: where the first line's content starts, and
+            // where continuation content below aligns.
+            let textColumn = theme.listIndent * CGFloat(max(depth + 1, 1))
+            // The item's paragraph style without the marker decoration, for lines
+            // that render inside the item but carry no marker of their own.
+            let continuationStyle = BlockStyle(
+                font: style.font,
+                textColor: style.textColor,
+                base: [
+                    .paragraphStyle: style.base[.paragraphStyle]
+                        ?? NSParagraphStyle.markdownBody(
+                            lineHeight: theme.bodyLineHeight * theme.bodyFontSize
+                        )
+                ],
+                decoration: []
+            )
+
             // The list marker is the block's own source prefix; hide it and let the
             // decoration layer draw the bullet or number.
             //
@@ -426,63 +474,555 @@ struct AttributedBuilder {
             // source rather than from `marker` - otherwise the `. ` was counted twice
             // and the buffer no longer matched. The content below is then taken from
             // the same source prefix so the two agree.
-            let sourceMarkerLength = markerPrefixLength(of: block.source, ordered: ordered)
-            let markerText = String(block.source.prefix(sourceMarkerLength))
+            //
+            // An item parsed at the list level keeps its own indentation in `source`
+            // (`  - [x] done`); the marker length is measured on that line, and the
+            // container's own prefix is whatever the raw line adds ahead of it.
+            let sourceFirstLine = sourceLines[0]
+            let rawFirstLine = rawLines[0]
+            // The raw line must end with the source line; the parser only ever strips
+            // a prefix, but the buffer may never lose bytes, so an unexpected shape
+            // falls back to verbatim text.
+            let paired = rawFirstLine.hasSuffix(sourceFirstLine)
+            if !paired {
+                if !firstLinePreceded { result.append(NSAttributedString(string: "\n")) }
+                emitPlain(
+                    rawLines.joined(separator: "\n"), into: result,
+                    style: style, block: visualBlock, depth: depth + 1
+                )
+                return
+            }
+            let containerPrefix = String(
+                rawFirstLine.dropLast(sourceFirstLine.utf16.count)
+            )
+            let sourceMarkerLength = markerPrefixLength(of: sourceFirstLine, ordered: ordered)
+            let markerText = String(sourceFirstLine.prefix(sourceMarkerLength))
+            if !firstLinePreceded { result.append(NSAttributedString(string: "\n")) }
+            // The container indentation is hidden so the paragraph style alone places
+            // the text; the marker run then carries the line, and TextKit reads the
+            // line's paragraph geometry from it (the marker's own style, not the
+            // generic `blockMarkerStyle`, which only knows depth one).
+            if !containerPrefix.isEmpty {
+                emitHidden(
+                    containerPrefix, into: result, style: style, block: visualBlock, depth: depth + 1
+                )
+            }
+            let markerStyle = BlockStyle.collapsed(from: style, theme: theme)
+            // The marker occurrence is recorded under the item itself, so the
+            // decoration layer can find the one line that carries it: the item's
+            // marker draws exactly there, never on nested or wrapped lines. The run
+            // attributes still come from the visual block through the override.
             if ordered && block.attributes.checked == nil {
                 // Ordered numbers are synthesised, so they must not be hidden and
                 // must not occupy the marker column twice: hide the source digits.
                 appendHiddenRun(
                     markerText, role: .orderedNumber, into: result,
-                    style: BlockStyle.collapsed(from: style, theme: theme), block: block, depth: depth
+                    style: markerStyle, block: block, depth: depth,
+                    paragraphStyle: style.base[.paragraphStyle] as? NSParagraphStyle
                 )
             } else {
                 appendHiddenRun(
                     markerText, role: .bullet, into: result,
-                    style: BlockStyle.collapsed(from: style, theme: theme), block: block, depth: depth
+                    style: markerStyle, block: block, depth: depth,
+                    paragraphStyle: style.base[.paragraphStyle] as? NSParagraphStyle
                 )
             }
-            // The rest of the first line is the item's inline content, and it comes
-            // from the child node so it keeps its inline styling.
-            let remainder = String(block.source.dropFirst(markerText.utf16.count))
-            let (firstLine, followingLines) = splitFirstLine(remainder)
-            // The child node's inlines are used only when they are *exactly* the item's
-            // first line. Two cases where they are not, and where using them anyway
-            // duplicated text:
-            //
-            //   * an ordered or task marker runs past the bullet, so the node's text
-            //     still holds `. ` / `[x] ` - which came back as a shortcut link;
-            //   * the node spans several lines (a nested list, an attribute block after
-            //     `* Outline`), and the continuation below re-emits those lines.
-            //
-            // Falling back to the source loses inline styling in those two cases, which
-            // is the trade this design makes everywhere else in the layout pass.
-            let markerRunsPastBullet = ordered || block.attributes.checked != nil
-            if !markerRunsPastBullet, first.inlines.verbatim == firstLine {
-                emit(inlines: first.inlines, into: result, style: style, block: block, depth: depth)
-            } else {
-                emitPlain(
-                    firstLine, into: result, style: style, block: block, depth: depth
+            // The rest of the first line is the item's inline content.
+            let line0Rest = String(sourceFirstLine.dropFirst(sourceMarkerLength))
+            // The child node's inlines render the first line when they are *exactly*
+            // the item's first line. Ordered and task markers run past the bullet
+            // (`. `, `[x] `) and the parser leaves those in the child's text, so
+            // `trimmedFirstInlines` strips them before the comparison - that is what
+            // lets ordered and task items keep their inline styling.
+            let trimmed = trimmedFirstInlines(first.inlines, block: block)
+            var line0Handled = false
+            if first.kind == .paragraph, !line0Rest.isEmpty,
+                let trimmed, trimmed.verbatim == line0Rest
+            {
+                // Inline nodes stay attributed to the item, as everywhere else in
+                // the item's own line range; the paragraph style comes from the
+                // item, whose indentation the marker run already carries.
+                plainCursor = 0
+                emit(
+                    inlines: trimmed, into: result, style: style,
+                    block: visualBlock, depth: depth + 1
                 )
+                line0Handled = true
+            } else if first.kind == .paragraph {
+                emitPlain(
+                    line0Rest, into: result, style: style, block: visualBlock, depth: depth + 1
+                )
+                line0Handled = true
             }
 
-            // Continuation lines - a wrapped item, or a nested list - are emitted from
-            // the item's own source and the nested children are *not* visited. A
-            // child's source does not carry the indentation (`- a` where the parent
-            // line is `  - a`), so emitting both produced every nested item twice.
-            //
-            // The cost is that a nested item renders as its literal source line, with
-            // no drawn bullet and no inline styling inside it.
-            if !followingLines.isEmpty {
-                let continuationStyle = BlockStyle.paragraph(theme: theme)
+            // Everything after the first line is the item's remaining children. Each
+            // child's lines are a contiguous run of the item's own lines - the parser
+            // hands every blank line between children to the next child's leading
+            // text - so the walk slices the raw lines by the children's line counts.
+            // The first child usually also owns line 0; when the paragraph path above
+            // already emitted it, the walk starts one line in.
+            var lineCursor = 1
+            for (index, child) in block.children.enumerated() {
+                let childLines = (child.leadingText + child.source)
+                    .split(separator: "\n", omittingEmptySubsequences: false).count
+                let ownsLine0 = index == 0 && !line0Handled
+                // When the marker path above already emitted line 0, the first
+                // child's own line 0 went out with it: only its remaining lines are
+                // left to emit.
+                let alreadyEmitted = index == 0 && line0Handled
+                let start = ownsLine0 ? 0 : lineCursor
+                let end = min(start + childLines - (alreadyEmitted ? 1 : 0), rawLines.count)
+                guard end > start else { continue }
+                var slice = Array(rawLines[start..<end])
+                if ownsLine0 {
+                    // The marker half of line 0 is already in the buffer.
+                    slice[0] = line0Rest
+                }
+                emitChildContent(
+                    child, slice, into: result, depth: depth + 1,
+                    owner: visualBlock, textColumn: textColumn,
+                    continuationStyle: continuationStyle,
+                    firstLinePreceded: ownsLine0
+                )
+                lineCursor = end
+            }
+            // Lines no child claimed are still bytes in the file.
+            while lineCursor < rawLines.count {
                 result.append(NSAttributedString(string: "\n"))
-                let lines = followingLines.split(separator: "\n", omittingEmptySubsequences: false)
-                for (index, line) in lines.enumerated() {
-                    if index > 0 { result.append(NSAttributedString(string: "\n")) }
-                    emitPlain(
-                        String(line), into: result, style: continuationStyle,
-                        block: block, depth: depth
+                let (indent, rest) = splitIndent(rawLines[lineCursor])
+                emitHidden(
+                    indent, into: result, style: continuationStyle,
+                    block: visualBlock, depth: depth + 1
+                )
+                emitPlain(
+                    rest, into: result, style: continuationStyle,
+                    block: visualBlock, depth: depth + 1
+                )
+                lineCursor += 1
+            }
+        }
+
+        /// Emits one nested child of a list item from its raw lines.
+        ///
+        /// `raw` holds one line per line of the child's own source, with the
+        /// container indentation the parser stripped put back. The child's runs carry
+        /// the owning item's `md.block` plus the child's `md.subBlock`, so the
+        /// decoration layer scopes its chrome (bullets, quote bars, code background)
+        /// to exactly these lines.
+        private func emitChildContent(
+            _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
+            depth: Int, owner: BlockNode, textColumn: CGFloat,
+            continuationStyle: BlockStyle, firstLinePreceded: Bool
+        ) {
+            let savedBlockOverride = renderedBlockOverride
+            let savedSubBlock = renderedSubBlock
+            renderedBlockOverride = owner
+            renderedSubBlock = child.id
+            defer {
+                renderedBlockOverride = savedBlockOverride
+                renderedSubBlock = savedSubBlock
+            }
+
+            // Containers emit their whole slice themselves.
+            switch child.kind {
+            case .list:
+                appendList(
+                    child, into: result, depth: depth, raw: raw, owner: owner,
+                    firstLinePreceded: firstLinePreceded
+                )
+                return
+            case .listItem, .taskItem:
+                appendListItem(
+                    child, into: result, depth: depth, raw: raw, owner: owner,
+                    firstLinePreceded: firstLinePreceded
+                )
+                return
+            default:
+                break
+            }
+
+            switch child.kind {
+            case .paragraph:
+                emitParagraphLines(
+                    child, raw, into: result, depth: depth, style: continuationStyle,
+                    firstLinePreceded: firstLinePreceded
+                )
+            case .blockquote:
+                let quoteStyle = BlockStyle(
+                    font: continuationStyle.font,
+                    textColor: continuationStyle.textColor,
+                    base: [
+                        .paragraphStyle: NSParagraphStyle.markdownQuote(
+                            indent: textColumn + theme.quoteIndent,
+                            lineHeight: theme.bodyLineHeight * theme.bodyFontSize
+                        )
+                    ],
+                    decoration: []
+                )
+                var plans = [
+                    DecorationPlan.quoteBar(
+                        color: theme.quoteBar.nsColor,
+                        width: theme.quoteBarWidth,
+                        inset: theme.quoteIndent
+                    )
+                ]
+                if let alert = child.attributes.alert {
+                    plans.append(
+                        .alertBox(
+                            title: alert.rawValue.capitalized,
+                            background: theme.alertBackground.nsColor,
+                            border: theme.alertBorder.nsColor
+                        )
                     )
                 }
+                register(plans, for: child.id)
+                emitQuoteLines(
+                    raw, into: result, depth: depth, block: child,
+                    style: quoteStyle, firstLinePreceded: firstLinePreceded
+                )
+            case .fences:
+                let base = BlockStyle.codeFence(theme: theme)
+                let codeStyle = BlockStyle(
+                    font: base.font,
+                    textColor: base.textColor,
+                    base: [
+                        .paragraphStyle: NSParagraphStyle.withHeadIndents(
+                            base.base[.paragraphStyle] as? NSParagraphStyle,
+                            indent: textColumn + (theme.codePaddingLeft ?? theme.codePadding)
+                        )
+                    ],
+                    decoration: []
+                )
+                register(
+                    [
+                        .codeBlock(
+                            background: theme.codeBlockBackground.nsColor,
+                            radius: EditorMetrics.radiusSmall
+                        )
+                    ],
+                    for: child.id
+                )
+                emitFenceLines(
+                    child, raw, into: result, depth: depth, block: owner,
+                    style: codeStyle, firstLinePreceded: firstLinePreceded
+                )
+            case .heading where child.attributes.isSetext:
+                emitPlainLines(
+                    raw, into: result, depth: depth, style: continuationStyle,
+                    block: owner, firstLinePreceded: firstLinePreceded
+                )
+            case .heading:
+                let heading = BlockStyle.heading(theme: theme, level: child.attributes.level)
+                let headingStyle = BlockStyle(
+                    font: heading.font,
+                    textColor: heading.textColor,
+                    base: [
+                        .paragraphStyle: NSParagraphStyle.withHeadIndents(
+                            heading.base[.paragraphStyle] as? NSParagraphStyle,
+                            indent: textColumn
+                        )
+                    ],
+                    decoration: heading.decoration
+                )
+                register(heading.decoration, for: child.id)
+                emitHeadingLines(
+                    child, raw, into: result, depth: depth, style: headingStyle,
+                    firstLinePreceded: firstLinePreceded
+                )
+            case .indentedCode:
+                let base = BlockStyle.codeFence(theme: theme)
+                let codeStyle = BlockStyle(
+                    font: base.font,
+                    textColor: base.textColor,
+                    base: [
+                        .paragraphStyle: NSParagraphStyle.withHeadIndents(
+                            base.base[.paragraphStyle] as? NSParagraphStyle,
+                            indent: textColumn + (theme.codePaddingLeft ?? theme.codePadding)
+                        )
+                    ],
+                    decoration: []
+                )
+                emitPlainLines(
+                    raw, into: result, depth: depth, style: codeStyle, block: owner,
+                    firstLinePreceded: firstLinePreceded
+                )
+            case .hr:
+                register(
+                    [.horizontalRule(color: theme.rule.nsColor, height: 2)], for: child.id
+                )
+                emitHiddenLines(
+                    raw, into: result, depth: depth, block: owner,
+                    style: BlockStyle.horizontalRule(theme: theme),
+                    firstLinePreceded: firstLinePreceded
+                )
+            case .htmlBlock:
+                register(
+                    [
+                        .codeBlock(
+                            background: theme.rawBlockEditingBackground.nsColor,
+                            radius: EditorMetrics.radiusSmall
+                        )
+                    ],
+                    for: child.id
+                )
+                emitPlainLines(
+                    raw, into: result, depth: depth, style: BlockStyle.htmlBlock(theme: theme),
+                    block: owner, firstLinePreceded: firstLinePreceded
+                )
+            case .mathBlock:
+                emitMathLines(
+                    child, raw, into: result, depth: depth,
+                    style: BlockStyle.mathBlock(theme: theme),
+                    firstLinePreceded: firstLinePreceded
+                )
+            default:
+                // Tables, definitions and the like inside a list item are rare; they
+                // read as their own source lines, byte-exact but unpainted.
+                emitPlainLines(
+                    raw, into: result, depth: depth, style: continuationStyle, block: owner,
+                    firstLinePreceded: firstLinePreceded
+                )
+            }
+        }
+
+        // MARK: Raw-line emission, shared by the list item's children
+
+        /// One raw line: hidden container indentation, then the line's own content.
+        private func emitRawLine(
+            _ rawLine: String, into result: NSMutableAttributedString, depth: Int,
+            style: BlockStyle, block: BlockNode,
+            content: (String) -> Void
+        ) {
+            let (indent, rest) = splitIndent(rawLine)
+            if !indent.isEmpty {
+                emitHidden(indent, into: result, style: style, block: block, depth: depth)
+            }
+            content(rest)
+        }
+
+        /// Body lines: hidden indent, then the line as plain text. A single-line
+        /// child renders from its inline nodes instead, which keeps inline styling
+        /// and links find/replace's plain-text mapping for the paragraph.
+        private func emitParagraphLines(
+            _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
+            depth: Int, style: BlockStyle, firstLinePreceded: Bool
+        ) {
+            if raw.count == 1, !isBlankLine(raw[0]),
+                child.inlines.verbatim == splitIndent(raw[0]).rest
+            {
+                for (index, rawLine) in raw.enumerated() {
+                    if index > 0 || !firstLinePreceded {
+                        result.append(NSAttributedString(string: "\n"))
+                    }
+                    emitRawLine(rawLine, into: result, depth: depth, style: style, block: child) { _ in
+                        plainCursor = 0
+                        emit(
+                            inlines: child.inlines, into: result, style: style,
+                            block: child, depth: depth
+                        )
+                    }
+                }
+                return
+            }
+            emitPlainLines(
+                raw, into: result, depth: depth, style: style, block: child,
+                firstLinePreceded: firstLinePreceded
+            )
+        }
+
+        /// Body lines: hidden indent, then the line as plain text.
+        private func emitPlainLines(
+            _ raw: [String], into result: NSMutableAttributedString, depth: Int,
+            style: BlockStyle, block: BlockNode, firstLinePreceded: Bool
+        ) {
+            for (index, rawLine) in raw.enumerated() {
+                if index > 0 || !firstLinePreceded {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                if isBlankLine(rawLine) {
+                    result.append(NSAttributedString(string: rawLine))
+                    continue
+                }
+                emitRawLine(rawLine, into: result, depth: depth, style: style, block: block) { rest in
+                    emitPlain(rest, into: result, style: style, block: block, depth: depth)
+                }
+            }
+        }
+
+        /// Quote lines: hidden indent and `> ` markers, then the quoted text.
+        private func emitQuoteLines(
+            _ raw: [String], into result: NSMutableAttributedString, depth: Int,
+            block: BlockNode, style: BlockStyle, firstLinePreceded: Bool
+        ) {
+            for (index, rawLine) in raw.enumerated() {
+                if index > 0 || !firstLinePreceded {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                if isBlankLine(rawLine) {
+                    result.append(NSAttributedString(string: rawLine))
+                    continue
+                }
+                emitRawLine(rawLine, into: result, depth: depth, style: style, block: block) { rest in
+                    var markerLength = 0
+                    for character in rest {
+                        if character == ">" { markerLength += 1 } else { break }
+                    }
+                    if markerLength > 0, markerLength < rest.count,
+                        rest[rest.index(rest.startIndex, offsetBy: markerLength)] == " "
+                    {
+                        markerLength += 1
+                    }
+                    if markerLength > 0 {
+                        appendHiddenRun(
+                            String(rest.prefix(markerLength)), role: .quoteMark, into: result,
+                            style: BlockStyle.collapsed(from: style, theme: theme),
+                            block: block, depth: depth
+                        )
+                    }
+                    emitPlain(
+                        String(rest.dropFirst(markerLength)), into: result,
+                        style: style, block: block, depth: depth
+                    )
+                }
+            }
+        }
+
+        /// Fence lines: delimiters and body hidden/plain like the top-level emitter,
+        /// with the container indentation hidden ahead of each line.
+        private func emitFenceLines(
+            _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
+            depth: Int, block: BlockNode, style: BlockStyle, firstLinePreceded: Bool
+        ) {
+            let collapsed = BlockStyle.collapsed(from: style, theme: theme)
+            let lines = child.source.split(separator: "\n", omittingEmptySubsequences: false)
+                .map(String.init)
+            func isFenceLine(_ line: String) -> Bool {
+                let (_, rest) = splitIndent(line)
+                return Fence.opening(in: rest, baseIndent: 0) != nil
+                    || Fence.closing(rest, for: child.opening) != nil
+            }
+            // The body the highlighter runs over is the child's own (stripped) text
+            // minus the fence rows, exactly like the top-level emitter's.
+            let bodyText = zip(lines, raw)
+                .filter { !isFenceLine($0.1) }
+                .map { $0.0 }
+                .joined(separator: "\n")
+            let highlights = CodeHighlighter.shared.highlights(
+                in: bodyText, language: child.attributes.language
+            )
+            var highlightCursor = 0
+            var bodyOffset = 0
+            for (index, rawLine) in raw.enumerated() {
+                if index > 0 || !firstLinePreceded {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                let (indent, rest) = splitIndent(rawLine)
+                if !indent.isEmpty {
+                    emitHidden(
+                        indent, into: result, style: style, block: block, depth: depth
+                    )
+                }
+                if isFenceLine(rawLine) {
+                    appendHiddenRun(
+                        rest, role: .fenceDelimiter, into: result,
+                        style: collapsed, block: block, depth: depth
+                    )
+                    continue
+                }
+                let start = result.length
+                emitPlain(
+                    rest, into: result, style: style, block: block, depth: depth
+                )
+                let lineRange = NSRange(location: start, length: result.length - start)
+                result.addAttribute(
+                    .foregroundColor, value: theme.syntax.plain.nsColor, range: lineRange
+                )
+                applyHighlights(
+                    highlights, from: &highlightCursor,
+                    line: NSRange(location: bodyOffset, length: rest.utf16.count),
+                    shift: start - bodyOffset, into: result
+                )
+                bodyOffset += rest.utf16.count + 1
+            }
+        }
+
+        /// ATX headings inside items: hidden indent and hashes, inline content.
+        private func emitHeadingLines(
+            _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
+            depth: Int, style: BlockStyle, firstLinePreceded: Bool
+        ) {
+            for (index, rawLine) in raw.enumerated() {
+                if index > 0 || !firstLinePreceded {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                emitRawLine(rawLine, into: result, depth: depth, style: style, block: child) { rest in
+                    let hashes = rest.prefix { $0 == "#" }
+                    let afterHashes = rest.dropFirst(hashes.count)
+                    let spacing = afterHashes.prefix { $0 == " " || $0 == "\t" }
+                    let markerLength = hashes.count + spacing.count
+                    if markerLength > 0 {
+                        appendHiddenRun(
+                            String(rest.prefix(markerLength)), role: .headingHash, into: result,
+                            style: BlockStyle.collapsed(from: style, theme: theme),
+                            block: child, depth: depth
+                        )
+                    }
+                    let text = String(rest.dropFirst(markerLength))
+                    if child.inlines.verbatim == text {
+                        emit(
+                            inlines: child.inlines, into: result, style: style,
+                            block: child, depth: depth
+                        )
+                    } else {
+                        emitPlain(text, into: result, style: style, block: child, depth: depth)
+                    }
+                }
+            }
+        }
+
+        /// Math blocks inside items: delimiters hidden, body plain.
+        private func emitMathLines(
+            _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
+            depth: Int, style: BlockStyle, firstLinePreceded: Bool
+        ) {
+            let collapsed = BlockStyle.collapsed(from: style, theme: theme)
+            for (index, rawLine) in raw.enumerated() {
+                if index > 0 || !firstLinePreceded {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                if isBlankLine(rawLine) {
+                    result.append(NSAttributedString(string: rawLine))
+                    continue
+                }
+                let trimmed = rawLine.trimmingInlineWhitespace()
+                let isDelimiter =
+                    (index == 0 && trimmed.hasPrefix(child.attributes.mathOpen))
+                    || (index == raw.count - 1 && trimmed.hasPrefix(child.attributes.mathClose))
+                emitRawLine(rawLine, into: result, depth: depth, style: style, block: child) { rest in
+                    if isDelimiter {
+                        appendHiddenRun(
+                            rest, role: .mathDelimiter, into: result,
+                            style: collapsed, block: child, depth: depth
+                        )
+                    } else {
+                        emitPlain(rest, into: result, style: style, block: child, depth: depth)
+                    }
+                }
+            }
+        }
+
+        /// Fully hidden lines (a horizontal rule inside an item).
+        private func emitHiddenLines(
+            _ raw: [String], into result: NSMutableAttributedString, depth: Int,
+            block: BlockNode, style: BlockStyle, firstLinePreceded: Bool
+        ) {
+            for (index, rawLine) in raw.enumerated() {
+                if index > 0 || !firstLinePreceded {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                emitHidden(
+                    rawLine, into: result, style: style, block: block, depth: depth
+                )
             }
         }
 
@@ -821,6 +1361,13 @@ struct AttributedBuilder {
         /// The paragraph style hidden markers must inherit, set for the duration of a
         /// block's emission.
         private var blockMarkerStyle: NSParagraphStyle?
+        /// While a list item's nested children are being emitted, their runs still
+        /// carry the ITEM's `md.block` - focus, reparse and painted-block reveal see
+        /// one block, exactly as before - and the child's `md.subBlock` scopes the
+        /// decoration layer's chrome. `blockAttributes` folds both in; set for the
+        /// duration of a child's (or nested item's) emission.
+        private var renderedBlockOverride: BlockNode?
+        private var renderedSubBlock: Int?
         /// Whether the next emitted line is the *first* line of a block.
         ///
         /// TextKit makes every newline in the buffer a paragraph, so a soft line break
@@ -1253,15 +1800,20 @@ struct AttributedBuilder {
         /// Emits a run that carries no visible width.
         private func appendHiddenRun(
             _ text: String, role: MarkerRole, into result: NSMutableAttributedString,
-            style: BlockStyle, block: BlockNode, depth: Int, inlineIndex: Int? = nil
+            style: BlockStyle, block: BlockNode, depth: Int, inlineIndex: Int? = nil,
+            paragraphStyle: NSParagraphStyle? = nil
         ) {
             guard !text.isEmpty else { return }
             let index = markers.count
             let range = NSRange(location: result.length, length: (text as NSString).length)
             var attributes = style.base
             // A marker shares its line with the block's text, so it must carry the
-            // block's paragraph style. See `BlockStyle.collapsed(from:theme:)`.
-            if let paragraph = blockMarkerStyle { attributes[.paragraphStyle] = paragraph }
+            // block's paragraph style. See `BlockStyle.collapsed(from:theme:)`. An
+            // explicit style wins: a nested list item's marker needs the item's own
+            // indentation, which the block-level default (depth one) cannot know.
+            if let paragraph = paragraphStyle ?? blockMarkerStyle {
+                attributes[.paragraphStyle] = paragraph
+            }
             attributes[.font] = style.font
             attributes[.foregroundColor] = style.textColor
             attributes[MarkdownAttribute.marker] = index
@@ -1299,12 +1851,17 @@ struct AttributedBuilder {
         }
 
         private func blockAttributes(_ block: BlockNode, depth: Int) -> [NSAttributedString.Key: Any] {
-            [
-                MarkdownAttribute.block: block.id,
-                MarkdownAttribute.blockKind: block.kind.rawValue,
+            // A nested child's runs keep the owning item's block identity; only the
+            // decoration scope (`md.subBlock`) is the child's own.
+            let visual = renderedBlockOverride ?? block
+            var attributes: [NSAttributedString.Key: Any] = [
+                MarkdownAttribute.block: visual.id,
+                MarkdownAttribute.blockKind: visual.kind.rawValue,
                 MarkdownAttribute.blockDepth: depth,
-                MarkdownAttribute.rawBlock: block.kind.isAttachmentRendered,
+                MarkdownAttribute.rawBlock: visual.kind.isAttachmentRendered,
             ]
+            if let renderedSubBlock { attributes[MarkdownAttribute.subBlock] = renderedSubBlock }
+            return attributes
         }
 
         private func emitHeadingMarkers(
@@ -1396,22 +1953,24 @@ struct AttributedBuilder {
         /// after it.
         private func markerPrefixLength(of source: String, ordered: Bool) -> Int {
             var index = source.startIndex
+            // An item parsed at the list level keeps its leading indentation in
+            // `source` (`  - [x] done`), so the whitespace must be skipped before the
+            // marker is measured - stopping at the first space hid only the indent
+            // and left the marker visible next to the drawn one.
+            while index < source.endIndex, source[index] == " " || source[index] == "\t" {
+                index = source.index(after: index)
+            }
             if ordered {
                 while index < source.endIndex, source[index].isNumber { index = source.index(after: index) }
                 if index < source.endIndex, source[index] == "." || source[index] == ")" {
                     index = source.index(after: index)
                 }
-            } else {
-                while index < source.endIndex, index < source.index(index, offsetBy: 1),
-                    !source[index].isWhitespace
-                {
-                    index = source.index(after: index)
-                }
+            } else if index < source.endIndex, !source[index].isWhitespace {
+                // The bullet: exactly one character.
+                index = source.index(after: index)
             }
-            var spaces = 0
             while index < source.endIndex, source[index] == " " || source[index] == "\t" {
                 index = source.index(after: index)
-                spaces += 1
             }
             // A task item's `[ ]` / `[x]` is part of the marker too: the decoration
             // layer draws the checkbox, so the source characters must be hidden.
@@ -1438,9 +1997,46 @@ struct AttributedBuilder {
             return source.distance(from: source.startIndex, to: index)
         }
 
-        private func splitFirstLine(_ text: String) -> (String, String) {
-            guard let newline = text.firstIndex(of: "\n") else { return (text, "") }
-            return (String(text[..<newline]), String(text[text.index(after: newline)...]))
+        // MARK: Raw-line helpers
+
+        private func isBlankLine(_ line: String) -> Bool {
+            line.allSatisfy { $0 == " " || $0 == "\t" || $0 == "\r" }
+        }
+
+        /// Splits a raw line into the container indentation the parser stripped and
+        /// the line's own content.
+        private func splitIndent(_ line: String) -> (prefix: String, rest: String) {
+            let prefix = line.prefix { $0 == " " || $0 == "\t" }
+            return (String(prefix), String(line.dropFirst(prefix.count)))
+        }
+
+        /// Trims the marker remainder an ordered or task item's parser leaves in its
+        /// first child's text - `. ` after the digits, `[x] ` after the flag - so the
+        /// item's first line can render from the child's inline nodes and keep its
+        /// styling. Returns nil when the trim cannot be made cleanly; the caller then
+        /// falls back to the source text.
+        private func trimmedFirstInlines(
+            _ inlines: [InlineNode], block: BlockNode
+        ) -> [InlineNode]? {
+            let checked = block.attributes.checked
+            guard checked != nil || block.attributes.isOrdered == true,
+                let first = inlines.first, first.kind == .text
+            else { return nil }
+            var node = first
+            if let checked {
+                guard ["[x] ", "[X] ", "[ ] "].contains(String(node.payload.prefix(4))) else {
+                    return nil
+                }
+                node.payload.removeFirst(4)
+            } else {
+                let delimiter = block.attributes.orderedDelimiter
+                guard node.payload.hasPrefix(String(delimiter)) else { return nil }
+                node.payload.removeFirst()
+                if node.payload.hasPrefix(" ") || node.payload.hasPrefix("\t") {
+                    node.payload.removeFirst()
+                }
+            }
+            return [node] + Array(inlines.dropFirst())
         }
     }
 }

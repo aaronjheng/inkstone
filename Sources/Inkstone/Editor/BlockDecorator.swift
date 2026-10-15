@@ -47,12 +47,29 @@ enum BlockDecorator {
                 view.textStorage?.attribute(
                     MarkdownAttribute.block, at: lineCharRange.location, effectiveRange: nil
                 ) as? Int
-            guard let blockID, let plans = layout.decorations[blockID], !plans.isEmpty else {
-                return
+            guard let blockID else { return }
+            // A nested block's lines - a list inside an item, a quote, a code fence -
+            // carry `md.subBlock`; its chrome is scoped by that id, while `md.block`
+            // still names the owning item. The plans merge so a line can carry both
+            // its own and its owner's chrome (an item's marker over its first line);
+            // each plan keeps its origin so the first-line guard tests the right
+            // scope.
+            let subBlockID =
+                view.textStorage?.attribute(
+                    MarkdownAttribute.subBlock, at: lineCharRange.location, effectiveRange: nil
+                ) as? Int
+            var plans: [(plan: DecorationPlan, subScoped: Bool)] = []
+            if let subBlockID, let nested = layout.decorations[subBlockID] {
+                plans += nested.map { ($0, true) }
             }
+            if let blockPlans = layout.decorations[blockID] {
+                plans += blockPlans.map { ($0, false) }
+            }
+            guard !plans.isEmpty else { return }
             paint(
                 plans, in: view, theme: theme, lineRect: lineRect,
-                lineCharRange: lineCharRange, layout: layout, blockID: blockID
+                lineCharRange: lineCharRange, layout: layout, blockID: blockID,
+                subBlockID: subBlockID
             )
             // Focus mode dims everything the caret is not in. A scrim rather than a
             // colour change: the glyphs are already generated and cached by TextKit,
@@ -70,8 +87,10 @@ enum BlockDecorator {
 
     @MainActor
     private static func paint(
-        _ plans: [DecorationPlan], in view: MarkdownTextView, theme: EditorTheme,
-        lineRect: NSRect, lineCharRange: NSRange, layout: LayoutOutput, blockID: Int
+        _ plans: [(plan: DecorationPlan, subScoped: Bool)], in view: MarkdownTextView,
+        theme: EditorTheme,
+        lineRect: NSRect, lineCharRange: NSRange, layout: LayoutOutput, blockID: Int,
+        subBlockID: Int? = nil
     ) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         // `lineFragmentRect` is in text-container coordinates while the graphics
@@ -80,7 +99,10 @@ enum BlockDecorator {
         // from the line it belonged to.
         let inset = view.textContainerInset
         let lineRect = lineRect.offsetBy(dx: inset.width, dy: inset.height)
-        for plan in plans {
+        for (plan, subScoped) in plans {
+            // Each plan's first-line guard tests its own scope: a block-owned plan
+            // (the item's marker) keys on `md.block`, a nested plan (a quote bar, a
+            // code background inside an item) on `md.subBlock`.
             switch plan {
             case let .headingRule(color):
                 // Under the heading, not across it: the text view is flipped, so the
@@ -103,19 +125,27 @@ enum BlockDecorator {
                 )
                 _ = inset
             case let .listMarker(text, width, alignment):
+                // The marker draws on the one line that contains its own marker run:
+                // never on a wrapped fragment, and never on the nested lines an item
+                // contains. A nested item's line 0 also merges its owner's plans; the
+                // owner's marker run sits on the owner's first line, not here, so the
+                // containment test filters it out.
+                guard markerIsOnLine(planOrigin: subScoped ? (subBlockID ?? blockID) : blockID, lineCharRange: lineCharRange, in: layout)
+                else { break }
                 drawMarker(
                     text, in: lineRect, width: width, alignment: alignment,
                     theme: theme, context: context)
             case let .taskCheckbox(checked, width):
                 // One box on the first line: without the guard every fragment
                 // of a wrapped item drew its own, while hit-testing only knows
-                // the first.
-                guard let start = blockStart(of: blockID, in: layout),
-                    lineCharRange.location == start
+                // the first. The first line is the one carrying the item's own
+                // marker run - see `.listMarker`.
+                guard markerIsOnLine(planOrigin: subScoped ? (subBlockID ?? blockID) : blockID, lineCharRange: lineCharRange, in: layout)
                 else { break }
                 let side: CGFloat = 12
+                // Right edge 4pt before the text column, like the drawn bullets.
                 let box = CGRect(
-                    x: lineRect.minX + width - side * 1.9,
+                    x: lineRect.minX + width - side - 4,
                     y: lineRect.midY - side / 2,
                     width: side, height: side
                 )
@@ -195,8 +225,11 @@ enum BlockDecorator {
                 guard isPainted(lineCharRange, in: view) else { break }
                 // Once per block, from its first line: a table is one object, and a
                 // line of all-zero-width glyphs is not a reliable place to count rows.
-                guard let start = blockStart(of: blockID, in: layout),
-                    lineCharRange.location == start
+                guard
+                    isBlockStart(
+                        lineCharRange, blockID: blockID, subBlockID: subBlockID,
+                        subScoped: subScoped, in: view
+                    )
                 else { break }
                 // The first fragment's rectangle carries the block margin at its top,
                 // above the glyphs. Painting from there offset every row by that
@@ -204,7 +237,7 @@ enum BlockDecorator {
                 // table and the bottom border hung below the last row.
                 let margin =
                     (view.textStorage?.attribute(
-                        .paragraphStyle, at: start, effectiveRange: nil
+                        .paragraphStyle, at: lineCharRange.location, effectiveRange: nil
                     ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
                 paintTable(
                     grid, top: lineRect.minY + margin, left: lineRect.minX,
@@ -213,20 +246,34 @@ enum BlockDecorator {
             case .emojiGlyph:
                 // Painted from the block's first line only; every fragment of
                 // the block would otherwise draw every glyph once each.
-                guard let start = blockStart(of: blockID, in: layout),
-                    lineCharRange.location == start
+                guard
+                    isBlockStart(
+                        lineCharRange, blockID: blockID, subBlockID: subBlockID,
+                        subScoped: subScoped, in: view
+                    )
                 else { break }
-                paintEmojiGlyphs(in: view, blockID: blockID, layout: layout, theme: theme)
+                // The emoji nodes live under the id the plan was registered with;
+                // match the other scope too, so an item's own first line paints the
+                // glyphs of both its marker scope and its inline content.
+                let originID = subScoped ? (subBlockID ?? blockID) : blockID
+                let otherID = subScoped ? blockID : subBlockID
+                paintEmojiGlyphs(
+                    in: view, blockID: originID, ownerID: otherID,
+                    layout: layout, theme: theme
+                )
             case let .frontMatterTable(front):
                 // Painted like a table: from the first line only, and skipped
                 // while focused, when the source is showing.
                 guard isPainted(lineCharRange, in: view) else { break }
-                guard let start = blockStart(of: blockID, in: layout),
-                    lineCharRange.location == start
+                guard
+                    isBlockStart(
+                        lineCharRange, blockID: blockID, subBlockID: subBlockID,
+                        subScoped: subScoped, in: view
+                    )
                 else { break }
                 let margin =
                     (view.textStorage?.attribute(
-                        .paragraphStyle, at: start, effectiveRange: nil
+                        .paragraphStyle, at: lineCharRange.location, effectiveRange: nil
                     ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
                 paintFrontMatter(
                     front, top: lineRect.minY + margin, left: lineRect.minX,
@@ -240,12 +287,15 @@ enum BlockDecorator {
                 // Painted like a table: only from the block's first line, and
                 // only while the block is not focused (focus reveals the source).
                 guard isPainted(lineCharRange, in: view) else { break }
-                guard let start = blockStart(of: blockID, in: layout),
-                    lineCharRange.location == start
+                guard
+                    isBlockStart(
+                        lineCharRange, blockID: blockID, subBlockID: subBlockID,
+                        subScoped: subScoped, in: view
+                    )
                 else { break }
                 let margin =
                     (view.textStorage?.attribute(
-                        .paragraphStyle, at: start, effectiveRange: nil
+                        .paragraphStyle, at: lineCharRange.location, effectiveRange: nil
                     ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
                 paintTOC(
                     entries, top: lineRect.minY + margin, left: lineRect.minX,
@@ -295,8 +345,42 @@ enum BlockDecorator {
         return nil
     }
 
-    private static func blockStart(of blockID: Int, in layout: LayoutOutput) -> Int? {
-        layout.blocks.first { $0.id == blockID }?.range.location
+    /// Whether the line fragment carries the item's visible content - the line the
+    /// marker belongs to.
+    ///
+    /// Hidden markers collapse to zero-width glyphs, and TextKit glues those onto
+    /// the *preceding* line fragment: the marker's own location sits in a fragment
+    /// above the text line, so its position cannot identify the line to draw on.
+    /// The first character *after* the marker run is the item's visible content;
+    /// the fragment containing it is the one the chrome belongs to.
+    private static func markerIsOnLine(
+        planOrigin: Int, lineCharRange: NSRange, in layout: LayoutOutput
+    ) -> Bool {
+        guard let marker = layout.markers.first(where: { $0.blockID == planOrigin }) else {
+            return false
+        }
+        return NSLocationInRange(NSMaxRange(marker.range), lineCharRange)
+    }
+
+    /// Whether this line fragment is the first of the block whose chrome is being
+    /// painted.
+    ///
+    /// The test is the character *before* the line, not a stored block range: list
+    /// items have no `BlockRange` of their own (only top-level blocks do), so a
+    /// range lookup cannot find them. A block-owned plan is first on the line whose
+    /// preceding character belongs to a different `md.block` - a bare newline
+    /// between blocks, or the previous block's text. A nested plan keys the same
+    /// way on `md.subBlock`.
+    @MainActor
+    private static func isBlockStart(
+        _ lineCharRange: NSRange, blockID: Int, subBlockID: Int?,
+        subScoped: Bool, in view: MarkdownTextView
+    ) -> Bool {
+        guard let storage = view.textStorage, lineCharRange.location > 0 else { return true }
+        let key = subScoped ? MarkdownAttribute.subBlock : MarkdownAttribute.block
+        let id = subScoped ? (subBlockID ?? blockID) : blockID
+        let previous = storage.attribute(key, at: lineCharRange.location - 1, effectiveRange: nil) as? Int
+        return previous != id
     }
 
     /// Paints a whole table, stacked down from `top`: header stripe, row separators,
@@ -425,13 +509,18 @@ enum BlockDecorator {
     /// near the container origin.
     @MainActor
     private static func paintEmojiGlyphs(
-        in view: MarkdownTextView, blockID: Int, layout: LayoutOutput, theme: EditorTheme
+        in view: MarkdownTextView, blockID: Int, ownerID: Int?,
+        layout: LayoutOutput, theme: EditorTheme
     ) {
         guard let manager = view.layoutManager, let container = view.textContainer,
             let storage = view.textStorage
         else { return }
         let inset = view.textContainerInset
-        for node in layout.inlineNodes where node.blockID == blockID && node.kind == .emoji {
+        // The plan may be registered under the nested child (a paragraph inside an
+        // item) or under the owning item (the item's own first line); match both so
+        // every emoji of the line's block paints.
+        for node in layout.inlineNodes
+        where node.kind == .emoji && (node.blockID == blockID || node.blockID == ownerID) {
             guard node.contentRange.length > 0,
                 NSMaxRange(node.contentRange) <= storage.length
             else { continue }

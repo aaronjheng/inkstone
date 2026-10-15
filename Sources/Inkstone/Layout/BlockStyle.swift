@@ -68,9 +68,8 @@ struct BlockStyle {
         let indent = theme.listIndent * CGFloat(max(depth, 1))
         style.base[.paragraphStyle] = NSParagraphStyle.markdownListItem(
             indent: indent,
-            // The marker column is the gap between the bullet and its text. the original's
-            // is about a fifth of the indent; 0.7 made the text sit twice as far out as
-            // the bullet, which is what made every list look adrift.
+            // Only feeds the paragraph style's tab stop now; the marker is drawn by
+            // the decoration layer right against the text column.
             markerWidth: max(theme.listIndent * 0.28, 14),
             lineHeight: theme.bodyLineHeight * theme.bodyFontSize,
             spacing: 0
@@ -89,9 +88,6 @@ struct BlockStyle {
         let indent = theme.listIndent * CGFloat(max(depth, 1))
         style.base[.paragraphStyle] = NSParagraphStyle.markdownListItem(
             indent: indent,
-            // The marker column is the gap between the bullet and its text. the original's
-            // is about a fifth of the indent; 0.7 made the text sit twice as far out as
-            // the bullet, which is what made every list look adrift.
             markerWidth: max(theme.listIndent * 0.28, 14),
             lineHeight: theme.bodyLineHeight * theme.bodyFontSize,
             spacing: 0
@@ -332,9 +328,13 @@ extension NSParagraphStyle {
         indent: CGFloat, markerWidth: CGFloat, lineHeight: CGFloat, spacing: CGFloat = 0
     ) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        // The bullet is drawn in the marker column, so the text starts past it.
+        // The marker glyphs are hidden (zero-width), and TextKit glues them into the
+        // *previous* line fragment - so the item's text line lays out as a
+        // continuation line and takes `headIndent`, not `firstLineHeadIndent`. Both
+        // sit on the text column: the marker is drawn by the decoration layer just
+        // left of it, which is what keeps the bullet-to-text gap small.
         style.firstLineHeadIndent = indent
-        style.headIndent = indent + markerWidth
+        style.headIndent = indent
         style.tabStops = [NSTextTab(textAlignment: .left, location: indent + markerWidth)]
         style.defaultTabInterval = markerWidth
         style.minimumLineHeight = lineHeight
@@ -354,6 +354,20 @@ extension NSParagraphStyle {
         // Code blocks honour explicit line breaks rather than reflowing.
         style.lineBreakMode = .byClipping
         return style
+    }
+
+    /// A copy of `style` with both head indents replaced, for content that nests
+    /// inside a list item and must align with the item's own text column.
+    static func withHeadIndents(_ style: NSParagraphStyle?, indent: CGFloat) -> NSParagraphStyle {
+        guard let style, let copy = style.mutableCopy() as? NSMutableParagraphStyle else {
+            let fresh = NSMutableParagraphStyle()
+            fresh.firstLineHeadIndent = indent
+            fresh.headIndent = indent
+            return fresh
+        }
+        copy.firstLineHeadIndent = indent
+        copy.headIndent = indent
+        return copy
     }
 
     /// A line whose entire content is replaced by a drawn decoration.

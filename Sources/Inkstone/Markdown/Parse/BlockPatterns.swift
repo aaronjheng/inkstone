@@ -410,7 +410,9 @@ enum ListItem {
             let flag = characters[contentStart + 1]
             taskState = flag == "x" || flag == "X"
             hasTaskMarker = true
-            contentStart += 4
+            // The checkbox is *content*, not marker: `contentColumn` stays where the
+            // item's text begins (CommonMark - and what makes
+            // `  - [x] 子任务` a child of `- [ ] 阶段一` instead of a sibling).
         }
 
         return Opening(
