@@ -17,6 +17,22 @@ updates:
     ignore:
       # swift-tree-sitter only allows tree-sitter < 0.26. Remove after upstream relaxes the constraint.
       - dependency-name: github.com/tree-sitter/tree-sitter
+      # These grammars are pinned with upToNextMinorVersion in the Xcode project, so
+      # Dependabot bumps past the ceiling get downgraded again on the next build.
+      # Remove after raising the corresponding pin in Inkstone.xcodeproj.
+      - dependency-name: github.com/tree-sitter/tree-sitter-python
+        versions:
+          - ">=0.24.0"
+      - dependency-name: github.com/tree-sitter-grammars/tree-sitter-yaml
+        versions:
+          - ">=0.7.0"
+      - dependency-name: github.com/tree-sitter-grammars/tree-sitter-lua
+        versions:
+          - ">=0.4.0"
+      # tree-sitter-css is pinned to an unmerged upstream commit (tree-sitter-css#99)
+      # that fixes the missing external scanner in Xcode builds, so it has no version
+      # to bump. Remove after upstream merges the fix and the pin returns to a version.
+      - dependency-name: github.com/tree-sitter/tree-sitter-css
     groups:
       swift:
         patterns:

@@ -475,8 +475,8 @@
 			isa = XCRemoteSwiftPackageReference;
 			repositoryURL = "https://github.com/tree-sitter/tree-sitter-css";
 			requirement = {
-				kind = upToNextMinorVersion;
-				minimumVersion = 0.25.0;
+				kind = revision;
+				revision = aa3547c32b9be335c825f8d149b3e70767a3cfca;
 			};
 		};
 		A10000000000000000000095 /* XCRemoteSwiftPackageReference "tree-sitter-haskell" */ = {
