@@ -136,7 +136,7 @@ enum EditorFont {
     /// Body face. A theme that names a face (`night` uses Helvetica Neue,
     /// which ships with macOS) gets it.
     static func nsBody(theme: EditorTheme) -> NSFont {
-        if let name = theme.bodyFontName, let font = NSFont(name: name, size: theme.bodyFontSize) {
+        if let font = NSFont(name: EditorTheme.bodyFontName, size: theme.bodyFontSize) {
             return font
         }
         return .systemFont(ofSize: theme.bodyFontSize)
@@ -145,7 +145,7 @@ enum EditorFont {
     /// Code face. A theme that names one (`night` uses Monaco) gets it; the
     /// fallback is the system mono face.
     static func nsMono(theme: EditorTheme, size: CGFloat) -> NSFont {
-        if let name = theme.codeFontName, let font = NSFont(name: name, size: size) {
+        if let font = NSFont(name: EditorTheme.codeFontName, size: size) {
             return font
         }
         return .monospacedSystemFont(ofSize: size, weight: .regular)
@@ -160,7 +160,7 @@ enum EditorFont {
     /// font manager so one family covers both weights.
     static func nsHeading(theme: EditorTheme, level: Int, weight: NSFont.Weight) -> NSFont {
         let size = theme.headingSize(level)
-        if let name = theme.headingFontName, let named = NSFont(name: name, size: size) {
+        if let named = NSFont(name: EditorTheme.headingFontName, size: size) {
             if weight.rawValue >= NSFont.Weight.bold.rawValue {
                 let bold = NSFontManager.shared.convert(named, toHaveTrait: .boldFontMask)
                 if bold.fontName != named.fontName { return bold }

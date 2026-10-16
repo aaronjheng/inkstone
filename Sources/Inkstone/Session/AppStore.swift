@@ -56,14 +56,6 @@ final class AppStore {
 
     // MARK: - Theme
 
-    /// Themes offered in the menu: the six built-ins plus any user overrides found
-    /// in the themes folder.
-    var availableThemes: [EditorTheme] { themeManager.available }
-
-    func setTheme(identifier: String) {
-        themeManager.select(identifier: identifier)
-    }
-
     /// Called by `ThemeManager`; fans the change out to every open window.
     func apply(theme: EditorTheme) {
         self.theme = theme
@@ -75,10 +67,6 @@ final class AppStore {
 
     func setCustomFontSize(_ size: Double) {
         themeManager.setCustomFontSize(size)
-    }
-
-    func useThemeFontSize() {
-        themeManager.useThemeFontSize()
     }
 
     // MARK: - Windows and tabs

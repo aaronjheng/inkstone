@@ -10,8 +10,10 @@ import SwiftUI
 /// source of truth and what makes a theme switch a single assignment plus a
 /// re-style pass.
 ///
-/// Values are transcribed from `TypeMark/style/themes/*.css`. The `em` sizes in
-/// those files are resolved against the theme's root font size.
+/// Values are transcribed from `TypeMark/style/themes/*.css`. Themes carry
+/// colours, families, and spacing; font *sizes* do not live here - one global
+/// type scale (the GitHub reference) serves every theme, scaled uniformly by
+/// the user's font-size preference.
 struct EditorTheme: Sendable, Equatable {
     let identifier: String
     var displayName: String
@@ -34,9 +36,6 @@ struct EditorTheme: Sendable, Equatable {
     var sidebarSelectionText: DynamicColor?
     var sidebarHover: DynamicColor?
     var sidebarHoverText: DynamicColor?
-    /// Sidebar item font size; `nil` is the 14pt base (pixyll sets
-    /// `#typora-sidebar { font-size: 1rem }` → 16pt).
-    var sidebarFontSize: CGFloat?
     var text: DynamicColor
     var link: DynamicColor
     var selection: DynamicColor
@@ -64,110 +63,110 @@ struct EditorTheme: Sendable, Equatable {
 
     var syntax: SyntaxPalette
 
-    // MARK: Typography
+    // MARK: Type scale and layout (global - not themed)
 
-    /// Root font size. GitHub's `html { font-size: 16px }`.
-    var rootFontSize: CGFloat
-    /// Multipliers applied to `rootFontSize`, transcribed from the theme's `em`
-    /// heading rules.
-    var headingScales: [CGFloat]
-    var headingWeights: [Font.Weight]
-    var headingLineHeights: [CGFloat]
+    /// Themes colour the document; everything here is shared by both.
+
+    /// The user's font-size preference as a multiplier on the reference type
+    /// scale (1 renders body text at 16pt). Set by
+    /// `SettingsStore.resolvedTheme`; themes never touch it.
+    var fontScale: CGFloat = 1
+
+    /// `html { font-size: 16px }` from github.css, the reference transcription.
+    static let baseFontSize: CGFloat = 16
+    /// `code, tt { font-size: 0.9em }` from github.css.
+    static let codeFontScale: CGFloat = 0.9
+    /// `h1..h6 { font-size: 2.25em | 1.75em | 1.5em | 1.25em | 1em | 1em }`.
+    static let headingScales: [CGFloat] = [2.25, 1.75, 1.5, 1.25, 1.0, 1.0]
+    /// `h1..h6 { line-height: 1.2 | 1.225 | 1.43 | 1.4 | 1.4 | 1.4 }`.
+    static let headingLineHeights: [CGFloat] = [1.2, 1.225, 1.43, 1.4, 1.4, 1.4]
+    /// github.css sets every heading bold.
+    static let headingWeights: [Font.Weight] = [.bold, .bold, .bold, .bold, .bold, .bold]
+    /// github.css names `"Open Sans"` for body and headings (the four faces are
+    /// bundled and registered at startup).
+    static let bodyFontName = "Open Sans"
+    static let headingFontName = "Open Sans"
+    /// Chromium resolves the theme's `monospace` fallback to Menlo on macOS.
+    static let codeFontName = "Menlo"
+    /// `body { line-height: 1.6 }`.
+    var bodyLineHeight: CGFloat = 1.6
+
+    var contentMaxWidth: CGFloat = 860
+    /// Widening breakpoints, matching the theme's `@media` rules.
+    var wideMaxWidth: CGFloat = 1024
+    var widestMaxWidth: CGFloat = 1200
+    var wideBreakpoint: CGFloat = 1400
+    var widestBreakpoint: CGFloat = 1800
+    var contentPadding: CGFloat = 30
+    var contentBottomPadding: CGFloat = 100
+    /// `p, blockquote, ul, ol, dl, table { margin: 0.8em 0 }`
+    var blockMargin: CGFloat = 12.8
+    /// `h1..h6 { margin: 1rem 0 }`
+    var headingMargin: CGFloat = 16
+    /// `ul, ol { padding-left: 30px }`, tightened by 4pt: at 30 the item text
+    /// reads a touch heavier here than in the original (the painted disc sits
+    /// inside the indent rather than hanging in the padding like a browser
+    /// marker), and the tighter column reads closer to the reference.
+    var listIndent: CGFloat = 26
+    /// The glyph drawn for an unordered item: Typora renders `disc` everywhere
+    /// (its `#write` base rules outrank a theme's bare `ul` selector).
+    var listBullet: Character = "•"
+    /// `blockquote { padding: 0 15px }`
+    var quoteIndent: CGFloat = 15
+    var quoteBarWidth: CGFloat = 4
+    /// `.md-fences { padding: 8px 0 6px }` plus the CSS cascade's horizontal
+    /// inset: `.md-fences` 4px + `.CodeMirror-lines` 4px + `pre` 4px = 12.
+    var codePadding: CGFloat = 8
+    var codePaddingLeft: CGFloat? = 12
+    /// Painted insets around a code block's body, from the theme's
+    /// `.md-fences { padding-top: 8px; padding-bottom: 6px }`: the paragraph
+    /// style cannot express per-block top/bottom padding, so the decorator
+    /// grows the first/last body line's background by these amounts.
+    var codePaddingTop: CGFloat = 8
+    var codePaddingBottom: CGFloat = 6
+    /// `li p { margin: .5rem 0 }` in the original's base style - the gap between
+    /// consecutive list items (`li { margin: 0 }` itself contributes none).
+    var listItemSpacing: CGFloat = 8
+    /// `hr { margin: 16px 0 }` - the space above a thematic break; the block
+    /// after it contributes its own top spacing, as CSS margin collapsing would.
+    var ruleMargin: CGFloat = 16
+    var tableCellPadding: CGFloat = 6
+
+    // MARK: Colour (themed)
+
     /// Headings that carry a bottom rule, with its colour.
     var headingRules: [Int: DynamicColor]
     /// Heading colour when the theme sets one (`h1..h6 { color: #DEDEDE }`);
     /// `nil` falls back to `text`.
     var headingTextColor: DynamicColor?
-    /// Named heading face when the theme sets one (`"Lucida Grande"` in night);
-    /// `nil` falls back to the system face.
-    var headingFontName: String?
-    /// Per-level `letter-spacing` from the theme (`h1 { letter-spacing: -1.5px }`);
-    /// `nil` falls back to zero tracking.
-    var headingTracking: [CGFloat]?
-    /// Named body face when the theme sets one (`"Helvetica Neue"` in night);
-    /// `nil` falls back to the system face.
-    var bodyFontName: String?
-    var bodyLineHeight: CGFloat
-    /// Multiplier on `rootFontSize` for body text, for themes whose `body`
-    /// sizes itself independently of the `html` root (pixyll's
-    /// `p { font-size: 1.25rem }`).
-    var bodyFontScale: CGFloat
-    var codeFontScale: CGFloat
-    /// Named code face when the theme sets one (`"Monaco"` in night);
-    /// `nil` falls back to the system mono face.
-    var codeFontName: String?
-
-    // MARK: Metrics
-
-    var contentMaxWidth: CGFloat
-    /// Widening breakpoints, matching the theme's `@media` rules.
-    var wideMaxWidth: CGFloat
-    var widestMaxWidth: CGFloat
-    var wideBreakpoint: CGFloat
-    var widestBreakpoint: CGFloat
-    var contentPadding: CGFloat
-    var contentBottomPadding: CGFloat
-    var blockMargin: CGFloat
-    var headingMargin: CGFloat
-    var listIndent: CGFloat
-    /// The glyph drawn for an unordered item. Every built-in theme ships `disc`:
-    /// Typora renders `disc` even where the theme CSS says `square` (its `#write`
-    /// base rules outrank the theme's bare `ul` selector), so matching the
-    /// rendered reference means drawing `•` everywhere.
-    var listBullet: Character
-    var quoteIndent: CGFloat
-    var quoteBarWidth: CGFloat
-    var codePadding: CGFloat
-    /// Left padding for code blocks when the theme's padding is asymmetric
-    /// (`pre.md-fences { padding: 10px 10px 10px 30px }`); `nil` uses `codePadding`.
-    var codePaddingLeft: CGFloat?
-    /// Painted insets around a code block's body, from the theme's
-    /// `.md-fences { padding-top: 8px; padding-bottom: 6px }`: the paragraph
-    /// style cannot express per-block top/bottom padding, so the decorator
-    /// grows the first/last body line's background by these amounts.
-    var codePaddingTop: CGFloat
-    var codePaddingBottom: CGFloat
     /// `.md-fences, code, tt { border: 1px solid #e7eaed }`; `nil` draws no
     /// border (the base style has none for themes that do not declare one).
     var codeBorder: DynamicColor?
-    /// `li p { margin: .5rem 0 }` in the original's base style - the gap between
-    /// consecutive list items (`li { margin: 0 }` itself contributes none).
-    var listItemSpacing: CGFloat
-    /// `hr { margin: 16px 0 }` - the space above a thematic break; the block
-    /// after it contributes its own top spacing, as CSS margin collapsing would.
-    var ruleMargin: CGFloat
-    var tableCellPadding: CGFloat
 
     // MARK: Derived
 
-    var bodyFontSize: CGFloat { (rootFontSize * bodyFontScale).rounded() }
-    var codeFontSize: CGFloat { (bodyFontSize * codeFontScale).rounded() }
+    var bodyFontSize: CGFloat { (Self.baseFontSize * fontScale).rounded() }
+    var codeFontSize: CGFloat { (bodyFontSize * Self.codeFontScale).rounded() }
 
     func headingSize(_ level: Int) -> CGFloat {
-        let index = min(max(level, 1), headingScales.count) - 1
-        return (rootFontSize * headingScales[index]).rounded()
+        let index = min(max(level, 1), Self.headingScales.count) - 1
+        return (Self.baseFontSize * fontScale * Self.headingScales[index]).rounded()
     }
 
     func headingWeight(_ level: Int) -> Font.Weight {
-        let index = min(max(level, 1), headingWeights.count) - 1
-        return headingWeights[index]
+        let index = min(max(level, 1), Self.headingWeights.count) - 1
+        return Self.headingWeights[index]
     }
 
     func headingLineHeight(_ level: Int) -> CGFloat {
-        let index = min(max(level, 1), headingLineHeights.count) - 1
+        let index = min(max(level, 1), Self.headingLineHeights.count) - 1
         // Absolute points, not a multiple: the consumer feeds this straight into
         // `NSParagraphStyle.minimumLineHeight`, and scaling by the root size here
         // collapsed an h1 to a 19pt line box that clipped its 36pt glyphs.
-        return headingSize(level) * headingLineHeights[index]
+        return headingSize(level) * Self.headingLineHeights[index]
     }
 
     func headingRule(_ level: Int) -> DynamicColor? { headingRules[level] }
-
-    func headingTrackingAmount(_ level: Int) -> CGFloat {
-        guard let headingTracking, !headingTracking.isEmpty else { return 0 }
-        let index = min(max(level, 1), headingTracking.count) - 1
-        return headingTracking[index]
-    }
 
     /// The measure to use for a given viewport width, honouring the breakpoints.
     func contentWidth(for viewport: CGFloat) -> CGFloat {
@@ -192,7 +191,6 @@ struct EditorTheme: Sendable, Equatable {
         sidebarSelectionText: DynamicColor? = nil,
         sidebarHover: DynamicColor? = nil,
         sidebarHoverText: DynamicColor? = nil,
-        sidebarFontSize: CGFloat? = nil,
         text: DynamicColor,
         link: DynamicColor,
         selection: DynamicColor,
@@ -213,40 +211,9 @@ struct EditorTheme: Sendable, Equatable {
         alertBackground: DynamicColor,
         alertBorder: DynamicColor,
         syntax: SyntaxPalette,
-        rootFontSize: CGFloat,
-        headingScales: [CGFloat],
-        headingWeights: [Font.Weight],
-        headingLineHeights: [CGFloat],
-        headingRules: [Int: DynamicColor],
+        headingRules: [Int: DynamicColor] = [:],
         headingTextColor: DynamicColor? = nil,
-        headingFontName: String? = nil,
-        headingTracking: [CGFloat]? = nil,
-        bodyFontName: String? = nil,
-        bodyLineHeight: CGFloat,
-        bodyFontScale: CGFloat = 1.0,
-        codeFontScale: CGFloat,
-        codeFontName: String? = nil,
-        contentMaxWidth: CGFloat,
-        wideMaxWidth: CGFloat,
-        widestMaxWidth: CGFloat,
-        wideBreakpoint: CGFloat,
-        widestBreakpoint: CGFloat,
-        contentPadding: CGFloat,
-        contentBottomPadding: CGFloat,
-        blockMargin: CGFloat,
-        headingMargin: CGFloat,
-        listIndent: CGFloat,
-        listBullet: Character = "•",
-        quoteIndent: CGFloat,
-        quoteBarWidth: CGFloat,
-        codePadding: CGFloat,
-        codePaddingLeft: CGFloat? = nil,
-        codePaddingTop: CGFloat = 0,
-        codePaddingBottom: CGFloat = 0,
-        codeBorder: DynamicColor? = nil,
-        listItemSpacing: CGFloat = 0,
-        ruleMargin: CGFloat = 0,
-        tableCellPadding: CGFloat
+        codeBorder: DynamicColor? = nil
     ) {
         self.identifier = identifier
         self.displayName = displayName
@@ -259,7 +226,6 @@ struct EditorTheme: Sendable, Equatable {
         self.sidebarSelectionText = sidebarSelectionText
         self.sidebarHover = sidebarHover
         self.sidebarHoverText = sidebarHoverText
-        self.sidebarFontSize = sidebarFontSize
         self.text = text
         self.link = link
         self.selection = selection
@@ -280,47 +246,16 @@ struct EditorTheme: Sendable, Equatable {
         self.alertBackground = alertBackground
         self.alertBorder = alertBorder
         self.syntax = syntax
-        self.rootFontSize = rootFontSize
-        self.headingScales = headingScales
-        self.headingWeights = headingWeights
-        self.headingLineHeights = headingLineHeights
         self.headingRules = headingRules
         self.headingTextColor = headingTextColor
-        self.headingFontName = headingFontName
-        self.headingTracking = headingTracking
-        self.bodyFontName = bodyFontName
-        self.bodyLineHeight = bodyLineHeight
-        self.bodyFontScale = bodyFontScale
-        self.codeFontScale = codeFontScale
-        self.codeFontName = codeFontName
-        self.contentMaxWidth = contentMaxWidth
-        self.wideMaxWidth = wideMaxWidth
-        self.widestMaxWidth = widestMaxWidth
-        self.wideBreakpoint = wideBreakpoint
-        self.widestBreakpoint = widestBreakpoint
-        self.contentPadding = contentPadding
-        self.contentBottomPadding = contentBottomPadding
-        self.blockMargin = blockMargin
-        self.headingMargin = headingMargin
-        self.listIndent = listIndent
-        self.listBullet = listBullet
-        self.quoteIndent = quoteIndent
-        self.quoteBarWidth = quoteBarWidth
-        self.codePadding = codePadding
-        self.codePaddingLeft = codePaddingLeft
-        self.codePaddingTop = codePaddingTop
-        self.codePaddingBottom = codePaddingBottom
         self.codeBorder = codeBorder
-        self.listItemSpacing = listItemSpacing
-        self.ruleMargin = ruleMargin
-        self.tableCellPadding = tableCellPadding
     }
 
     /// Typography and spacing scaled by the user's font-size preference.
     func scaled(by factor: CGFloat) -> EditorTheme {
         guard factor > 0, abs(factor - 1) > 0.001 else { return self }
         var copy = self
-        copy.rootFontSize = rootFontSize * factor
+        copy.fontScale = fontScale * factor
         copy.contentPadding *= factor
         copy.contentBottomPadding *= factor
         copy.blockMargin *= factor
@@ -418,13 +353,10 @@ struct ThemeOverride: Codable, Sendable {
     var tableBorder: DynamicColor?
     var focusBlur: DynamicColor?
 
-    var rootFontSize: CGFloat?
     var bodyLineHeight: CGFloat?
-    var bodyFontScale: CGFloat?
     var contentMaxWidth: CGFloat?
     var contentPadding: CGFloat?
     var listIndent: CGFloat?
-    var codeFontScale: CGFloat?
 
     var syntaxKeyword: DynamicColor?
     var syntaxString: DynamicColor?
@@ -453,13 +385,10 @@ struct ThemeOverride: Codable, Sendable {
         if let rule { theme.rule = rule }
         if let tableBorder { theme.tableBorder = tableBorder }
         if let focusBlur { theme.focusBlur = focusBlur }
-        if let rootFontSize { theme.rootFontSize = rootFontSize }
         if let bodyLineHeight { theme.bodyLineHeight = bodyLineHeight }
-        if let bodyFontScale { theme.bodyFontScale = bodyFontScale }
         if let contentMaxWidth { theme.contentMaxWidth = contentMaxWidth }
         if let contentPadding { theme.contentPadding = contentPadding }
         if let listIndent { theme.listIndent = listIndent }
-        if let codeFontScale { theme.codeFontScale = codeFontScale }
         if let syntaxKeyword { theme.syntax.keyword = syntaxKeyword }
         if let syntaxString { theme.syntax.string = syntaxString }
         if let syntaxComment { theme.syntax.comment = syntaxComment }

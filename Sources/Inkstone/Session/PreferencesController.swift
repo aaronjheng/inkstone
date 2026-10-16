@@ -534,52 +534,39 @@ private struct MarkdownPane: View {
 private struct AppearancePane: View {
     let store: AppStore
 
+    /// The segmented Style control: the system appearance picks between the
+    /// light theme (GitHub) and the dark one (Night), or one is forced.
+    private var styleBinding: Binding<ThemeStyle> {
+        Binding(
+            get: { store.settings.settings.themeStyle },
+            set: { style in
+                store.settings.update { $0.themeStyle = style }
+                store.themeManager.apply()
+            }
+        )
+    }
+
     var body: some View {
         Form {
             Section {
-                Picker(
-                    "Light Mode",
-                    selection: Binding(
-                        get: { store.settings.settings.themeIdentifier },
-                        set: { store.themeManager.selectLightTheme(identifier: $0) }
-                    )
-                ) {
-                    ForEach(store.themeManager.available, id: \.identifier) { theme in
-                        Text(theme.displayName).tag(theme.identifier)
+                HStack {
+                    Text("Style")
+                        .lineLimit(1)
+                    Spacer(minLength: 12)
+                    Picker("", selection: styleBinding) {
+                        ForEach(ThemeStyle.allCases, id: \.self) { style in
+                            Text(style.name).tag(style)
+                        }
                     }
-                }
-                Picker(
-                    "Dark Mode",
-                    selection: Binding(
-                        get: { store.settings.settings.darkThemeIdentifier },
-                        set: { store.themeManager.selectDarkTheme(identifier: $0) }
-                    )
-                ) {
-                    Text("Same as Light Mode").tag(String?.none)
-                    ForEach(store.themeManager.available, id: \.identifier) { theme in
-                        Text(theme.displayName).tag(Optional(theme.identifier))
-                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .fixedSize()
                 }
             } header: {
                 sectionHeader("Theme")
             }
 
             Section {
-                Toggle(
-                    "Use custom font size",
-                    isOn: Binding(
-                        get: { store.settings.settings.useCustomFontSize },
-                        set: { on in
-                            if on {
-                                store.themeManager.setCustomFontSize(
-                                    store.settings.settings.customFontSize
-                                )
-                            } else {
-                                store.themeManager.useThemeFontSize()
-                            }
-                        }
-                    )
-                )
                 Slider(
                     value: Binding(
                         get: { store.settings.settings.customFontSize },
@@ -594,7 +581,6 @@ private struct AppearancePane: View {
                 } maximumValueLabel: {
                     Text("28")
                 }
-                .disabled(!store.settings.settings.useCustomFontSize)
             } header: {
                 sectionHeader("Font Size")
             }

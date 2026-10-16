@@ -313,7 +313,7 @@ final class FileTreeModel {
     /// `--item-hover-text-color`); defaults to the normal row colour.
     var selectionText: Color = .primary
     var hoverText: Color = .primary
-    /// Row font size; themes may scale it (pixyll's sidebar is `1rem`).
+    /// Row font size, global for every theme.
     var fontSize: CGFloat = 14
     /// Neutral hover wash: adaptive, using palette base.
     var hover: Color = Color(
@@ -355,7 +355,7 @@ final class FileTreeModel {
         )
         hoverText = Color(
             nsColor: (theme.sidebarHoverText ?? theme.sidebarForeground ?? theme.text).nsColor)
-        fontSize = theme.sidebarFontSize ?? 14
+        fontSize = 14
         hover = {
             if let hover = theme.sidebarHover {
                 return Color(nsColor: hover.nsColor)

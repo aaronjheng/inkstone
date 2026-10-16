@@ -16,7 +16,6 @@ enum MenuBuilder {
         main.addItem(paragraphMenuItem(responder: responder))
         main.addItem(formatMenuItem(responder: responder))
         main.addItem(viewMenuItem(responder: responder, store: store))
-        main.addItem(themesMenuItem(store: store))
         main.addItem(windowMenuItem())
         main.addItem(helpMenuItem(responder: responder))
         return main
@@ -388,33 +387,6 @@ enum MenuBuilder {
         // Checkmarks are rebuilt every time the menu opens (AppDelegate conforms
         // to NSMenuDelegate for exactly this).
         menu.delegate = responder
-        item.submenu = menu
-        item.title = menu.title
-        return item
-    }
-
-    // MARK: - Themes
-
-    @MainActor
-    private static func themesMenuItem(store: AppStore) -> NSMenuItem {
-        let item = NSMenuItem()
-        let menu = NSMenu(title: "Themes")
-        for theme in store.availableThemes {
-            let entry = menu.addItem(
-                withTitle: theme.displayName,
-                action: #selector(AppDelegate.selectTheme(_:)), keyEquivalent: ""
-            )
-            entry.target = NSApp.delegate as? AppDelegate
-            entry.representedObject = theme.identifier
-            entry.state = theme.identifier == store.theme.identifier ? .on : .off
-        }
-        menu.addItem(.separator())
-        let useThemeSize = menu.addItem(
-            withTitle: "Use Theme Font Size", action: #selector(AppDelegate.useThemeFontSize(_:)), keyEquivalent: ""
-        )
-        useThemeSize.target = NSApp.delegate as? AppDelegate
-        useThemeSize.state = store.settings.settings.useCustomFontSize ? .off : .on
-        menu.delegate = NSApp.delegate as? AppDelegate
         item.submenu = menu
         item.title = menu.title
         return item

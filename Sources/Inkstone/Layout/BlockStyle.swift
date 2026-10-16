@@ -51,8 +51,6 @@ struct BlockStyle {
             lineHeight: theme.headingLineHeight(level),
             margin: theme.headingMargin
         )
-        let tracking = theme.headingTrackingAmount(level)
-        if tracking != 0 { style.base[.kern] = tracking }
         if let rule = theme.headingRule(level) {
             style.decoration.append(.headingRule(color: rule.nsColor))
         }

@@ -33,15 +33,28 @@ enum LaunchOption: String, Codable, CaseIterable, Sendable {
 /// Every field is decoded with `decodeIfPresent` and a default: the synthesized
 /// decoder required every key to be present, so the first release that added a
 /// preference made every existing `settings.json` undecodable and silently reset
+/// Where the document's palette comes from: the system appearance picks
+/// between the light theme (GitHub) and the dark one (Night), or one is forced.
+enum ThemeStyle: Int, CaseIterable, Codable {
+    case system = 0
+    case light = 1
+    case dark = 2
+
+    var name: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+}
+
 /// the theme, launch option and autosave to factory defaults.
 struct EditorSettings: Codable, Equatable, Sendable {
     // Appearance
-    var themeIdentifier = "github"
-    /// The theme for dark mode, as Typora's separate light/dark theme pickers.
-    /// `nil` follows the light theme, which keeps a dynamic-palette theme like
-    /// GitHub rendering its own dark half.
-    var darkThemeIdentifier: String?
-    var useCustomFontSize = false
+    /// Which palette the document renders in: the system appearance picks
+    /// between the light theme (GitHub) and the dark one (Night).
+    var themeStyle: ThemeStyle = .system
     var customFontSize: Double = 16
     var wordsPerMinute = 382
     /// Folder shown in the sidebar's Files column; `nil` means "the document's
@@ -90,7 +103,7 @@ struct EditorSettings: Codable, Equatable, Sendable {
     init() {}
 
     private enum CodingKeys: String, CodingKey {
-        case themeIdentifier, darkThemeIdentifier, useCustomFontSize, customFontSize, wordsPerMinute
+        case themeStyle, customFontSize, wordsPerMinute
         case sidebarFolderPath, autoPairBrackets, autoPairMarkdownSyntax
         case emojiAutocomplete, keepCaretInMiddle, indentSize, codeIndentSize
         case spellCheckEnabled, autoSaveInterval, showInvisibleCharacters
@@ -102,9 +115,9 @@ struct EditorSettings: Codable, Equatable, Sendable {
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        themeIdentifier = try container.decodeIfPresent(String.self, forKey: .themeIdentifier) ?? "github"
-        darkThemeIdentifier = try container.decodeIfPresent(String.self, forKey: .darkThemeIdentifier)
-        useCustomFontSize = try container.decodeIfPresent(Bool.self, forKey: .useCustomFontSize) ?? false
+        themeStyle =
+            try container.decodeIfPresent(Int.self, forKey: .themeStyle)
+            .flatMap(ThemeStyle.init(rawValue:)) ?? .system
         customFontSize = try container.decodeIfPresent(Double.self, forKey: .customFontSize) ?? 16
         wordsPerMinute = try container.decodeIfPresent(Int.self, forKey: .wordsPerMinute) ?? 382
         sidebarFolderPath = try container.decodeIfPresent(String.self, forKey: .sidebarFolderPath)
@@ -136,11 +149,10 @@ struct EditorSettings: Codable, Equatable, Sendable {
         zoomFactor = try container.decodeIfPresent(Double.self, forKey: .zoomFactor) ?? 1
     }
 
-    /// Font scale the theme is rendered at.
+    /// Font scale the document renders at: the user's font size over the 16pt
+    /// reference.
     var fontScale: CGFloat {
-        useCustomFontSize
-            ? CGFloat(max(customFontSize, 9) / 16)
-            : 1
+        CGFloat(max(customFontSize, 9) / 16)
     }
 
     /// The parse options implied by the current settings.
@@ -288,15 +300,13 @@ final class SettingsStore {
         resolvedTheme(isDark: false)
     }
 
-    /// The theme an appearance should show: the light theme in light mode, and
-    /// in dark mode the separately chosen dark theme, falling back to the light
-    /// theme when none was picked (Typora's "separate themes" model).
+    /// The theme an appearance should show: GitHub in light mode, Night in dark
+    /// mode; `.system` follows the effective appearance.
     func resolvedTheme(isDark: Bool) -> EditorTheme {
-        var identifier = settings.themeIdentifier
-        if isDark, let dark = settings.darkThemeIdentifier {
-            identifier = dark
-        }
-        let base = BuiltInTheme.theme(named: identifier) ?? BuiltInTheme.github
+        let useDark =
+            settings.themeStyle == .dark
+            || (settings.themeStyle == .system && isDark)
+        let base = useDark ? BuiltInTheme.night : BuiltInTheme.github
         return base.scaled(by: settings.fontScale)
     }
 }
@@ -337,46 +347,8 @@ final class ThemeManager {
         apply()
     }
 
-    /// The six built-ins plus any user themes found on disk.
-    var available: [EditorTheme] {
-        BuiltInTheme.all + userThemes()
-    }
-
-    /// Typora's model: a pick applies to the appearance that is showing, so
-    /// choosing a theme at night sets the dark slot and leaves the day theme.
-    func select(identifier: String) {
-        store.update {
-            if Self.isDarkAppearance {
-                $0.darkThemeIdentifier = identifier
-            } else {
-                $0.themeIdentifier = identifier
-            }
-        }
-        apply()
-    }
-
-    /// The preferences' light-mode picker.
-    func selectLightTheme(identifier: String) {
-        store.update { $0.themeIdentifier = identifier }
-        apply()
-    }
-
-    /// The preferences' dark-mode picker; `nil` follows the light theme.
-    func selectDarkTheme(identifier: String?) {
-        store.update { $0.darkThemeIdentifier = identifier }
-        apply()
-    }
-
     func setCustomFontSize(_ size: Double) {
-        store.update {
-            $0.useCustomFontSize = true
-            $0.customFontSize = size
-        }
-        apply()
-    }
-
-    func useThemeFontSize() {
-        store.update { $0.useCustomFontSize = false }
+        store.update { $0.customFontSize = size }
         apply()
     }
 
@@ -385,29 +357,4 @@ final class ThemeManager {
         onChange?(theme)
     }
 
-    /// Themes the user added to the themes folder, as JSON.
-    ///
-    /// A user theme is a partial override: anything it omits falls back to the
-    /// built-in theme with the same identifier, so a two-line CSS-equivalent file
-    /// is enough to change one colour.
-    private func userThemes() -> [EditorTheme] {
-        let contents =
-            (try? FileManager.default.contentsOfDirectory(
-                at: SettingsStore.themesDirectory, includingPropertiesForKeys: nil
-            )) ?? []
-        var result: [EditorTheme] = []
-        for url in contents where url.pathExtension.lowercased() == "json" {
-            guard let data = try? Data(contentsOf: url),
-                let override = try? JSONDecoder().decode(ThemeOverride.self, from: data)
-            else {
-                AppLogger.warn("Ignoring unreadable theme \(url.lastPathComponent)", category: "Theme")
-                continue
-            }
-            let theme = override.applied()
-            if !result.contains(where: { $0.identifier == theme.identifier }) {
-                result.append(theme)
-            }
-        }
-        return result
-    }
 }

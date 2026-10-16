@@ -183,7 +183,7 @@ extension SourceModeController: NSTextViewDelegate {
 enum SourceHighlighter {
     /// Full-document highlight, used on load and on theme change.
     static func highlight(_ text: String, theme: EditorTheme) -> NSAttributedString {
-        let mono = EditorFont.nsMono(size: theme.rootFontSize)
+        let mono = EditorFont.nsMono(size: theme.bodyFontSize)
         let result = NSMutableAttributedString(
             string: text,
             attributes: [
@@ -202,7 +202,7 @@ enum SourceHighlighter {
         let clamped = NSIntersectionRange(range, NSRange(location: 0, length: storage.length))
         guard clamped.length > 0 else { return }
         let whole = storage.string as NSString
-        let mono = EditorFont.nsMono(size: theme.rootFontSize)
+        let mono = EditorFont.nsMono(size: theme.bodyFontSize)
         storage.setAttributes(
             [
                 .font: mono,
@@ -315,7 +315,7 @@ enum SourceHighlighter {
 
     private static func lineStyle(theme: EditorTheme) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        let height = theme.rootFontSize * theme.bodyLineHeight
+        let height = theme.bodyFontSize * theme.bodyLineHeight
         style.minimumLineHeight = height
         style.maximumLineHeight = height
         style.lineBreakMode = .byWordWrapping

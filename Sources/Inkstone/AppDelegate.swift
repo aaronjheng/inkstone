@@ -850,8 +850,6 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     public func menuNeedsUpdate(_ menu: NSMenu) {
         if menu.title == "View" {
             refreshViewCheckmarks()
-        } else if menu.title == "Themes" {
-            refreshThemesMenu()
         }
     }
 
@@ -1136,47 +1134,25 @@ public final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         applyZoom(1 / 1.1)
     }
 
-    /// Zoom is expressed as a font scale so it composes with the theme's own font
-    /// size instead of fighting it.
+    /// Zoom is expressed as a font scale over the 16pt reference, the same
+    /// global font size the preferences' slider writes.
     private var zoomFactor: CGFloat { CGFloat(store.settings.settings.zoomFactor) }
 
     private func applyZoom(_ factor: CGFloat) {
         let next = max(0.5, min(zoomFactor * factor, 3))
         store.settings.update { settings in
             settings.zoomFactor = Double(next)
-            settings.useCustomFontSize = true
             settings.customFontSize = 16 * Double(next)
         }
         store.themeManager.apply()
     }
 
     @objc func actualSize(_ sender: Any?) {
-        store.settings.update { $0.zoomFactor = 1 }
-        store.useThemeFontSize()
-    }
-
-    @objc func useThemeFontSize(_ sender: Any?) {
-        store.useThemeFontSize()
-    }
-
-    @objc func selectTheme(_ sender: NSMenuItem) {
-        guard let identifier = sender.representedObject as? String else { return }
-        store.setTheme(identifier: identifier)
-        refreshThemesMenu()
-    }
-
-    /// Syncs the Themes menu's checkmarks with the active theme and font size.
-    private func refreshThemesMenu() {
-        guard
-            let themesMenu = NSApp.mainMenu?.items.first(where: { $0.title == "Themes" })?
-                .submenu
-        else { return }
-        for item in themesMenu.items {
-            if let identifier = item.representedObject as? String {
-                item.state = identifier == store.theme.identifier ? .on : .off
-            } else if item.title == "Use Theme Font Size" {
-                item.state = store.settings.settings.useCustomFontSize ? .off : .on
-            }
+        store.settings.update {
+            $0.zoomFactor = 1
+            $0.customFontSize = 16
         }
+        store.themeManager.apply()
     }
+
 }
