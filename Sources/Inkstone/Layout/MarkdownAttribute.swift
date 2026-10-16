@@ -60,6 +60,17 @@ enum MarkdownAttribute {
     /// to the lines that carry this key instead.
     static let subBlock = NSAttributedString.Key("md.subBlock")
 
+    /// Marks the *body* lines of a code block - the lines between the hidden
+    /// fence delimiters. The decorator unions these lines to draw the block's
+    /// background and border as one rounded box, so the invisible fence rows do
+    /// not stretch the chrome or receive its padding.
+    static let codeBody = NSAttributedString.Key("md.codeBody")
+
+    /// Marks inline-code runs. The native background attribute hugs the glyphs;
+    /// the decorator repaints the run's enclosing rects with the theme's
+    /// `code, tt` chrome: horizontal padding and the 1px border.
+    static let codeRun = NSAttributedString.Key("md.codeRun")
+
     /// Reads the hidden flag at `location` in an O(1)-amortised way.
     static func isHidden(_ storage: NSTextStorage, at location: Int) -> Bool {
         guard location >= 0, location < storage.length else { return false }
@@ -150,6 +161,8 @@ enum MarkerRole {
     case highlight
     case `subscript`
     case superscript
+    case codeOpen
+    case codeClose
     case codeFence
     case linkOpen
     case linkClose

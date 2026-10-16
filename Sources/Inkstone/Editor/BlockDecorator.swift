@@ -30,15 +30,17 @@ enum BlockDecorator {
         let glyphRange = manager.glyphRange(for: container)
         let length = view.textStorage?.length ?? 0
         // Paint per line fragment, so each fragment gets the chrome of whichever
-        // block owns it.
+        // block owns it. Lines are collected first: code-block chrome is per
+        // BLOCK - one rounded, padded, bordered box around the whole body - which
+        // needs the union of a block's lines rather than any single fragment.
         //
         // `enumerateLineFragments` rather than a hand-rolled walk: deriving a line's
         // character range from a glyph range that runs to the end of the document
         // covers every following line too, which made the walk stop after the first
         // line - so nothing below the first line was ever decorated.
+        var lines: [LineFragment] = []
         manager.enumerateLineFragments(forGlyphRange: glyphRange) {
             lineRect, _, _, lineGlyphRange, _ in
-            let focused = view.focusedBlockID
             let lineCharRange = manager.characterRange(
                 forGlyphRange: lineGlyphRange, actualGlyphRange: nil
             )
@@ -48,39 +50,167 @@ enum BlockDecorator {
                     MarkdownAttribute.block, at: lineCharRange.location, effectiveRange: nil
                 ) as? Int
             guard let blockID else { return }
+            let subBlockID =
+                view.textStorage?.attribute(
+                    MarkdownAttribute.subBlock, at: lineCharRange.location, effectiveRange: nil
+                ) as? Int
+            lines.append(
+                LineFragment(
+                    rect: lineRect, charRange: lineCharRange, blockID: blockID,
+                    subBlockID: subBlockID
+                )
+            )
+        }
+
+        // Which ids own code-block chrome, from the layout's registered plans.
+        var codeOwners: [Int: DecorationPlan] = [:]
+        for (id, plans) in layout.decorations {
+            if let plan = plans.first(where: { plan in
+                if case .codeBlock = plan { return true }
+                return false
+            }) {
+                codeOwners[id] = plan
+            }
+        }
+        paintCodeBlocks(lines, in: view, theme: theme, owners: codeOwners)
+
+        for line in lines {
+            let focused = view.focusedBlockID
             // A nested block's lines - a list inside an item, a quote, a code fence -
             // carry `md.subBlock`; its chrome is scoped by that id, while `md.block`
             // still names the owning item. The plans merge so a line can carry both
             // its own and its owner's chrome (an item's marker over its first line);
             // each plan keeps its origin so the first-line guard tests the right
             // scope.
-            let subBlockID =
-                view.textStorage?.attribute(
-                    MarkdownAttribute.subBlock, at: lineCharRange.location, effectiveRange: nil
-                ) as? Int
             var plans: [(plan: DecorationPlan, subScoped: Bool)] = []
-            if let subBlockID, let nested = layout.decorations[subBlockID] {
+            if let subBlockID = line.subBlockID, let nested = layout.decorations[subBlockID] {
                 plans += nested.map { ($0, true) }
             }
-            if let blockPlans = layout.decorations[blockID] {
+            if let blockPlans = layout.decorations[line.blockID] {
                 plans += blockPlans.map { ($0, false) }
             }
-            guard !plans.isEmpty else { return }
+            // Code-block chrome is painted per block above; per-line fills would
+            // break the border and the painted padding.
+            plans = plans.filter { plan, _ in
+                if case .codeBlock = plan { return false }
+                return true
+            }
+            guard !plans.isEmpty else { continue }
             paint(
-                plans, in: view, theme: theme, lineRect: lineRect,
-                lineCharRange: lineCharRange, layout: layout, blockID: blockID,
-                subBlockID: subBlockID
+                plans, in: view, theme: theme, lineRect: line.rect,
+                lineCharRange: line.charRange, layout: layout, blockID: line.blockID,
+                subBlockID: line.subBlockID
             )
             // Focus mode dims everything the caret is not in. A scrim rather than a
             // colour change: the glyphs are already generated and cached by TextKit,
             // and re-running the layout in a second colour is what the zero-width
             // marker mechanism makes expensive.
-            let isDimmed = view.isFocusModeEnabled && blockID != focused
+            let isDimmed = view.isFocusModeEnabled && line.blockID != focused
             if isDimmed, let context = NSGraphicsContext.current?.cgContext {
                 let inset = view.textContainerInset
-                let rect = lineRect.offsetBy(dx: inset.width, dy: inset.height)
+                let rect = line.rect.offsetBy(dx: inset.width, dy: inset.height)
                 context.setFillColor(theme.background.nsColor.withAlphaComponent(0.72).cgColor)
                 context.fill(rect)
+            }
+        }
+    }
+
+    /// One visible line fragment and the block identity the decorator needs to
+    /// scope its chrome. A struct rather than a tuple: four named members read
+    /// better and keep the large-tuple lint quiet.
+    private struct LineFragment {
+        var rect: NSRect
+        var charRange: NSRange
+        var blockID: Int
+        var subBlockID: Int?
+    }
+
+    /// Draws one rounded background-and-border box per code block.
+    ///
+    /// Typora paints a single box around the whole fence (`border: 1px solid
+    /// #e7eaed`, `padding-top: 8px; padding-bottom: 6px`), which per-line fills
+    /// cannot express: the border would cut through every wrapped line. The box
+    /// is the union of the block's *body* lines (`md.codeBody` - the invisible
+    /// fence rows are excluded), grown by the theme's painted top/bottom insets
+    /// when the first/last body line is on screen.
+    @MainActor
+    private static func paintCodeBlocks(
+        _ lines: [LineFragment], in view: MarkdownTextView, theme: EditorTheme,
+        owners: [Int: DecorationPlan]
+    ) {
+        guard let storage = view.textStorage,
+            let context = NSGraphicsContext.current?.cgContext
+        else { return }
+
+        struct Accumulator {
+            var plan: DecorationPlan
+            var rect: NSRect?
+            var sawFirst = false
+            var sawLast = false
+        }
+        var boxes: [Int: Accumulator] = [:]
+        for line in lines {
+            // BlockNode ids are unique across the document, so the resolved owner
+            // id - the nested fence's own id, else the block's - keys the box.
+            let ownerID: Int
+            let plan: DecorationPlan
+            if let subBlockID = line.subBlockID, let candidate = owners[subBlockID] {
+                ownerID = subBlockID
+                plan = candidate
+            } else if let candidate = owners[line.blockID] {
+                ownerID = line.blockID
+                plan = candidate
+            } else {
+                continue
+            }
+            guard case .codeBlock = plan else { continue }
+
+            var bodyRange = NSRange()
+            let isBodyLine =
+                storage.attribute(
+                    MarkdownAttribute.codeBody, at: line.charRange.location,
+                    effectiveRange: &bodyRange
+                ) != nil
+            var sawFirst = false
+            var sawLast = false
+            if isBodyLine {
+                // `md.codeBody` runs merge across adjacent body lines, so the
+                // effective range spans the whole body: the first body line starts
+                // it, the last one ends it.
+                if line.charRange.location == bodyRange.location { sawFirst = true }
+                if NSMaxRange(line.charRange) >= NSMaxRange(bodyRange) { sawLast = true }
+            }
+            var box = boxes[ownerID] ?? Accumulator(plan: plan)
+            box.rect = box.rect.map { $0.union(line.rect) } ?? line.rect
+            box.sawFirst = box.sawFirst || sawFirst
+            box.sawLast = box.sawLast || sawLast
+            boxes[ownerID] = box
+        }
+
+        let inset = view.textContainerInset
+        for box in boxes.values {
+            guard case let .codeBlock(background, radius, border, topInset, bottomInset) = box.plan,
+                var rect = box.rect
+            else { continue }
+            if box.sawFirst {
+                rect.origin.y -= topInset
+                rect.size.height += topInset
+            }
+            if box.sawLast {
+                rect.size.height += bottomInset
+            }
+            rect = rect.offsetBy(dx: inset.width, dy: inset.height)
+            let path = CGPath(
+                roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil
+            )
+            context.addPath(path)
+            context.setFillColor(background.cgColor)
+            context.fillPath()
+            if let border {
+                context.setStrokeColor(border.cgColor)
+                context.setLineWidth(EditorMetrics.hairline)
+                context.addPath(path)
+                context.strokePath()
             }
         }
     }
@@ -130,17 +260,35 @@ enum BlockDecorator {
                 // contains. A nested item's line 0 also merges its owner's plans; the
                 // owner's marker run sits on the owner's first line, not here, so the
                 // containment test filters it out.
-                guard markerIsOnLine(planOrigin: subScoped ? (subBlockID ?? blockID) : blockID, lineCharRange: lineCharRange, in: layout)
+                guard
+                    markerIsOnLine(
+                        planOrigin: subScoped ? (subBlockID ?? blockID) : blockID,
+                        lineCharRange: lineCharRange, in: layout, storage: view.textStorage
+                    )
                 else { break }
-                drawMarker(
-                    text, in: lineRect, width: width, alignment: alignment,
-                    theme: theme, context: context)
+                // Typora's `list-style-type: disc`: Chromium paints a filled circle
+                // about 0.42em across, centred horizontally in the marker column
+                // (half the indent) and on the row's line box. Drawing the `•` glyph
+                // instead rendered it at ~60% of the reference size and off-centre.
+                _ = (text, alignment)
+                let diameter = theme.bodyFontSize * 0.42
+                let center = CGPoint(x: lineRect.minX + width / 2, y: lineRect.midY)
+                context.setFillColor(theme.text.nsColor.cgColor)
+                context.fillEllipse(
+                    in: CGRect(
+                        x: center.x - diameter / 2, y: center.y - diameter / 2,
+                        width: diameter, height: diameter
+                    )
+                )
             case let .taskCheckbox(checked, width):
                 // One box on the first line: without the guard every fragment
                 // of a wrapped item drew its own, while hit-testing only knows
                 // the first. The first line is the one carrying the item's own
                 // marker run - see `.listMarker`.
-                guard markerIsOnLine(planOrigin: subScoped ? (subBlockID ?? blockID) : blockID, lineCharRange: lineCharRange, in: layout)
+                guard
+                    markerIsOnLine(
+                        planOrigin: subScoped ? (subBlockID ?? blockID) : blockID, lineCharRange: lineCharRange, in: layout,
+                        storage: view.textStorage)
                 else { break }
                 let side: CGFloat = 12
                 // Right edge 4pt before the text column, like the drawn bullets.
@@ -166,15 +314,11 @@ enum BlockDecorator {
                     context.addLine(to: CGPoint(x: box.maxX - 2.5, y: box.minY + 3))
                     context.strokePath()
                 }
-            case let .codeBlock(background, radius):
-                let path = CGPath(
-                    roundedRect: lineRect.insetBy(dx: 0, dy: 0),
-                    cornerWidth: radius, cornerHeight: radius,
-                    transform: nil
-                )
-                context.addPath(path)
-                context.setFillColor(background.cgColor)
-                context.fillPath()
+            case .codeBlock:
+                // Block chrome is painted per block in `paintCodeBlocks`; the
+                // per-line fills it replaced cannot express the border or the
+                // painted top/bottom padding.
+                break
             case let .horizontalRule(color, height):
                 context.setFillColor(color.cgColor)
                 context.fill(
@@ -354,12 +498,24 @@ enum BlockDecorator {
     /// The first character *after* the marker run is the item's visible content;
     /// the fragment containing it is the one the chrome belongs to.
     private static func markerIsOnLine(
-        planOrigin: Int, lineCharRange: NSRange, in layout: LayoutOutput
+        planOrigin: Int, lineCharRange: NSRange, in layout: LayoutOutput,
+        storage: NSTextStorage?
     ) -> Bool {
         guard let marker = layout.markers.first(where: { $0.blockID == planOrigin }) else {
             return false
         }
-        return NSLocationInRange(NSMaxRange(marker.range), lineCharRange)
+        // The first *visible* character after the marker run is the item's content;
+        // every hidden character between the marker and that content (a link's `[`,
+        // a task's `[x] `) is zero-width and glues backwards into whatever fragment
+        // precedes the content, so scanning to the first non-hidden character is
+        // what keeps the chrome on the row the content actually sits on.
+        var location = NSMaxRange(marker.range)
+        if let storage {
+            while location < storage.length, MarkdownAttribute.isHidden(storage, at: location) {
+                location += 1
+            }
+        }
+        return NSLocationInRange(location, lineCharRange)
     }
 
     /// Whether this line fragment is the first of the block whose chrome is being

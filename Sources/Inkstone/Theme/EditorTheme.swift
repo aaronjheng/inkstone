@@ -121,6 +121,21 @@ struct EditorTheme: Sendable, Equatable {
     /// Left padding for code blocks when the theme's padding is asymmetric
     /// (`pre.md-fences { padding: 10px 10px 10px 30px }`); `nil` uses `codePadding`.
     var codePaddingLeft: CGFloat?
+    /// Painted insets around a code block's body, from the theme's
+    /// `.md-fences { padding-top: 8px; padding-bottom: 6px }`: the paragraph
+    /// style cannot express per-block top/bottom padding, so the decorator
+    /// grows the first/last body line's background by these amounts.
+    var codePaddingTop: CGFloat
+    var codePaddingBottom: CGFloat
+    /// `.md-fences, code, tt { border: 1px solid #e7eaed }`; `nil` draws no
+    /// border (the base style has none for themes that do not declare one).
+    var codeBorder: DynamicColor?
+    /// `li p { margin: .5rem 0 }` in the original's base style - the gap between
+    /// consecutive list items (`li { margin: 0 }` itself contributes none).
+    var listItemSpacing: CGFloat
+    /// `hr { margin: 16px 0 }` - the space above a thematic break; the block
+    /// after it contributes its own top spacing, as CSS margin collapsing would.
+    var ruleMargin: CGFloat
     var tableCellPadding: CGFloat
 
     // MARK: Derived
@@ -226,6 +241,11 @@ struct EditorTheme: Sendable, Equatable {
         quoteBarWidth: CGFloat,
         codePadding: CGFloat,
         codePaddingLeft: CGFloat? = nil,
+        codePaddingTop: CGFloat = 0,
+        codePaddingBottom: CGFloat = 0,
+        codeBorder: DynamicColor? = nil,
+        listItemSpacing: CGFloat = 0,
+        ruleMargin: CGFloat = 0,
         tableCellPadding: CGFloat
     ) {
         self.identifier = identifier
@@ -288,6 +308,11 @@ struct EditorTheme: Sendable, Equatable {
         self.quoteBarWidth = quoteBarWidth
         self.codePadding = codePadding
         self.codePaddingLeft = codePaddingLeft
+        self.codePaddingTop = codePaddingTop
+        self.codePaddingBottom = codePaddingBottom
+        self.codeBorder = codeBorder
+        self.listItemSpacing = listItemSpacing
+        self.ruleMargin = ruleMargin
         self.tableCellPadding = tableCellPadding
     }
 
@@ -304,6 +329,10 @@ struct EditorTheme: Sendable, Equatable {
         copy.quoteIndent *= factor
         copy.tableCellPadding *= factor
         copy.codePadding *= factor
+        copy.codePaddingTop *= factor
+        copy.codePaddingBottom *= factor
+        copy.listItemSpacing *= factor
+        copy.ruleMargin *= factor
         return copy
     }
 }

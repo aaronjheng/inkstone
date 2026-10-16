@@ -29,6 +29,19 @@ import Foundation
 /// keeps this delegate stateless. A mutable `hiddenRanges` set here would drift
 /// out of sync with the cache and silently stop working.
 final class MarkerHider: NSObject, NSLayoutManagerDelegate {
+    /// The gap below a list-item row (`li p { margin: .5rem 0 }` in the original's
+    /// base style). Set by the text view whenever the theme changes.
+    ///
+    /// It reaches the layout through this delegate rather than through the items'
+    /// paragraph style on purpose: the items' hidden marker glyphs are zero-width
+    /// and glue backwards into the previous line fragment, so an item paragraph's
+    /// first line fragment is the *previous* item's row - and TextKit drops both
+    /// the paragraph's own `spacingBefore` and the previous paragraph's
+    /// `spacingAfter` at that glued boundary. The delegate is asked per row, after
+    /// the layout knows exactly where the row ends, which is why the gap survives
+    /// here.
+    var listItemSpacing: CGFloat = 0
+
     func layoutManager(
         _ layoutManager: NSLayoutManager,
         shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
@@ -74,6 +87,33 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
             )
         }
         return glyphRange.length
+    }
+
+    /// The gap below a list-item row.
+    ///
+    /// The row's last content character carries `md.blockKind` for the row's own
+    /// block (the trailing newline carries none), so the kind read there - or one
+    /// glyph back, when the row ends in something glyph-less - decides whether
+    /// this is an item row.
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        lineSpacingAfterGlyphAt glyphIndex: Int,
+        withProposedLineFragmentRect rect: NSRect
+    ) -> CGFloat {
+        guard listItemSpacing > 0, let storage = layoutManager.textStorage,
+            storage.length > 0
+        else { return 0 }
+        for location in [min(glyphIndex, storage.length - 1), glyphIndex - 1] {
+            guard location >= 0, location < storage.length,
+                let kind = storage.attribute(
+                    MarkdownAttribute.blockKind, at: location, effectiveRange: nil
+                ) as? String
+            else { continue }
+            if kind == BlockKind.listItem.rawValue || kind == BlockKind.taskItem.rawValue {
+                return listItemSpacing
+            }
+        }
+        return 0
     }
 }
 

@@ -9,6 +9,8 @@ import AppKit
 @MainActor
 struct InkstoneApp {
     static func main() {
+        // Theme fonts have to resolve before the first window is built.
+        FontRegistration.registerBundledFonts()
         let application = NSApplication.shared
         let delegate = AppDelegate()
         application.delegate = delegate

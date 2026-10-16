@@ -82,6 +82,9 @@ struct InlineStyle {
                 .font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
                 .foregroundColor: theme.inlineCodeText.nsColor,
                 .backgroundColor: theme.inlineCodeBackground.nsColor,
+                // Chrome (padding + border) is painted by the decorator; this
+                // attribute marks the runs it works on.
+                MarkdownAttribute.codeRun: true,
             ]
         )
     }

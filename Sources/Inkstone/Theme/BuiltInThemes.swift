@@ -36,7 +36,9 @@ enum BuiltInTheme {
         sidebarSelection: DynamicColor(0xEEEEEE, 0x3E4451),
         text: DynamicColor(0x333333, 0xCCCCCC),
         link: DynamicColor(0x4183C4, 0x6CB6FF),
-        selection: DynamicColor(0xDAE3EA, 0x3E4451),
+        // `--select-text-bg-color: #B5D6FC` from the original's base style; the
+        // theme css does not override it.
+        selection: DynamicColor(0xB5D6FC, 0x3E4451),
         marker: DynamicColor(0xC7C5C5, 0x5A6270),
         rawBlockEditingBackground: DynamicColor(0xF5F6F7, 0x2C313A),
         headingChip: DynamicColor(0xDDDDDD, 0x4B5263),
@@ -74,8 +76,14 @@ enum BuiltInTheme {
         // `1.2 | 1.225 | 1.43 | 1.4 | 1.4 | 1.4`
         headingLineHeights: [1.2, 1.225, 1.43, 1.4, 1.4, 1.4],
         headingRules: [1: DynamicColor(0xEEEEEE, 0x444C56), 2: DynamicColor(0xEEEEEE, 0x444C56)],
+        // github.css names `"Open Sans"` for body and headings (the four faces are
+        // bundled and registered at startup); headings inherit the body family.
+        headingFontName: "Open Sans",
+        bodyFontName: "Open Sans",
         bodyLineHeight: 1.6,
         codeFontScale: 0.9,
+        // Chromium resolves the theme's `monospace` fallback to Menlo on macOS.
+        codeFontName: "Menlo",
         contentMaxWidth: 860,
         wideMaxWidth: 1024,
         widestMaxWidth: 1200,
@@ -87,13 +95,25 @@ enum BuiltInTheme {
         blockMargin: 12.8,
         // `h1..h6 { margin: 1rem 0 }`
         headingMargin: 16,
-        // `ul, ol { padding-left: 30px }`
-        listIndent: 30,
+        // `ul, ol { padding-left: 30px }`, tightened by 4pt: at 30 the item text
+        // reads a touch heavier here than in the original (the painted disc sits
+        // inside the indent rather than hanging in the padding like a browser
+        // marker), and the tighter column reads closer to the reference.
+        listIndent: 26,
         // `blockquote { padding: 0 15px }`
         quoteIndent: 15,
         quoteBarWidth: 4,
-        // `.md-fences { padding: 8px 0 6px }`
+        // `.md-fences { padding: 8px 0 6px }` plus the CSS cascade's horizontal
+        // inset: `.md-fences` 4px + `.CodeMirror-lines` 4px + `pre` 4px = 12.
         codePadding: 8,
+        codePaddingLeft: 12,
+        codePaddingTop: 8,
+        codePaddingBottom: 6,
+        codeBorder: DynamicColor(0xE7EAED, 0x444C56),
+        // `li p { margin: .5rem 0 }` - the gap between consecutive items.
+        listItemSpacing: 8,
+        // `hr { margin: 16px 0 }`
+        ruleMargin: 16,
         // `table th, table td { padding: 6px 13px }`
         tableCellPadding: 6
     )

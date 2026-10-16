@@ -71,8 +71,7 @@ struct BlockStyle {
             // Only feeds the paragraph style's tab stop now; the marker is drawn by
             // the decoration layer right against the text column.
             markerWidth: max(theme.listIndent * 0.28, 14),
-            lineHeight: theme.bodyLineHeight * theme.bodyFontSize,
-            spacing: 0
+            lineHeight: theme.bodyLineHeight * theme.bodyFontSize
         )
         style.decoration.append(
             .listMarker(text: marker, width: indent, alignment: .right)
@@ -89,8 +88,7 @@ struct BlockStyle {
         style.base[.paragraphStyle] = NSParagraphStyle.markdownListItem(
             indent: indent,
             markerWidth: max(theme.listIndent * 0.28, 14),
-            lineHeight: theme.bodyLineHeight * theme.bodyFontSize,
-            spacing: 0
+            lineHeight: theme.bodyLineHeight * theme.bodyFontSize
         )
         style.decoration.append(.taskCheckbox(checked: checked, width: indent))
         return style
@@ -106,7 +104,13 @@ struct BlockStyle {
             padding: theme.codePaddingLeft ?? theme.codePadding
         )
         style.decoration.append(
-            .codeBlock(background: theme.codeBlockBackground.nsColor, radius: EditorMetrics.radiusSmall)
+            .codeBlock(
+                background: theme.codeBlockBackground.nsColor,
+                radius: EditorMetrics.radiusSmall,
+                border: theme.codeBorder?.nsColor,
+                topInset: theme.codePaddingTop,
+                bottomInset: theme.codePaddingBottom
+            )
         )
         return style
     }
@@ -147,7 +151,7 @@ struct BlockStyle {
             font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor
         )
-        style.base[.paragraphStyle] = NSParagraphStyle.markdownRuleLine()
+        style.base[.paragraphStyle] = NSParagraphStyle.markdownRuleLine(spacingBefore: theme.ruleMargin)
         style.decoration.append(.horizontalRule(color: theme.rule.nsColor, height: 2))
         return style
     }
@@ -189,7 +193,11 @@ struct BlockStyle {
             padding: theme.codePaddingLeft ?? theme.codePadding
         )
         style.decoration.append(
-            .codeBlock(background: theme.rawBlockEditingBackground.nsColor, radius: EditorMetrics.radiusSmall)
+            .codeBlock(
+                background: theme.rawBlockEditingBackground.nsColor,
+                radius: EditorMetrics.radiusSmall,
+                border: nil, topInset: 0, bottomInset: 0
+            )
         )
         return style
     }
@@ -244,7 +252,10 @@ enum DecorationPlan {
     case quoteBar(color: NSColor, width: CGFloat, inset: CGFloat)
     case listMarker(text: String, width: CGFloat, alignment: NSTextAlignment)
     case taskCheckbox(checked: Bool, width: CGFloat)
-    case codeBlock(background: NSColor, radius: CGFloat)
+    case codeBlock(
+        background: NSColor, radius: CGFloat, border: NSColor?,
+        topInset: CGFloat, bottomInset: CGFloat
+    )
     case horizontalRule(color: NSColor, height: CGFloat)
     case inlineCode(background: NSColor, radius: CGFloat)
     case alertBox(title: String, background: NSColor, border: NSColor)
@@ -324,9 +335,9 @@ extension NSParagraphStyle {
         return style
     }
 
-    static func markdownListItem(
-        indent: CGFloat, markerWidth: CGFloat, lineHeight: CGFloat, spacing: CGFloat = 0
-    ) -> NSParagraphStyle {
+    static func markdownListItem(indent: CGFloat, markerWidth: CGFloat, lineHeight: CGFloat)
+        -> NSParagraphStyle
+    {
         let style = NSMutableParagraphStyle()
         // The marker glyphs are hidden (zero-width), and TextKit glues them into the
         // *previous* line fragment - so the item's text line lays out as a
@@ -339,6 +350,13 @@ extension NSParagraphStyle {
         style.defaultTabInterval = markerWidth
         style.minimumLineHeight = lineHeight
         style.maximumLineHeight = lineHeight
+        // The gap below each item row (`li p { margin: .5rem 0 }` in the original's
+        // base style) is NOT carried here: the item's hidden marker glyphs are
+        // zero-width and glue backwards into the previous line fragment, so an item
+        // paragraph's first line fragment is the *previous* item's row and TextKit
+        // drops any paragraph spacing at that glued boundary. The gap comes from
+        // `MarkerHider.lineSpacingAfterGlyphAt` instead, per row, after the layout
+        // knows exactly where the row ends.
         style.paragraphSpacing = 0
         style.paragraphSpacingBefore = 0
         return style
@@ -376,12 +394,14 @@ extension NSParagraphStyle {
     /// break: collapsing the line height here is what stops the hidden `---` from
     /// taking up vertical space. It must never be used for a block marker, because the
     /// marker shares its line with real text - see `collapsed(from:theme:)`.
-    static func markdownRuleLine() -> NSParagraphStyle {
+    static func markdownRuleLine(spacingBefore: CGFloat = 0) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.minimumLineHeight = 0.01
         style.maximumLineHeight = 0.01
         style.paragraphSpacing = 0
-        style.paragraphSpacingBefore = 0
+        // The block after a rule brings its own top spacing, mirroring CSS margin
+        // collapsing (`hr { margin: 16px 0 }` collapses with the neighbour's own).
+        style.paragraphSpacingBefore = spacingBefore
         style.lineBreakMode = .byClipping
         return style
     }

@@ -37,10 +37,13 @@ struct AttributedBuilder {
         state.headings = document.headings
         let result = NSMutableAttributedString()
         for (index, block) in document.blocks.enumerated() {
+            let boundaryStart = result.length
+            var separatorLength = 0
             if index > 0 {
                 // Separator for the blank lines between blocks: the terminator the
                 // previous block ended with, `\r\n` included, so the buffer stays
                 // byte-exact for CRLF documents.
+                separatorLength = document.blocks[index - 1].endsWithCarriageReturn ? 2 : 1
                 result.append(
                     NSAttributedString(
                         string: document.blocks[index - 1].endsWithCarriageReturn
@@ -48,10 +51,43 @@ struct AttributedBuilder {
                     )
                 )
             }
+            var leadingLength = 0
             for line in state.leadingText(for: block) {
+                leadingLength += (line as NSString).length
                 result.append(NSAttributedString(string: line))
             }
             state.append(block: block, into: result, depth: 0)
+            // Backfill the boundary runs (separator + leading blank lines) with a
+            // collapsed line carrying the block's own `spacingBefore`.
+            //
+            // A block whose source opens with hidden markers - `## `, `- `, the
+            // fence - lays its first glyphs out with zero width, and TextKit glues
+            // those glyphs backwards into the fragment that precedes them: the
+            // block's first *line fragment* therefore begins at the separator, and
+            // TextKit reads the line's geometry (height and `spacingBefore`) from
+            // the fragment's first character. Left unattributed, that character
+            // yields the 14pt default with no spacing - the block's own
+            // `spacingBefore` (a heading's margin, an item's `li` gap) silently
+            // disappears. Collapsing the boundary runs to a hairline that carries
+            // exactly that spacing renders the gap where the theme asks for it,
+            // without inflating the boundary into a visible blank row. Blocks that
+            // start with visible text need no help; for them the backfill is a
+            // no-op (the separator already sits inside their first fragment).
+            let contentStart = boundaryStart + separatorLength + leadingLength
+            guard contentStart > boundaryStart, contentStart < result.length,
+                let leadingStyle = result.attribute(
+                    .paragraphStyle, at: contentStart, effectiveRange: nil
+                ) as? NSParagraphStyle
+            else { continue }
+            let boundary = NSMutableParagraphStyle()
+            boundary.setParagraphStyle(leadingStyle)
+            boundary.minimumLineHeight = 0.01
+            boundary.maximumLineHeight = 0.01
+            boundary.lineHeightMultiple = 1
+            result.addAttribute(
+                .paragraphStyle, value: boundary,
+                range: NSRange(location: boundaryStart, length: contentStart - boundaryStart)
+            )
         }
         // The newline that terminates the last block is not part of that block's
         // source slice, so the loop above never emits it and the file would lose its
@@ -240,14 +276,22 @@ struct AttributedBuilder {
                     [
                         .codeBlock(
                             background: theme.rawBlockEditingBackground.nsColor,
-                            radius: EditorMetrics.radiusSmall
+                            radius: EditorMetrics.radiusSmall,
+                            border: nil, topInset: 0, bottomInset: 0
                         )
                     ],
                     for: block.id
                 )
+                let start = result.length
                 emitPlain(
                     block.source, into: result, style: BlockStyle.htmlBlock(theme: theme),
                     block: block, depth: depth
+                )
+                // The whole raw block is body: the decorator unions its lines for
+                // the editing background (no insets, no border for this one).
+                result.addAttribute(
+                    MarkdownAttribute.codeBody, value: true,
+                    range: NSRange(location: start, length: result.length - start)
                 )
             case .table:
                 appendTable(block, into: result, depth: depth)
@@ -697,7 +741,10 @@ struct AttributedBuilder {
                     [
                         .codeBlock(
                             background: theme.codeBlockBackground.nsColor,
-                            radius: EditorMetrics.radiusSmall
+                            radius: EditorMetrics.radiusSmall,
+                            border: theme.codeBorder?.nsColor,
+                            topInset: theme.codePaddingTop,
+                            bottomInset: theme.codePaddingBottom
                         )
                     ],
                     for: child.id
@@ -760,7 +807,8 @@ struct AttributedBuilder {
                     [
                         .codeBlock(
                             background: theme.rawBlockEditingBackground.nsColor,
-                            radius: EditorMetrics.radiusSmall
+                            radius: EditorMetrics.radiusSmall,
+                            border: nil, topInset: 0, bottomInset: 0
                         )
                     ],
                     for: child.id
@@ -937,6 +985,7 @@ struct AttributedBuilder {
                 result.addAttribute(
                     .foregroundColor, value: theme.syntax.plain.nsColor, range: lineRange
                 )
+                result.addAttribute(MarkdownAttribute.codeBody, value: true, range: lineRange)
                 applyHighlights(
                     highlights, from: &highlightCursor,
                     line: NSRange(location: bodyOffset, length: rest.utf16.count),
@@ -1063,6 +1112,10 @@ struct AttributedBuilder {
                     result.addAttribute(
                         .foregroundColor, value: theme.syntax.plain.nsColor, range: lineRange
                     )
+                    // Body-line marker: the decorator unions these lines for the
+                    // block's background and border, leaving the invisible fence
+                    // rows out.
+                    result.addAttribute(MarkdownAttribute.codeBody, value: true, range: lineRange)
                     applyHighlights(
                         highlights, from: &highlightCursor,
                         line: NSRange(location: bodyOffset, length: line.utf16.count),
@@ -1497,14 +1550,16 @@ struct AttributedBuilder {
                     open: .superscript, close: .superscript,
                     override: InlineStyle.superscript(theme: theme, base: style))
             case .code:
-                let start = result.length
-                append(
-                    node.verbatim,
-                    runAttributes(
-                        InlineStyle.code(theme: theme, base: style).applied(to: style),
-                        block: block, depth: depth
-                    ),
-                    to: result
+                // Typora hides the backticks and chips the code text, so the
+                // delimiters go out as hidden marker runs and the payload carries
+                // the code style - the same treatment as every other delimited
+                // inline. Emitting `node.verbatim` instead left the backticks
+                // visible and the chrome (padding, border) without a clean run to
+                // attach to.
+                appendDelimited(
+                    node, into: result, style: style, block: block, depth: depth,
+                    open: .codeOpen, close: .codeClose,
+                    override: InlineStyle.code(theme: theme, base: style)
                 )
                 register(
                     [
@@ -1514,20 +1569,6 @@ struct AttributedBuilder {
                         )
                     ],
                     for: block.id
-                )
-                let contentStart = start + node.prefix.utf16.count
-                let plainStart = plainCursor
-                plainCursor = plainStart + node.payload.utf16.count
-                inlineNodes.append(
-                    InlineRange(
-                        index: inlineNodes.count, kind: node.kind,
-                        range: NSRange(location: start, length: result.length - start),
-                        blockID: block.id,
-                        plainRange: NSRange(location: plainStart, length: node.payload.utf16.count),
-                        contentRange: NSRange(
-                            location: contentStart, length: node.payload.utf16.count
-                        )
-                    )
                 )
             case .link, .refLink:
                 appendLink(node, into: result, style: style, block: block, depth: depth)
@@ -2019,8 +2060,13 @@ struct AttributedBuilder {
             _ inlines: [InlineNode], block: BlockNode
         ) -> [InlineNode]? {
             let checked = block.attributes.checked
-            guard checked != nil || block.attributes.isOrdered == true,
-                let first = inlines.first, first.kind == .text
+            // A plain bullet needs no trim: the parser already stripped `- `, so
+            // the item's inlines are exactly the first line's content. Returning
+            // them keeps inline styling (links, emphasis) alive on bullet items;
+            // ordered and task items still need the marker remnants (`. `,
+            // `[x] `) removed from the child's text below.
+            guard checked != nil || block.attributes.isOrdered == true else { return inlines }
+            guard let first = inlines.first, first.kind == .text
             else { return nil }
             var node = first
             if let checked {
