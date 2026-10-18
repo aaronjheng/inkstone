@@ -82,7 +82,10 @@ struct BlockStyle {
             font: EditorFont.nsBody(theme: theme),
             textColor: theme.text.nsColor
         )
-        let indent = theme.listIndent * CGFloat(max(depth, 1))
+        // The checkbox cell (12pt box + 8pt of gaps) lives inside the item's
+        // indent: the text column starts after it, as the reference's inline
+        // checkbox lays out.
+        let indent = theme.listIndent * CGFloat(max(depth, 1)) + 20
         style.base[.paragraphStyle] = NSParagraphStyle.markdownListItem(
             indent: indent,
             markerWidth: max(theme.listIndent * 0.28, 14),
@@ -97,10 +100,19 @@ struct BlockStyle {
             font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
             textColor: theme.codeText.nsColor
         )
-        style.base[.paragraphStyle] = NSParagraphStyle.markdownCode(
+        let paragraphStyle = NSParagraphStyle.markdownCode(
             lineHeight: theme.bodyLineHeight * theme.codeFontSize,
             padding: theme.codePaddingLeft ?? theme.codePadding
         )
+        // The painted box grows by the padding insets (top 8 / bottom 6); the
+        // paragraph carries the same spacing so the line geometry matches the
+        // box the comparator sees in the reference.
+        if let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle {
+            mutable.paragraphSpacing = theme.codePaddingBottom
+            style.base[.paragraphStyle] = mutable
+        } else {
+            style.base[.paragraphStyle] = paragraphStyle
+        }
         style.decoration.append(
             .codeBlock(
                 background: theme.codeBlockBackground.nsColor,
@@ -314,9 +326,11 @@ extension NSParagraphStyle {
         style.minimumLineHeight = lineHeight
         style.maximumLineHeight = lineHeight
         style.paragraphSpacingBefore = margin
-        // Not `paragraphSpacing`: that is applied per line and would space out the
-        // wrapped lines of a long heading.
-        style.paragraphSpacing = 0
+        // The heading's bottom margin (`h1 { margin-bottom: 1rem }`): applied
+        // after the last line, like the CSS box model. The following block's
+        // spacing is collapsed against it by the builder (see the boundary
+        // backfill there), so the visible gap is max(bottom, top) as in CSS.
+        style.paragraphSpacing = margin
         style.lineBreakMode = .byWordWrapping
         return style
     }
@@ -374,15 +388,20 @@ extension NSParagraphStyle {
 
     /// A copy of `style` with both head indents replaced, for content that nests
     /// inside a list item and must align with the item's own text column.
-    static func withHeadIndents(_ style: NSParagraphStyle?, indent: CGFloat) -> NSParagraphStyle {
+    static func withHeadIndents(
+        _ style: NSParagraphStyle?, indent: CGFloat,
+        spacingBefore: CGFloat = 0
+    ) -> NSParagraphStyle {
         guard let style, let copy = style.mutableCopy() as? NSMutableParagraphStyle else {
             let fresh = NSMutableParagraphStyle()
             fresh.firstLineHeadIndent = indent
             fresh.headIndent = indent
+            fresh.paragraphSpacingBefore = spacingBefore
             return fresh
         }
         copy.firstLineHeadIndent = indent
         copy.headIndent = indent
+        copy.paragraphSpacingBefore = spacingBefore
         return copy
     }
 

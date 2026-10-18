@@ -72,9 +72,9 @@ enum MarkdownAttribute {
     static let codeRun = NSAttributedString.Key("md.codeRun")
 
     /// Reads the hidden flag at `location` in an O(1)-amortised way.
-    static func isHidden(_ storage: NSTextStorage, at location: Int) -> Bool {
-        guard location >= 0, location < storage.length else { return false }
-        return storage.attribute(MarkdownAttribute.hidden, at: location, effectiveRange: nil) as? Bool == true
+    static func isHidden(_ text: NSAttributedString, at location: Int) -> Bool {
+        guard location >= 0, location < text.length else { return false }
+        return text.attribute(hidden, at: location, effectiveRange: nil) as? Bool == true
     }
 }
 
@@ -177,10 +177,15 @@ enum MarkerRole {
 
     /// Whether the marker is hidden while the caret is elsewhere.
     ///
-    /// `orderedNumber` and `horizontalRule` are the two exceptions: an ordered
-    /// list's `1.` is synthesised at render time rather than read from the buffer,
-    /// and a horizontal rule is drawn.
-    var isHiddenWhenIdle: Bool { self != .orderedNumber && self != .horizontalRule }
+    /// Every block marker hides: its visual is a drawn affordance (bullet,
+    /// synthesised number, checkbox, rule), never the source characters. An
+    /// ordered list's `1.` is drawn by the decoration layer (`.listMarker`), so
+    /// the buffer's digits collapse to zero width exactly like a bullet's dash -
+    /// which is also what lines the item's text up on the text column no matter
+    /// how wide the number is. Inline delimiters hide too and are revealed under
+    /// the caret. (`horizontalRule` is never attached to a run today; the
+    /// thematic break hides through `emitHidden`.)
+    var isHiddenWhenIdle: Bool { self != .horizontalRule }
 }
 
 /// Where and how wide the document is laid out.

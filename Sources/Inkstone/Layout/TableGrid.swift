@@ -119,7 +119,11 @@ struct TableGrid {
         self.columnWidths = usable
         self.font = font
         self.color = theme.text.nsColor
+        // `table th/td { padding: 6px 13px }` + the collapsed 1px row border:
+        // each painted row is the cell's line box plus its vertical padding
+        // and border, exactly as the reference's CSS table lays out.
         self.rowHeight = theme.bodyLineHeight * theme.bodyFontSize
+            + theme.tableCellPadding * 2 + 1
         // A cell that does not fit wraps, and the row has to grow to hold it: the
         // buffer's row lines are zero width and never wrap on their own, so the
         // space they occupy has to be decided here and then written into the

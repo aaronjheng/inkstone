@@ -9,6 +9,13 @@ import AppKit
 @MainActor
 struct InkstoneApp {
     static func main() {
+        // Headless layout dump: parse the arguments before any UI exists and
+        // exit without NSApplication - the comparison pipeline drives this
+        // (see Editor/LayoutDump.swift and .agents/skills/render-parity/).
+        if CommandLine.arguments.contains("--dump-layout") {
+            FontRegistration.registerBundledFonts()
+            exit(LayoutDump.run(CommandLine.arguments))
+        }
         // Theme fonts have to resolve before the first window is built.
         FontRegistration.registerBundledFonts()
         let application = NSApplication.shared

@@ -36,7 +36,44 @@ struct AttributedBuilder {
         // list is resolved once up front rather than per block.
         state.headings = document.headings
         let result = NSMutableAttributedString()
+        // CSS margin collapsing: the gap before a block is the larger of the
+        // previous block's bottom margin and its own top margin (`0.8em` for
+        // p/quote/list/table, `1rem` for headings and rules).
+        var previousKind: BlockKind?
+        var previousAppliedAfter: CGFloat = 0
+        // The spacing a block has already applied AFTER its last line (its CSS
+        // bottom margin — headings and rules carry one, plain blocks don't).
+        func appliedSpacingAfter(_ kind: BlockKind) -> CGFloat {
+            switch kind {
+            case .heading: return theme.headingMargin
+            case .hr: return theme.ruleMargin
+            default: return 0
+            }
+        }
+        func cssMargin(_ kind: BlockKind) -> CGFloat {
+            switch kind {
+            case .heading: return theme.headingMargin
+            case .hr: return theme.ruleMargin
+            case .fences: return theme.fencesMargin
+            default: return theme.blockMargin
+            }
+        }
         for (index, block) in document.blocks.enumerated() {
+            var collapsedSpacing: CGFloat?
+            if let previousKind {
+                // CSS margin collapsing: max(previous bottom, own top), minus
+                // what the previous block has already applied after its last
+                // line (TextKit 1 sums the two; the reference collapses them).
+                collapsedSpacing = max(
+                    cssMargin(previousKind), cssMargin(block.kind)
+                ) - previousAppliedAfter
+            } else {
+                // The first block: the reference drops a first child's
+                // margin-top (`#write > :first-child` behaviour — measured:
+                // the h1 box top sits at the content edge, no 16pt inset), so
+                // no leading spacing here either.
+                collapsedSpacing = 0
+            }
             let boundaryStart = result.length
             var separatorLength = 0
             if index > 0 {
@@ -56,23 +93,34 @@ struct AttributedBuilder {
                 leadingLength += (line as NSString).length
                 result.append(NSAttributedString(string: line))
             }
-            state.append(block: block, into: result, depth: 0)
+            // A fenced block's first row is its hidden opening delimiter: the
+            // fence's padding-top rides on the boundary spacing, above it.
+            var spacingOverride = collapsedSpacing ?? cssMargin(block.kind)
+            if block.kind == .fences {
+                spacingOverride += theme.codePaddingTop
+            }
+            state.append(
+                block: block, into: result, depth: 0,
+                spacingBefore: spacingOverride
+            )
+            previousAppliedAfter = appliedSpacingAfter(block.kind)
+            previousKind = block.kind
             // Backfill the boundary runs (separator + leading blank lines) with a
-            // collapsed line carrying the block's own `spacingBefore`.
+            // collapsed line carrying the block's collapsed margin.
             //
             // A block whose source opens with hidden markers - `## `, `- `, the
             // fence - lays its first glyphs out with zero width, and TextKit glues
             // those glyphs backwards into the fragment that precedes them: the
             // block's first *line fragment* therefore begins at the separator, and
             // TextKit reads the line's geometry (height and `spacingBefore`) from
-            // the fragment's first character. Left unattributed, that character
-            // yields the 14pt default with no spacing - the block's own
-            // `spacingBefore` (a heading's margin, an item's `li` gap) silently
-            // disappears. Collapsing the boundary runs to a hairline that carries
-            // exactly that spacing renders the gap where the theme asks for it,
-            // without inflating the boundary into a visible blank row. Blocks that
-            // start with visible text need no help; for them the backfill is a
-            // no-op (the separator already sits inside their first fragment).
+            // the fragment's first character — the boundary, NOT the block's own
+            // style, whose spacing never applies there. Left unattributed, that
+            // character yields the 14pt default with no spacing. Blocks that
+            // start with visible text still need the hairline - an unstyled blank
+            // line renders at full body height - but must stay flat: their own
+            // paragraph applies the spacing inside the fragment, and a spacing on
+            // the hairline as well doubled every paragraph gap (verified both on
+            // screen and headlessly).
             let contentStart = boundaryStart + separatorLength + leadingLength
             guard contentStart > boundaryStart, contentStart < result.length,
                 let leadingStyle = result.attribute(
@@ -81,6 +129,19 @@ struct AttributedBuilder {
             else { continue }
             let boundary = NSMutableParagraphStyle()
             boundary.setParagraphStyle(leadingStyle)
+            // The boundary hairline carries the block's spacing ONLY for glued
+            // blocks (hidden first glyphs): TextKit reads the spacing of the
+            // whole glued fragment from its FIRST character's paragraph style —
+            // the boundary — so the block's own `spacingBefore` never applies
+            // there, and the hairline is the only place it can come from.
+            // Blocks whose first character is visible start their paragraph
+            // normally and apply their own spacing inside the fragment; a
+            // spacing on the hairline as well doubled every paragraph gap to
+            // 2× the reference (verified both on screen and headlessly).
+            boundary.paragraphSpacingBefore =
+                MarkdownAttribute.isHidden(result, at: contentStart)
+                ? (collapsedSpacing ?? 0)
+                : 0
             boundary.minimumLineHeight = 0.01
             boundary.maximumLineHeight = 0.01
             boundary.lineHeightMultiple = 1
@@ -177,25 +238,51 @@ struct AttributedBuilder {
 
         // MARK: Blocks
 
-        func append(block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
+        /// The task item's text column includes the checkbox cell (a 12pt box plus
+        /// 4pt gaps on each side, as the reference's inline checkbox lays out).
+        func taskTextColumn(_ indent: CGFloat) -> CGFloat { indent + 20 }
+
+        /// `spacingBefore` carries the CSS-collapsed margin for top-level blocks
+        /// (see the caller); nested calls keep their own style's spacing.
+        func append(
+            block: BlockNode, into result: NSMutableAttributedString, depth: Int,
+            spacingBefore: CGFloat
+        ) {
             let start = result.length
             // Plain-text offsets restart per block: a find hit's offset counts from
             // the block's own content.
             plainCursor = 0
             // Markers emitted anywhere inside this block - block markers and inline
             // delimiters alike - inherit the paragraph style of the block's own text.
-            let inherited = markerParagraphStyle(for: block)
+            let inherited = markerParagraphStyle(for: block, spacingBefore: spacingBefore)
             blockMarkerStyle = inherited
             isFirstLineOfBlock = true
             defer { blockMarkerStyle = nil }
+            /// The collapsed margin for top-level blocks; nested blocks (depth
+            /// > 0) apply their own style's spacing.
+            func collapsedStyle(_ style: BlockStyle) -> BlockStyle {
+                guard depth == 0,
+                    let paragraphStyle = style.base[.paragraphStyle]
+                        as? NSParagraphStyle,
+                    let mutable = paragraphStyle.mutableCopy()
+                        as? NSMutableParagraphStyle
+                else { return style }
+                mutable.paragraphSpacingBefore = spacingBefore
+                var styled = style
+                styled.base[.paragraphStyle] = mutable
+                return styled
+            }
             switch block.kind {
             case .paragraph:
                 emit(
                     inlines: block.inlines, into: result,
-                    style: BlockStyle.paragraph(theme: theme), block: block, depth: depth
+                    style: collapsedStyle(BlockStyle.paragraph(theme: theme)),
+                    block: block, depth: depth
                 )
             case .heading:
-                let style = BlockStyle.heading(theme: theme, level: block.attributes.level)
+                let style = collapsedStyle(
+                    BlockStyle.heading(theme: theme, level: block.attributes.level)
+                )
                 register(style.decoration, for: block.id)
                 // Markers first. Appending them after the text produced the string
                 // "Credits#" for `# Credits`, which is a different document.
@@ -209,7 +296,7 @@ struct AttributedBuilder {
                         DecorationPlan.quoteBar(
                             color: theme.quoteBar.nsColor,
                             width: theme.quoteBarWidth,
-                            inset: theme.quoteIndent
+                            inset: 0
                         )
                     ],
                     for: block.id
@@ -226,8 +313,35 @@ struct AttributedBuilder {
                         for: block.id
                     )
                 }
-                let quoteStyle = BlockStyle.paragraph(theme: theme)
+                // The quote's own text colour and indent: `blockquote { color:
+                // #777777; border-left: 4px; padding: 0 15px }` - the text sits
+                // 19pt in from the content edge, the bar paints in the indent.
+                var quoteStyle = BlockStyle.paragraph(theme: theme)
+                quoteStyle.textColor = theme.quoteText.nsColor
+                if let paragraphStyle = quoteStyle.base[.paragraphStyle]
+                    as? NSParagraphStyle,
+                    let mutable = paragraphStyle.mutableCopy()
+                        as? NSMutableParagraphStyle
+                {
+                    let quoteInset = theme.quoteIndent + theme.quoteBarWidth
+                    mutable.headIndent = quoteInset
+                    mutable.firstLineHeadIndent = quoteInset
+                    quoteStyle.base[.paragraphStyle] = mutable
+                }
+                quoteStyle = collapsedStyle(quoteStyle)
                 let collapsed = BlockStyle.collapsed(from: quoteStyle, theme: theme)
+                // An empty `>` line separates the quote's paragraphs: Typora
+                // renders it as the paragraph margin (12.8), not a full line.
+                var emptyLineParagraphStyle: NSMutableParagraphStyle?
+                if let paragraphStyle = quoteStyle.base[.paragraphStyle]
+                    as? NSParagraphStyle,
+                    let mutable = paragraphStyle.mutableCopy()
+                        as? NSMutableParagraphStyle
+                {
+                    mutable.minimumLineHeight = theme.blockMargin
+                    mutable.maximumLineHeight = theme.blockMargin
+                    emptyLineParagraphStyle = mutable
+                }
                 let lines = block.source.split(
                     separator: "\n", omittingEmptySubsequences: false
                 )
@@ -242,10 +356,19 @@ struct AttributedBuilder {
                     {
                         markerLength += 1
                     }
+                    let lineContent = String(line.dropFirst(markerLength))
+                    let isEmptyLine = lineContent.trimmingCharacters(in: .whitespaces).isEmpty
                     if markerLength > 0 {
+                        // The quote mark opens the paragraph: its run must carry
+                        // the quote's own paragraph style (headIndent 19), or the
+                        // marker style (flat) wins as the paragraph's first char.
+                        // An empty `>` line collapses to the paragraph margin.
                         appendHiddenRun(
                             String(line.prefix(markerLength)), role: .quoteMark, into: result,
-                            style: collapsed, block: block, depth: depth
+                            style: collapsed, block: block, depth: depth,
+                            paragraphStyle: (isEmptyLine
+                                ? emptyLineParagraphStyle
+                                : quoteStyle.base[.paragraphStyle]) as? NSParagraphStyle
                         )
                     }
                     // Rendered from the source line rather than from the child nodes:
@@ -298,7 +421,8 @@ struct AttributedBuilder {
             case .hr:
                 register([.horizontalRule(color: theme.rule.nsColor, height: 2)], for: block.id)
                 emitHidden(
-                    block.source, into: result, style: BlockStyle.horizontalRule(theme: theme),
+                    block.source, into: result,
+                    style: collapsedStyle(BlockStyle.horizontalRule(theme: theme)),
                     block: block, depth: depth
                 )
             case .toc:
@@ -478,9 +602,10 @@ struct AttributedBuilder {
             } else if ordered {
                 marker = "\(block.attributes.listStart > 0 ? block.attributes.listStart : 1)."
             } else {
-                // The theme's own bullet, not the source's `-`/`*`: every Typora
-                // theme normalises the marker through `list-style-type`.
-                marker = String(theme.listBullet)
+                // The theme's ladder, not the source's `-`/`*`: Typora's `#write`
+                // base leaves `list-style-type` to the browser, which renders
+                // disc, circle, square down the nesting levels.
+                marker = String(theme.listBullet(depth: depth + 1))
             }
             let style: BlockStyle
             if block.attributes.checked != nil {
@@ -516,8 +641,10 @@ struct AttributedBuilder {
             // For an ordered item the parser records only the digits as the bullet and
             // leaves the `. ` in the content, so the hidden run is taken from the
             // source rather than from `marker` - otherwise the `. ` was counted twice
-            // and the buffer no longer matched. The content below is then taken from
-            // the same source prefix so the two agree.
+            // and the buffer no longer matched. The number itself is drawn by the
+            // decoration layer, right-aligned against the text column, so wide
+            // numbers (`10.`) grow leftwards into the indent instead of shoving the
+            // item's text off the shared column.
             //
             // An item parsed at the list level keeps its own indentation in `source`
             // (`  - [x] done`); the marker length is measured on that line, and the
@@ -557,8 +684,8 @@ struct AttributedBuilder {
             // marker draws exactly there, never on nested or wrapped lines. The run
             // attributes still come from the visual block through the override.
             if ordered && block.attributes.checked == nil {
-                // Ordered numbers are synthesised, so they must not be hidden and
-                // must not occupy the marker column twice: hide the source digits.
+                // The source digits hide (zero-width) and the decoration layer
+                // draws the synthesised number; see `.listMarker`.
                 appendHiddenRun(
                     markerText, role: .orderedNumber, into: result,
                     style: markerStyle, block: block, depth: depth,
@@ -694,10 +821,11 @@ struct AttributedBuilder {
             case .blockquote:
                 let quoteStyle = BlockStyle(
                     font: continuationStyle.font,
-                    textColor: continuationStyle.textColor,
+                    // `blockquote { color: #777777 }`, as at the top level.
+                    textColor: theme.quoteText.nsColor,
                     base: [
                         .paragraphStyle: NSParagraphStyle.markdownQuote(
-                            indent: textColumn + theme.quoteIndent,
+                            indent: textColumn + theme.quoteIndent + theme.quoteBarWidth,
                             lineHeight: theme.bodyLineHeight * theme.bodyFontSize
                         )
                     ],
@@ -707,7 +835,7 @@ struct AttributedBuilder {
                     DecorationPlan.quoteBar(
                         color: theme.quoteBar.nsColor,
                         width: theme.quoteBarWidth,
-                        inset: theme.quoteIndent
+                        inset: textColumn
                     )
                 ]
                 if let alert = child.attributes.alert {
@@ -732,7 +860,8 @@ struct AttributedBuilder {
                     base: [
                         .paragraphStyle: NSParagraphStyle.withHeadIndents(
                             base.base[.paragraphStyle] as? NSParagraphStyle,
-                            indent: textColumn + (theme.codePaddingLeft ?? theme.codePadding)
+                            indent: textColumn + (theme.codePaddingLeft ?? theme.codePadding),
+                            spacingBefore: theme.codePaddingTop
                         )
                     ],
                     decoration: []
@@ -924,7 +1053,9 @@ struct AttributedBuilder {
                         appendHiddenRun(
                             String(rest.prefix(markerLength)), role: .quoteMark, into: result,
                             style: BlockStyle.collapsed(from: style, theme: theme),
-                            block: block, depth: depth
+                            block: block, depth: depth,
+                            paragraphStyle: style.base[.paragraphStyle]
+                                as? NSParagraphStyle
                         )
                     }
                     emitPlain(
@@ -1380,7 +1511,9 @@ struct AttributedBuilder {
         ///
         /// It has to be the style of the block's *visible* text: a marker is the first
         /// run on its line, and TextKit takes the line's height from it.
-        private func markerParagraphStyle(for block: BlockNode) -> NSParagraphStyle? {
+        private func markerParagraphStyle(
+            for block: BlockNode, spacingBefore: CGFloat
+        ) -> NSParagraphStyle? {
             let style: BlockStyle
             switch block.kind {
             case .paragraph, .blockquote:
@@ -1408,7 +1541,11 @@ struct AttributedBuilder {
                 // style is already correct and is applied by `emitHidden`.
                 return nil
             }
-            return style.base[.paragraphStyle] as? NSParagraphStyle
+            guard let paragraphStyle = style.base[.paragraphStyle] as? NSParagraphStyle,
+                let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle
+            else { return nil }
+            mutable.paragraphSpacingBefore = spacingBefore
+            return mutable
         }
 
         /// The paragraph style hidden markers must inherit, set for the duration of a

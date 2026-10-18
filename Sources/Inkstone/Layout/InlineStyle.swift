@@ -81,9 +81,9 @@ struct InlineStyle {
             attributes: [
                 .font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
                 .foregroundColor: theme.inlineCodeText.nsColor,
-                .backgroundColor: theme.inlineCodeBackground.nsColor,
-                // Chrome (padding + border) is painted by the decorator; this
-                // attribute marks the runs it works on.
+                // Chrome (the snug rounded chip) is painted by the decorator over
+                // `md.codeRun` runs; a background attribute here would fill the full
+                // line box instead and read as a highlight stripe.
                 MarkdownAttribute.codeRun: true,
             ]
         )

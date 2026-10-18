@@ -125,6 +125,112 @@ enum BlockDecorator {
         var subBlockID: Int?
     }
 
+    /// The geometry the decoration layer paints for a list marker.
+    ///
+    /// The reference leaves `list-style-type` to the browser, so the outside
+    /// marker is the UA ladder - disc, circle, square by depth - and it hangs
+    /// like a browser marker: centred a fixed em-gap left of the text column
+    /// (measured 0.95em on a rendered document), not mid-indent, so the gap
+    /// stays constant at every nesting level. Drawing the `•` glyph instead
+    /// rendered it at ~60% of the reference size and off-centre, which is why
+    /// shapes are painted. Exposed for the headless layout dump so the exported
+    /// geometry is the exact geometry this layer paints.
+    struct ListMarkerGeometry {
+        enum Shape {
+            case disc, ring, square, text(String)
+        }
+
+        var shape: Shape
+        var center: CGPoint
+        /// Disc diameter, ring outer diameter, square side.
+        var size: CGFloat
+        /// Ring stroke width; zero for the other shapes.
+        var lineWidth: CGFloat
+
+        init(shape: Shape, center: CGPoint, size: CGFloat, lineWidth: CGFloat = 0) {
+            self.shape = shape
+            self.center = center
+            self.size = size
+            self.lineWidth = lineWidth
+        }
+    }
+
+    static func listMarkerGeometry(
+        text: String, width: CGFloat, lineRect: NSRect, theme: EditorTheme
+    ) -> ListMarkerGeometry {
+        let em = theme.bodyFontSize
+        let center = CGPoint(x: lineRect.minX + width - em * 0.95, y: lineRect.midY)
+        switch text {
+        case "•":
+            return ListMarkerGeometry(shape: .disc, center: center, size: em * 0.375)
+        case "◦":
+            return ListMarkerGeometry(
+                shape: .ring, center: center, size: em * 0.4375, lineWidth: em * 0.0625
+            )
+        case "▪":
+            return ListMarkerGeometry(shape: .square, center: center, size: em * 0.375)
+        default:
+            return ListMarkerGeometry(shape: .text(text), center: center, size: 0)
+        }
+    }
+
+    /// The chip rects the decoration layer paints for a line's inline code,
+    /// in container coordinates (before the container inset).
+    ///
+    /// The reference chips inline code snugly: a rounded box hugging the run's
+    /// own font box, 2px side padding and the 1px `code, tt` border - not the
+    /// full line box a background attribute would fill. Exposed for the
+    /// headless layout dump alongside `listMarkerGeometry`.
+    static func inlineCodeChipRects(
+        storage: NSTextStorage, manager: NSLayoutManager,
+        container: NSTextContainer, lineCharRange: NSRange
+    ) -> [CGRect] {
+        var rects: [CGRect] = []
+        storage.enumerateAttribute(
+            MarkdownAttribute.codeRun, in: lineCharRange, options: []
+        ) { value, range, _ in
+            guard (value as? Bool) == true else { return }
+            guard
+                let font = storage.attribute(.font, at: range.location, effectiveRange: nil)
+                    as? NSFont
+            else { return }
+            let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
+            guard glyphs.length > 0 else { return }
+            // The bounding rect spans the line's full height; the chip hugs the
+            // run's own font box around the line's baseline instead. The baseline
+            // sits mid-line: the dominant font's box centres in the fixed line
+            // height, and the chip's box hangs from it.
+            let bounding = manager.boundingRect(forGlyphRange: glyphs, in: container)
+            let contentHeight = font.ascender - font.descender
+            guard contentHeight > 0, bounding.height > 0 else { return }
+            var dominant = font
+            storage.enumerateAttribute(.font, in: lineCharRange, options: []) {
+                candidate, _, _ in
+                if let candidate = candidate as? NSFont,
+                    candidate.ascender - candidate.descender
+                        > dominant.ascender - dominant.descender
+                {
+                    dominant = candidate
+                }
+            }
+            let baseline =
+                (bounding.height - (dominant.ascender - dominant.descender)) / 2
+                + dominant.ascender
+            let contentCenter = baseline - font.ascender + contentHeight / 2
+            let padding = EditorMetrics.tiny
+            rects.append(
+                CGRect(
+                    x: bounding.minX - padding - EditorMetrics.hairline,
+                    y: bounding.minY + contentCenter - contentHeight / 2
+                        - EditorMetrics.hairline,
+                    width: bounding.width + (padding + EditorMetrics.hairline) * 2,
+                    height: contentHeight + EditorMetrics.hairline * 2
+                )
+            )
+        }
+        return rects
+    }
+
     /// Draws one rounded background-and-border box per code block.
     ///
     /// Typora paints a single box around the whole fence (`border: 1px solid
@@ -246,14 +352,16 @@ enum BlockDecorator {
                     )
                 )
             case let .quoteBar(color, width, inset):
+                // `inset` is the bar's x offset from the line's origin: the
+                // content edge for a top-level quote, the owning item's text
+                // column for one nested inside a list item.
                 context.setFillColor(color.withAlphaComponent(EditorMetrics.quoteBarAlpha).cgColor)
                 context.fill(
                     CGRect(
-                        x: lineRect.minX, y: lineRect.minY,
+                        x: lineRect.minX + inset, y: lineRect.minY,
                         width: width, height: lineRect.height
                     )
                 )
-                _ = inset
             case let .listMarker(text, width, alignment):
                 // The marker draws on the one line that contains its own marker run:
                 // never on a wrapped fragment, and never on the nested lines an item
@@ -266,20 +374,45 @@ enum BlockDecorator {
                         lineCharRange: lineCharRange, in: layout, storage: view.textStorage
                     )
                 else { break }
-                // Typora's `list-style-type: disc`: Chromium paints a filled circle
-                // about 0.42em across, centred horizontally in the marker column
-                // (half the indent) and on the row's line box. Drawing the `•` glyph
-                // instead rendered it at ~60% of the reference size and off-centre.
-                _ = (text, alignment)
-                let diameter = theme.bodyFontSize * 0.42
-                let center = CGPoint(x: lineRect.minX + width / 2, y: lineRect.midY)
-                context.setFillColor(theme.text.nsColor.cgColor)
-                context.fillEllipse(
-                    in: CGRect(
-                        x: center.x - diameter / 2, y: center.y - diameter / 2,
-                        width: diameter, height: diameter
-                    )
+                let geometry = listMarkerGeometry(
+                    text: text, width: width, lineRect: lineRect, theme: theme
                 )
+                context.setFillColor(theme.text.nsColor.cgColor)
+                switch geometry.shape {
+                case .disc:
+                    context.fillEllipse(
+                        in: CGRect(
+                            x: geometry.center.x - geometry.size / 2,
+                            y: geometry.center.y - geometry.size / 2,
+                            width: geometry.size, height: geometry.size
+                        )
+                    )
+                case .ring:
+                    let lineWidth = min(EditorMetrics.hairline, geometry.lineWidth)
+                    let radius = (geometry.size - lineWidth) / 2
+                    context.setStrokeColor(theme.text.nsColor.cgColor)
+                    context.setLineWidth(lineWidth)
+                    context.strokeEllipse(
+                        in: CGRect(
+                            x: geometry.center.x - radius, y: geometry.center.y - radius,
+                            width: radius * 2, height: radius * 2
+                        )
+                    )
+                case .square:
+                    context.fill(
+                        CGRect(
+                            x: geometry.center.x - geometry.size / 2,
+                            y: geometry.center.y - geometry.size / 2,
+                            width: geometry.size, height: geometry.size
+                        )
+                    )
+                case .text(let glyph):
+                    // Anything else - an ordered item's `1.` - stays text,
+                    // right-aligned so wide numbers grow leftwards into the indent.
+                    drawMarker(
+                        glyph, in: lineRect, width: width, alignment: alignment,
+                        theme: theme, context: context)
+                }
             case let .taskCheckbox(checked, width):
                 // One box on the first line: without the guard every fragment
                 // of a wrapped item drew its own, while hit-testing only knows
@@ -328,8 +461,32 @@ enum BlockDecorator {
                     )
                 )
             case let .inlineCode(background, radius):
-                // Inline chrome is painted per line fragment by the inline pass.
-                _ = (background, radius)
+                guard let storage = view.textStorage,
+                    let manager = view.layoutManager, let container = view.textContainer,
+                    !isPainted(lineCharRange, in: view)
+                else { break }
+                for chip in inlineCodeChipRects(
+                    storage: storage, manager: manager, container: container,
+                    lineCharRange: lineCharRange
+                ) {
+                    // Chip rects are in container coordinates; the line rects the
+                    // decorator paints are already offset into the view, so the chip
+                    // follows them (see `inlineImageOrigin`).
+                    let rect = chip.offsetBy(dx: inset.width, dy: inset.height)
+                    let path = CGPath(
+                        roundedRect: rect, cornerWidth: radius, cornerHeight: radius,
+                        transform: nil
+                    )
+                    context.setFillColor(background.cgColor)
+                    context.addPath(path)
+                    context.fillPath()
+                    if let border = theme.codeBorder?.nsColor {
+                        context.setStrokeColor(border.cgColor)
+                        context.setLineWidth(EditorMetrics.hairline)
+                        context.addPath(path)
+                        context.strokePath()
+                    }
+                }
             case let .alertBox(title, background, border):
                 let path = CGPath(
                     roundedRect: lineRect.insetBy(dx: 0, dy: 0),
@@ -452,7 +609,7 @@ enum BlockDecorator {
     /// Whether this line's block is currently shown as its own source text rather
     /// than being painted.
     @MainActor
-    private static func isPainted(_ range: NSRange, in view: MarkdownTextView) -> Bool {
+    static func isPainted(_ range: NSRange, in view: MarkdownTextView) -> Bool {
         guard let storage = view.textStorage, range.location < storage.length else { return false }
         return storage.attribute(
             MarkdownAttribute.painted, at: range.location, effectiveRange: nil
@@ -497,7 +654,7 @@ enum BlockDecorator {
     /// above the text line, so its position cannot identify the line to draw on.
     /// The first character *after* the marker run is the item's visible content;
     /// the fragment containing it is the one the chrome belongs to.
-    private static func markerIsOnLine(
+    static func markerIsOnLine(
         planOrigin: Int, lineCharRange: NSRange, in layout: LayoutOutput,
         storage: NSTextStorage?
     ) -> Bool {

@@ -46,3 +46,8 @@ uninstall:
     @n=0; while pgrep -x Inkstone >/dev/null 2>&1 && [ $n -lt 50 ]; do sleep 0.1; n=$((n+1)); done
     @rm -rf ~/Applications/Inkstone.app
     @echo 'Uninstalled ~/Applications/Inkstone.app'
+
+# Render parity: compare a markdown file/dir against the Typora reference.
+# See .agents/skills/render-parity/SKILL.md
+@render-parity *args:
+    uv run .agents/skills/render-parity/scripts/parity.py run {{ args }}

@@ -74,7 +74,9 @@ struct EditorTheme: Sendable, Equatable {
 
     /// `html { font-size: 16px }` from github.css, the reference transcription.
     static let baseFontSize: CGFloat = 16
-    /// `code, tt { font-size: 0.9em }` from github.css.
+    /// `code, tt { font-size: 0.9em }` from github.css — fractional on purpose:
+    /// the reference renders 14.4px and rounds, and rounding here shifted every
+    /// code advance (chip widths ~2pt off against the baseline).
     static let codeFontScale: CGFloat = 0.9
     /// `h1..h6 { font-size: 2.25em | 1.75em | 1.5em | 1.25em | 1em | 1em }`.
     static let headingScales: [CGFloat] = [2.25, 1.75, 1.5, 1.25, 1.0, 1.0]
@@ -103,14 +105,12 @@ struct EditorTheme: Sendable, Equatable {
     var blockMargin: CGFloat = 12.8
     /// `h1..h6 { margin: 1rem 0 }`
     var headingMargin: CGFloat = 16
-    /// `ul, ol { padding-left: 30px }`, tightened by 4pt: at 30 the item text
-    /// reads a touch heavier here than in the original (the painted disc sits
-    /// inside the indent rather than hanging in the padding like a browser
-    /// marker), and the tighter column reads closer to the reference.
-    var listIndent: CGFloat = 26
-    /// The glyph drawn for an unordered item: Typora renders `disc` everywhere
-    /// (its `#write` base rules outrank a theme's bare `ul` selector).
-    var listBullet: Character = "•"
+    /// `ul, ol { padding-left: 30px }`, so the text column moves 30pt per level.
+    /// The reference was re-measured against a rendered document after a 26pt
+    /// tightening misfired: the tighter column read heavier than the reference, not
+    /// closer to it, and the marker ladder below hangs the glyph at a fixed gap
+    /// from the column, exactly like a browser's outside marker.
+    var listIndent: CGFloat = 30
     /// `blockquote { padding: 0 15px }`
     var quoteIndent: CGFloat = 15
     var quoteBarWidth: CGFloat = 4
@@ -125,11 +125,16 @@ struct EditorTheme: Sendable, Equatable {
     var codePaddingTop: CGFloat = 8
     var codePaddingBottom: CGFloat = 6
     /// `li p { margin: .5rem 0 }` in the original's base style - the gap between
-    /// consecutive list items (`li { margin: 0 }` itself contributes none).
-    var listItemSpacing: CGFloat = 8
+    /// consecutive list items (`li { margin: 0 }` itself contributes none). The
+    /// reference renders a 35pt baseline pitch per row (25.6pt line box + 9.4pt),
+    /// measured off a rendered document; the bare `.5rem` (8pt) sat a touch tight
+    /// and drifted ~1.4pt per item against it.
+    var listItemSpacing: CGFloat = 9.4
     /// `hr { margin: 16px 0 }` - the space above a thematic break; the block
     /// after it contributes its own top spacing, as CSS margin collapsing would.
     var ruleMargin: CGFloat = 16
+    /// `.md-fences { margin: 15px 0 }` - the space around a fenced code block.
+    var fencesMargin: CGFloat = 15
     var tableCellPadding: CGFloat = 6
 
     // MARK: Colour (themed)
@@ -146,7 +151,20 @@ struct EditorTheme: Sendable, Equatable {
     // MARK: Derived
 
     var bodyFontSize: CGFloat { (Self.baseFontSize * fontScale).rounded() }
-    var codeFontSize: CGFloat { (bodyFontSize * Self.codeFontScale).rounded() }
+    var codeFontSize: CGFloat { bodyFontSize * Self.codeFontScale }
+
+    /// The glyph drawn for an unordered item at a 1-based nesting `depth`.
+    ///
+    /// Typora's `#write` base leaves `list-style-type` to the browser default,
+    /// so Chromium renders its UA ladder - `disc`, then `circle`, then `square`
+    /// for the third and deeper levels - rather than a flat `disc`.
+    func listBullet(depth: Int) -> Character {
+        switch max(depth, 1) {
+        case 1: return "•"
+        case 2: return "◦"
+        default: return "▪"
+        }
+    }
 
     func headingSize(_ level: Int) -> CGFloat {
         let index = min(max(level, 1), Self.headingScales.count) - 1
@@ -268,6 +286,7 @@ struct EditorTheme: Sendable, Equatable {
         copy.codePaddingBottom *= factor
         copy.listItemSpacing *= factor
         copy.ruleMargin *= factor
+        copy.fencesMargin *= factor
         return copy
     }
 }
