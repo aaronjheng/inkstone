@@ -42,11 +42,14 @@ struct AttributedBuilder {
         var previousKind: BlockKind?
         var previousAppliedAfter: CGFloat = 0
         // The spacing a block has already applied AFTER its last line (its CSS
-        // bottom margin — headings and rules carry one, plain blocks don't).
+        // bottom margin — headings carry one, plain blocks don't). Rules apply
+        // none either: `markdownRuleLine` sets `paragraphSpacing = 0` and the
+        // block after a rule brings the full collapsed margin itself, so the
+        // collapsed spacing below must not subtract the rule margin twice
+        // (consecutive rules rendered with zero gap before this was fixed).
         func appliedSpacingAfter(_ kind: BlockKind) -> CGFloat {
             switch kind {
             case .heading: return theme.headingMargin
-            case .hr: return theme.ruleMargin
             default: return 0
             }
         }
@@ -142,6 +145,12 @@ struct AttributedBuilder {
                 MarkdownAttribute.isHidden(result, at: contentStart)
                 ? (collapsedSpacing ?? 0)
                 : 0
+            // The hairline's AFTER-spacing must stay zero: it copies the block's
+            // own style (a heading carries 16), and for blocks whose first row
+            // absorbed the boundary newline (a setext heading's glued underline)
+            // that after-margin stacked a second 16pt onto the gap. The block
+            // after the hairline brings its own spacing.
+            boundary.paragraphSpacing = 0
             boundary.minimumLineHeight = 0.01
             boundary.maximumLineHeight = 0.01
             boundary.lineHeightMultiple = 1
@@ -236,6 +245,52 @@ struct AttributedBuilder {
             return leading.isEmpty ? [] : [leading]
         }
 
+        /// Emits a blank line as a collapsed hairline row.
+        ///
+        /// Blank lines inside containers - between list items, between an item's
+        /// paragraphs, inside a quote - are real bytes in the buffer but must
+        /// render no row: the reference collapses them into the neighbouring
+        /// blocks' margins. An unstyled blank row lays out at the font's natural
+        /// height (~23.4pt for the CJK context), which showed up as extra space
+        /// above loose list items and inside multi-paragraph items.
+        ///
+        /// The blank row's only character is the newline that terminates it, so
+        /// collapse THAT newline - either directly when the blank's bytes are a
+        /// run of newlines (a leading run), or by flagging the next separator
+        /// (see `collapseNextSeparator` at the call sites). `spacingBefore`
+        /// carries the margin the collapsed row stands in for where nothing
+        /// else provides it: quote rows have no item spacing, so their blank
+        /// line carries the `.5rem` paragraph margin; list rows get theirs from
+        /// the marker hider's per-row item spacing, so their blanks stay flat.
+        func emitBlankLine(
+            _ rawLine: String, into result: NSMutableAttributedString,
+            spacingBefore: CGFloat = 0
+        ) {
+            let length = (rawLine as NSString).length
+            guard length > 0 else { return }
+            let range = NSRange(location: result.length, length: length)
+            result.append(NSAttributedString(string: rawLine))
+            let style = NSMutableParagraphStyle()
+            style.paragraphSpacingBefore = spacingBefore
+            style.minimumLineHeight = 0.01
+            style.maximumLineHeight = 0.01
+            result.addAttribute(.paragraphStyle, value: style, range: range)
+        }
+
+        /// The newline after a blank line is that blank row's only character;
+        /// the emitters flag it so the separator collapses (see emitBlankLine).
+        func appendCollapsedNewline(
+            into result: NSMutableAttributedString, spacingBefore: CGFloat = 0
+        ) {
+            let range = NSRange(location: result.length, length: 1)
+            result.append(NSAttributedString(string: "\n"))
+            let style = NSMutableParagraphStyle()
+            style.paragraphSpacingBefore = spacingBefore
+            style.minimumLineHeight = 0.01
+            style.maximumLineHeight = 0.01
+            result.addAttribute(.paragraphStyle, value: style, range: range)
+        }
+
         // MARK: Blocks
 
         /// The task item's text column includes the checkbox cell (a 12pt box plus
@@ -313,72 +368,13 @@ struct AttributedBuilder {
                         for: block.id
                     )
                 }
-                // The quote's own text colour and indent: `blockquote { color:
-                // #777777; border-left: 4px; padding: 0 15px }` - the text sits
-                // 19pt in from the content edge, the bar paints in the indent.
-                var quoteStyle = BlockStyle.paragraph(theme: theme)
-                quoteStyle.textColor = theme.quoteText.nsColor
-                if let paragraphStyle = quoteStyle.base[.paragraphStyle]
-                    as? NSParagraphStyle,
-                    let mutable = paragraphStyle.mutableCopy()
-                        as? NSMutableParagraphStyle
-                {
-                    let quoteInset = theme.quoteIndent + theme.quoteBarWidth
-                    mutable.headIndent = quoteInset
-                    mutable.firstLineHeadIndent = quoteInset
-                    quoteStyle.base[.paragraphStyle] = mutable
-                }
-                quoteStyle = collapsedStyle(quoteStyle)
-                let collapsed = BlockStyle.collapsed(from: quoteStyle, theme: theme)
-                // An empty `>` line separates the quote's paragraphs: Typora
-                // renders it as the paragraph margin (12.8), not a full line.
-                var emptyLineParagraphStyle: NSMutableParagraphStyle?
-                if let paragraphStyle = quoteStyle.base[.paragraphStyle]
-                    as? NSParagraphStyle,
-                    let mutable = paragraphStyle.mutableCopy()
-                        as? NSMutableParagraphStyle
-                {
-                    mutable.minimumLineHeight = theme.blockMargin
-                    mutable.maximumLineHeight = theme.blockMargin
-                    emptyLineParagraphStyle = mutable
-                }
-                let lines = block.source.split(
-                    separator: "\n", omittingEmptySubsequences: false
+                // The quote is emitted per child by `appendQuote`: nested quote
+                // levels hide every `>` and compound the indent, like the
+                // browser's `blockquote blockquote { padding-left }` cascade.
+                appendQuote(
+                    block, into: result, depth: depth, level: 1,
+                    raw: nil, owner: nil, firstLinePreceded: true
                 )
-                for (index, line) in lines.enumerated() {
-                    if index > 0 { result.append(NSAttributedString(string: "\n")) }
-                    var markerLength = 0
-                    for character in line {
-                        if character == ">" { markerLength += 1 } else { break }
-                    }
-                    if markerLength > 0, markerLength < line.count,
-                        line[line.index(line.startIndex, offsetBy: markerLength)] == " "
-                    {
-                        markerLength += 1
-                    }
-                    let lineContent = String(line.dropFirst(markerLength))
-                    let isEmptyLine = lineContent.trimmingCharacters(in: .whitespaces).isEmpty
-                    if markerLength > 0 {
-                        // The quote mark opens the paragraph: its run must carry
-                        // the quote's own paragraph style (headIndent 19), or the
-                        // marker style (flat) wins as the paragraph's first char.
-                        // An empty `>` line collapses to the paragraph margin.
-                        appendHiddenRun(
-                            String(line.prefix(markerLength)), role: .quoteMark, into: result,
-                            style: collapsed, block: block, depth: depth,
-                            paragraphStyle: (isEmptyLine
-                                ? emptyLineParagraphStyle
-                                : quoteStyle.base[.paragraphStyle]) as? NSParagraphStyle
-                        )
-                    }
-                    // Rendered from the source line rather than from the child nodes:
-                    // the children cover the same text but do not promise where their
-                    // line breaks fall, and the buffer has to be byte-exact.
-                    emitPlain(
-                        String(line.dropFirst(markerLength)), into: result,
-                        style: quoteStyle, block: block, depth: depth
-                    )
-                }
             case .list:
                 // build() already emitted the block separator, so the list's first
                 // line is preceded.
@@ -488,8 +484,10 @@ struct AttributedBuilder {
 
         private func appendList(
             _ block: BlockNode, into result: NSMutableAttributedString, depth: Int,
-            raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false
+            raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false,
+            indentOffset: CGFloat = 0, leadingStrut: NSMutableParagraphStyle? = nil
         ) {
+            var leadingStrut = leadingStrut
             // The parser strips each item's container indentation before parsing it,
             // so children know their own lines but not the whitespace that preceded
             // them in the file. `raw` hands those lines back: one per line of the
@@ -511,9 +509,24 @@ struct AttributedBuilder {
             // continues the caller's (a nested list that opens on its item's marker
             // line); the top-level call is preceded by build()'s block separator.
             var pendingFirstLine = true
+            // Set after a blank line: the next separator newline is that blank
+            // row's only character and must collapse (see emitBlankLine).
+            var collapseNextSeparator = false
             func beginLine() {
                 if !(pendingFirstLine && firstLinePreceded) {
-                    result.append(NSAttributedString(string: "\n"))
+                    if collapseNextSeparator {
+                        appendCollapsedNewline(into: result)
+                        collapseNextSeparator = false
+                    } else if let strut = leadingStrut {
+                        // The container's trailing blank row ends here: its
+                        // terminator carries the row's strut (see appendQuote).
+                        let range = NSRange(location: result.length, length: 1)
+                        result.append(NSAttributedString(string: "\n"))
+                        result.addAttribute(.paragraphStyle, value: strut, range: range)
+                        leadingStrut = nil
+                    } else {
+                        result.append(NSAttributedString(string: "\n"))
+                    }
                 }
                 pendingFirstLine = false
             }
@@ -523,7 +536,7 @@ struct AttributedBuilder {
             // slice would desynchronise the item's pairing and drop bytes.
             while lineCursor < rawLines.count, isBlankLine(rawLines[lineCursor]) {
                 beginLine()
-                result.append(NSAttributedString(string: rawLines[lineCursor]))
+                emitBlankLine(rawLines[lineCursor], into: result)
                 lineCursor += 1
             }
             for (index, item) in block.children.enumerated() {
@@ -536,7 +549,7 @@ struct AttributedBuilder {
                 if index > 0 {
                     while lineCursor < rawLines.count, isBlankLine(rawLines[lineCursor]) {
                         beginLine()
-                        result.append(NSAttributedString(string: rawLines[lineCursor]))
+                        collapseNextSeparator = true
                         lineCursor += 1
                     }
                 }
@@ -551,21 +564,296 @@ struct AttributedBuilder {
                     raw: Array(rawLines[lineCursor..<sliceEnd]), owner: owner,
                     // The break before the item's first line is beginLine's; the item
                     // starts straight into its marker.
-                    firstLinePreceded: true
+                    firstLinePreceded: true,
+                    indentOffset: indentOffset
                 )
                 lineCursor = sliceEnd
             }
             // Whatever the items did not consume still belongs to the buffer.
             for line in rawLines[lineCursor...] {
                 beginLine()
-                result.append(NSAttributedString(string: line))
+                if isBlankLine(line) {
+                    collapseNextSeparator = true
+                } else {
+                    result.append(NSAttributedString(string: line))
+                }
+            }
+        }
+
+        /// Emits a blockquote from its raw lines, one nesting level per call.
+        ///
+        /// The browser indents every quote level by the quote's own padding
+        /// (`blockquote { padding: 0 15px; border-left: 4px }` compounds per
+        /// nesting) and hides the source's `>` markers at every level. The old
+        /// top-level emitter flattened the levels: inner `>` markers surfaced
+        /// as visible text at the outer indent, and the level's bar was lost.
+        /// Each recursion strips exactly one marker level, compounds the
+        /// indent and registers the level's own bar.
+        ///
+        /// Rows carry `md.block` of the visual owner (the outer quote) - the
+        /// reference's block model claims the whole quote for the editor - and
+        /// `md.subBlock` of the inner quote they belong to, so decorations
+        /// scope per level exactly like the list item's children do.
+        private func appendQuote(
+            _ block: BlockNode, into result: NSMutableAttributedString, depth: Int,
+            level: Int, raw: [String]? = nil, owner: BlockNode?,
+            firstLinePreceded: Bool
+        ) {
+            let sourceLines = block.source.split(
+                separator: "\n", omittingEmptySubsequences: false
+            ).map(String.init)
+            // The raw lines carry EVERY ancestor marker: the caller hands its
+            // own slice down verbatim, and this level hides the full prefix
+            // (one `> ` group per ancestor, this level's own included). Stripping
+            // per level here would drop the ancestors' bytes - the buffer may
+            // never lose a byte.
+            let rawLines = raw ?? sourceLines
+            let visualBlock = owner ?? block
+            let selfSubBlock: Int? = visualBlock.id == block.id ? nil : block.id
+            let savedBlockOverride = renderedBlockOverride
+            let savedSubBlock = renderedSubBlock
+            let savedSubKind = renderedSubKind
+            renderedBlockOverride = visualBlock
+            renderedSubBlock = selfSubBlock
+            renderedSubKind = selfSubBlock == nil ? nil : block.kind.rawValue
+            defer {
+                renderedBlockOverride = savedBlockOverride
+                renderedSubBlock = savedSubBlock
+                renderedSubKind = savedSubKind
+            }
+            let insetPerLevel = theme.quoteIndent + theme.quoteBarWidth
+            register(
+                [
+                    DecorationPlan.quoteBar(
+                        color: theme.quoteBar.nsColor,
+                        width: theme.quoteBarWidth,
+                        inset: CGFloat(level - 1) * insetPerLevel
+                    )
+                ],
+                for: block.id
+            )
+            let inset = CGFloat(level) * insetPerLevel
+            var quoteStyle = BlockStyle.paragraph(theme: theme)
+            quoteStyle.textColor = theme.quoteText.nsColor
+            if let paragraphStyle = quoteStyle.base[.paragraphStyle]
+                as? NSParagraphStyle,
+                let mutable = paragraphStyle.mutableCopy()
+                    as? NSMutableParagraphStyle
+            {
+                mutable.headIndent = inset
+                mutable.firstLineHeadIndent = inset
+                quoteStyle.base[.paragraphStyle] = mutable
+            }
+            let collapsed = BlockStyle.collapsed(from: quoteStyle, theme: theme)
+
+            /// The length of the line's full marker prefix: one `>` group per
+            /// level, each followed by one optional space. A lazy continuation
+            /// line carries fewer groups; the prefix stops where the line does.
+            func markerPrefixLength(_ line: String) -> Int {
+                var index = line.startIndex
+                var groups = 0
+                while groups < level, index < line.endIndex, line[index] == ">" {
+                    index = line.index(after: index)
+                    if index < line.endIndex, line[index] == " " {
+                        index = line.index(after: index)
+                    }
+                    groups += 1
+                }
+                return line.utf16.distance(from: line.startIndex, to: index)
+            }
+            func isBlankAtLevel(_ line: String) -> Bool {
+                let prefix = markerPrefixLength(line)
+                guard prefix > 0 else { return isBlankLine(line) }
+                return String(line.dropFirst(prefix))
+                    .trimmingCharacters(in: .whitespaces).isEmpty
+            }
+
+            // An empty `>` line separates the quote's paragraphs: the reference
+            // renders it as the paragraph margin (12.8 at the top level), not a
+            // full line. The strut carries that margin - TextKit drops
+            // `paragraphSpacingBefore` on these glued empty rows.
+            var blankLineStyle: NSMutableParagraphStyle?
+            if let paragraphStyle = quoteStyle.base[.paragraphStyle]
+                as? NSParagraphStyle,
+                let mutable = paragraphStyle.mutableCopy()
+                    as? NSMutableParagraphStyle
+            {
+                mutable.minimumLineHeight = theme.blockMargin
+                mutable.maximumLineHeight = theme.blockMargin
+                blankLineStyle = mutable
+            }
+
+            /// Hides the line's full marker prefix and renders the rest at this
+            /// level's indent. `blankRow` styles the row as a paragraph margin.
+            func emitLevelLine(_ rawLine: String, blankRow: Bool) {
+                let markerLength = markerPrefixLength(rawLine)
+                let lineContent = String(rawLine.dropFirst(markerLength))
+                let isEmptyLine = lineContent.trimmingCharacters(in: .whitespaces).isEmpty
+                let rowStyle = (blankRow || isEmptyLine)
+                    ? blankLineStyle
+                    : (quoteStyle.base[.paragraphStyle] as? NSParagraphStyle)
+                if markerLength > 0 {
+                    appendHiddenRun(
+                        String(rawLine.prefix(markerLength)), role: .quoteMark, into: result,
+                        style: collapsed, block: visualBlock, depth: depth,
+                        paragraphStyle: rowStyle
+                    )
+                }
+                if !isEmptyLine {
+                    emitPlain(
+                        lineContent, into: result,
+                        style: quoteStyle, block: visualBlock, depth: depth
+                    )
+                }
+            }
+            var pendingFirstLine = true
+            // Set after a blank line: the next separator newline is that blank
+            // row's only character, and the row's paragraph margin rides on its
+            // strut (TextKit drops paragraphSpacingBefore on these glued empty
+            // rows - see blankLineStyle above).
+            var strutNextSeparator = false
+            func beginLine() {
+                if !(pendingFirstLine && firstLinePreceded) {
+                    let range = NSRange(location: result.length, length: 1)
+                    result.append(NSAttributedString(string: "\n"))
+                    if strutNextSeparator, let style = blankLineStyle {
+                        result.addAttribute(.paragraphStyle, value: style, range: range)
+                    }
+                    strutNextSeparator = false
+                }
+                pendingFirstLine = false
+            }
+            var lineCursor = 0
+            // The quote's own leading blank lines (its leading text when it
+            // sits nested inside a container) come out first.
+            while lineCursor < rawLines.count, isBlankAtLevel(rawLines[lineCursor]) {
+                beginLine()
+                emitLevelLine(rawLines[lineCursor], blankRow: true)
+                strutNextSeparator = true
+                lineCursor += 1
+            }
+            for child in block.children {
+                // The blank lines before a child stand for the paragraph margin
+                // between the quote's paragraphs. Their bytes are emitted here
+                // (the hidden marker run + the strut terminator); the layout
+                // dump filters the resulting zero-width rows out.
+                while lineCursor < rawLines.count, isBlankAtLevel(rawLines[lineCursor]) {
+                    beginLine()
+                    emitLevelLine(rawLines[lineCursor], blankRow: true)
+                    strutNextSeparator = true
+                    lineCursor += 1
+                }
+                // The child's slice covers its own source lines only: the
+                // leadingText lines were the blanks consumed above.
+                let sourceLineCount = child.source.split(
+                    separator: "\n", omittingEmptySubsequences: false
+                ).count
+                let end = min(lineCursor + sourceLineCount, rawLines.count)
+                guard end > lineCursor else { continue }
+                // Verbatim: the child's lines carry every ancestor marker, and
+                // the recursion hides one more level.
+                let slice = Array(rawLines[lineCursor..<end])
+                switch child.kind {
+                case .blockquote:
+                    appendQuote(
+                        child, into: result, depth: depth, level: level + 1,
+                        raw: slice, owner: visualBlock, firstLinePreceded: false
+                    )
+                case .heading:
+                    // The reference renders the heading inside the quote at its
+                    // own size; the quote's block model claims the rows (the
+                    // blockquote beats the heading), so they stay on the quote's
+                    // block - no sub-scope split.
+                    var headingStyle = BlockStyle.heading(
+                        theme: theme, level: child.attributes.level
+                    )
+                    if let paragraphStyle = headingStyle.base[.paragraphStyle]
+                        as? NSParagraphStyle,
+                        let mutable = paragraphStyle.mutableCopy()
+                            as? NSMutableParagraphStyle
+                    {
+                        mutable.headIndent = inset
+                        mutable.firstLineHeadIndent = inset
+                        headingStyle.base[.paragraphStyle] = mutable
+                    }
+                    for line in slice {
+                        beginLine()
+                        let quoteMarkerLength = markerPrefixLength(line)
+                        if quoteMarkerLength > 0 {
+                            appendHiddenRun(
+                                String(line.prefix(quoteMarkerLength)), role: .quoteMark,
+                                into: result, style: collapsed, block: visualBlock, depth: depth,
+                                paragraphStyle: headingStyle.base[.paragraphStyle] as? NSParagraphStyle
+                            )
+                        }
+                        let rest = String(line.dropFirst(quoteMarkerLength))
+                        let hashes = rest.prefix { $0 == "#" }
+                        let spacing = rest.dropFirst(hashes.count).prefix { $0 == " " || $0 == "\t" }
+                        let headingMarkerLength = hashes.count + spacing.count
+                        if headingMarkerLength > 0 {
+                            appendHiddenRun(
+                                String(rest.prefix(headingMarkerLength)), role: .headingHash,
+                                into: result, style: collapsed, block: visualBlock, depth: depth
+                            )
+                        }
+                        plainCursor = 0
+                        emit(
+                            inlines: child.inlines, into: result, style: headingStyle,
+                            block: visualBlock, depth: depth
+                        )
+                    }
+                case .paragraph:
+                    for line in slice {
+                        beginLine()
+                        if isBlankAtLevel(line) {
+                            emitLevelLine(line, blankRow: true)
+                            strutNextSeparator = true
+                        } else {
+                            emitLevelLine(line, blankRow: false)
+                        }
+                    }
+                case .list:
+                    // The list claims its own rows in the reference's model (the
+                    // li beats the blockquote); its items indent from the quote's
+                    // inset, not from zero. A pending blank-row strut rides on
+                    // the list's first separator newline.
+                    appendList(
+                        child, into: result, depth: depth, raw: slice,
+                        owner: visualBlock, firstLinePreceded: false,
+                        indentOffset: inset,
+                        leadingStrut: strutNextSeparator ? blankLineStyle : nil
+                    )
+                    strutNextSeparator = false
+                default:
+                    // Fences and tables are painted children; they go through
+                    // the child emitter with the quote's indent as their column.
+                    emitChildContent(
+                        child, slice, into: result, depth: depth,
+                        owner: visualBlock, textColumn: inset,
+                        continuationStyle: quoteStyle,
+                        firstLinePreceded: false
+                    )
+                }
+                lineCursor = end
+            }
+            // Lines no child claimed are still bytes in the file.
+            while lineCursor < rawLines.count {
+                beginLine()
+                if isBlankAtLevel(rawLines[lineCursor]) {
+                    emitLevelLine(rawLines[lineCursor], blankRow: true)
+                    strutNextSeparator = true
+                } else {
+                    emitLevelLine(rawLines[lineCursor], blankRow: false)
+                }
+                lineCursor += 1
             }
         }
 
         private func appendListItem(
             _ block: BlockNode, into result: NSMutableAttributedString, depth: Int,
             parentIsOrdered: Bool? = nil,
-            raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false
+            raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false,
+            indentOffset: CGFloat = 0, leadingStrut: NSMutableParagraphStyle? = nil
         ) {
             let sourceLines = block.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             let rawLines = raw ?? sourceLines
@@ -576,11 +864,14 @@ struct AttributedBuilder {
             let selfSubBlock: Int? = visualBlock.id == block.id ? nil : block.id
             let savedBlockOverride = renderedBlockOverride
             let savedSubBlock = renderedSubBlock
+            let savedSubKind = renderedSubKind
             renderedBlockOverride = visualBlock
             renderedSubBlock = selfSubBlock
+            renderedSubKind = selfSubBlock == nil ? nil : block.kind.rawValue
             defer {
                 renderedBlockOverride = savedBlockOverride
                 renderedSubBlock = savedSubBlock
+                renderedSubKind = savedSubKind
             }
 
             guard let first = block.children.first, !sourceLines.isEmpty else {
@@ -607,7 +898,7 @@ struct AttributedBuilder {
                 // disc, circle, square down the nesting levels.
                 marker = String(theme.listBullet(depth: depth + 1))
             }
-            let style: BlockStyle
+            var style: BlockStyle
             if block.attributes.checked != nil {
                 style = BlockStyle.taskItem(
                     theme: theme, depth: depth + 1, checked: block.attributes.checked == true
@@ -619,8 +910,18 @@ struct AttributedBuilder {
             }
             register(style.decoration, for: block.id)
             // The item's text column: where the first line's content starts, and
-            // where continuation content below aligns.
-            let textColumn = theme.listIndent * CGFloat(max(depth + 1, 1))
+            // where continuation content below aligns. `indentOffset` carries the
+            // container's own inset (a quote's 19pt per level), which the
+            // depth-based list indent knows nothing about.
+            let textColumn = indentOffset + theme.listIndent * CGFloat(max(depth + 1, 1))
+            if indentOffset > 0, let paragraphStyle = style.base[.paragraphStyle]
+                as? NSParagraphStyle,
+                let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle
+            {
+                mutable.headIndent += indentOffset
+                mutable.firstLineHeadIndent += indentOffset
+                style.base[.paragraphStyle] = mutable
+            }
             // The item's paragraph style without the marker decoration, for lines
             // that render inside the item but carry no marker of their own.
             let continuationStyle = BlockStyle(
@@ -758,8 +1059,19 @@ struct AttributedBuilder {
                 lineCursor = end
             }
             // Lines no child claimed are still bytes in the file.
+            var collapseNextSeparator = false
             while lineCursor < rawLines.count {
-                result.append(NSAttributedString(string: "\n"))
+                if collapseNextSeparator {
+                    appendCollapsedNewline(into: result)
+                    collapseNextSeparator = false
+                } else {
+                    result.append(NSAttributedString(string: "\n"))
+                }
+                if isBlankLine(rawLines[lineCursor]) {
+                    collapseNextSeparator = true
+                    lineCursor += 1
+                    continue
+                }
                 let (indent, rest) = splitIndent(rawLines[lineCursor])
                 emitHidden(
                     indent, into: result, style: continuationStyle,
@@ -787,11 +1099,14 @@ struct AttributedBuilder {
         ) {
             let savedBlockOverride = renderedBlockOverride
             let savedSubBlock = renderedSubBlock
+            let savedSubKind = renderedSubKind
             renderedBlockOverride = owner
             renderedSubBlock = child.id
+            renderedSubKind = child.kind.rawValue
             defer {
                 renderedBlockOverride = savedBlockOverride
                 renderedSubBlock = savedSubBlock
+                renderedSubKind = savedSubKind
             }
 
             // Containers emit their whole slice themselves.
@@ -1012,12 +1327,18 @@ struct AttributedBuilder {
             _ raw: [String], into result: NSMutableAttributedString, depth: Int,
             style: BlockStyle, block: BlockNode, firstLinePreceded: Bool
         ) {
+            var collapseNextSeparator = false
             for (index, rawLine) in raw.enumerated() {
                 if index > 0 || !firstLinePreceded {
-                    result.append(NSAttributedString(string: "\n"))
+                    if collapseNextSeparator {
+                        appendCollapsedNewline(into: result)
+                        collapseNextSeparator = false
+                    } else {
+                        result.append(NSAttributedString(string: "\n"))
+                    }
                 }
                 if isBlankLine(rawLine) {
-                    result.append(NSAttributedString(string: rawLine))
+                    collapseNextSeparator = true
                     continue
                 }
                 emitRawLine(rawLine, into: result, depth: depth, style: style, block: block) { rest in
@@ -1031,12 +1352,23 @@ struct AttributedBuilder {
             _ raw: [String], into result: NSMutableAttributedString, depth: Int,
             block: BlockNode, style: BlockStyle, firstLinePreceded: Bool
         ) {
+            var collapseNextSeparator = false
             for (index, rawLine) in raw.enumerated() {
                 if index > 0 || !firstLinePreceded {
-                    result.append(NSAttributedString(string: "\n"))
+                    if collapseNextSeparator {
+                        // The blank quote line stands for the paragraph margin
+                        // between the quote's paragraphs - nothing else provides
+                        // it (quote rows carry no item spacing).
+                        appendCollapsedNewline(
+                            into: result, spacingBefore: theme.blankLineMargin
+                        )
+                        collapseNextSeparator = false
+                    } else {
+                        result.append(NSAttributedString(string: "\n"))
+                    }
                 }
                 if isBlankLine(rawLine) {
-                    result.append(NSAttributedString(string: rawLine))
+                    collapseNextSeparator = true
                     continue
                 }
                 emitRawLine(rawLine, into: result, depth: depth, style: style, block: block) { rest in
@@ -1049,6 +1381,27 @@ struct AttributedBuilder {
                     {
                         markerLength += 1
                     }
+                    let content = String(rest.dropFirst(markerLength))
+                    if markerLength > 0, content.trimmingCharacters(in: .whitespaces).isEmpty {
+                        // A bare `>` line: the quote continues over a blank row.
+                        // The reference renders no row (the paragraphs' margins
+                        // collapse), so the row collapses onto its hidden mark-
+                        // ers and carries the paragraph margin nothing else
+                        // provides (quote rows have no item spacing).
+                        let collapsedStyle = NSMutableParagraphStyle()
+                        collapsedStyle.paragraphSpacingBefore = theme.blankLineMargin
+                        collapsedStyle.minimumLineHeight = 0.01
+                        collapsedStyle.maximumLineHeight = 0.01
+                        if markerLength > 0 {
+                            appendHiddenRun(
+                                String(rest.prefix(markerLength)), role: .quoteMark, into: result,
+                                style: BlockStyle.collapsed(from: style, theme: theme),
+                                block: block, depth: depth,
+                                paragraphStyle: collapsedStyle
+                            )
+                        }
+                        return
+                    }
                     if markerLength > 0 {
                         appendHiddenRun(
                             String(rest.prefix(markerLength)), role: .quoteMark, into: result,
@@ -1059,7 +1412,7 @@ struct AttributedBuilder {
                         )
                     }
                     emitPlain(
-                        String(rest.dropFirst(markerLength)), into: result,
+                        content, into: result,
                         style: style, block: block, depth: depth
                     )
                 }
@@ -1091,11 +1444,30 @@ struct AttributedBuilder {
             )
             var highlightCursor = 0
             var bodyOffset = 0
+            // Blank lines BEFORE the opening delimiter are the container's own
+            // (the item's blank line ahead of an in-item fence) — their row
+            // collapses; blanks inside the body are code content and stay real
+            // rows.
+            var opened = false
+            var collapseNextSeparator = false
             for (index, rawLine) in raw.enumerated() {
                 if index > 0 || !firstLinePreceded {
-                    result.append(NSAttributedString(string: "\n"))
+                    if collapseNextSeparator {
+                        appendCollapsedNewline(into: result)
+                        collapseNextSeparator = false
+                    } else {
+                        result.append(NSAttributedString(string: "\n"))
+                    }
                 }
                 let (indent, rest) = splitIndent(rawLine)
+                if !opened {
+                    if isFenceLine(rawLine) {
+                        opened = true
+                    } else if isBlankLine(rawLine) {
+                        collapseNextSeparator = true
+                        continue
+                    }
+                }
                 if !indent.isEmpty {
                     emitHidden(
                         indent, into: result, style: style, block: block, depth: depth
@@ -1558,6 +1930,8 @@ struct AttributedBuilder {
         /// duration of a child's (or nested item's) emission.
         private var renderedBlockOverride: BlockNode?
         private var renderedSubBlock: Int?
+        /// The kind of the `renderedSubBlock` node, dumped as the row's kind.
+        private var renderedSubKind: String?
         /// Whether the next emitted line is the *first* line of a block.
         ///
         /// TextKit makes every newline in the buffer a paragraph, so a soft line break
@@ -2039,6 +2413,7 @@ struct AttributedBuilder {
                 MarkdownAttribute.rawBlock: visual.kind.isAttachmentRendered,
             ]
             if let renderedSubBlock { attributes[MarkdownAttribute.subBlock] = renderedSubBlock }
+            if let renderedSubKind { attributes[MarkdownAttribute.subKind] = renderedSubKind }
             return attributes
         }
 
@@ -2114,14 +2489,35 @@ struct AttributedBuilder {
             guard !underline.isEmpty else { return }
             // The separator re-creates the terminator the *text* line had - the `\r`
             // sits just before the `\n` in the slice, and the block's own flag only
-            // knows about the underline line.
+            // knows about the underline line. The newline is HIDDEN: a visible one
+            // would break the underline into its own paragraph, whose heading strut
+            // and margins added a full line height plus two margins after every
+            // setext heading (measured 75.2pt against the reference's 16). Hidden,
+            // the underline glyphs glue onto the text row exactly like the list
+            // items' separators do.
             let textLineEndedCR =
                 newline > source.startIndex && source[source.index(before: newline)] == "\r"
-            result.append(NSAttributedString(string: textLineEndedCR ? "\r\n" : "\n"))
+            let separator = textLineEndedCR ? "\r\n" : "\n"
+            let separatorRange = NSRange(location: result.length, length: (separator as NSString).length)
+            result.append(NSAttributedString(string: separator))
+            result.addAttribute(MarkdownAttribute.hidden, value: true, range: separatorRange)
             let heading = BlockStyle.heading(theme: theme, level: block.attributes.level)
+            // The underline paragraph must not inherit the heading's inter-block
+            // spacing: its row is glued (invisible), and its `paragraphSpacing`
+            // would still be counted once the next block's margin collapses
+            // against it - the second 16pt of the measured 32.01 gap.
+            var underlineStyle = BlockStyle.collapsed(from: heading, theme: theme)
+            if let paragraphStyle = underlineStyle.base[.paragraphStyle]
+                as? NSParagraphStyle,
+                let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle
+            {
+                mutable.paragraphSpacing = 0
+                mutable.paragraphSpacingBefore = 0
+                underlineStyle.base[.paragraphStyle] = mutable
+            }
             appendHiddenRun(
                 underline, role: .headingHash, into: result,
-                style: BlockStyle.collapsed(from: heading, theme: theme),
+                style: underlineStyle,
                 block: block, depth: depth
             )
         }

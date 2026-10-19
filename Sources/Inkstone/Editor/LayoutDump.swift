@@ -36,6 +36,10 @@ enum LayoutDump {
         var left: CGFloat
         var right: CGFloat
         var block: Int
+        /// The innermost nested scope owning the row (a quote level, a list
+        /// child) when one exists — the comparator splits blocks on it so the
+        /// nested structures pair with the reference's nested elements.
+        var subBlock: Int?
         var kind: String
         var depth: Int
         var headIndent: CGFloat
@@ -44,8 +48,8 @@ enum LayoutDump {
         var text: String
 
         enum CodingKeys: String, CodingKey {
-            case index = "i", top, bottom, left, right, block, kind, depth
-            case headIndent, spacingBefore, lineHeight, text
+            case index = "i", top, bottom, left, right, block, subBlock = "sub"
+            case kind, depth, headIndent, spacingBefore, lineHeight, text
         }
     }
 
@@ -72,11 +76,18 @@ enum LayoutDump {
         var y: CGFloat
         var width: CGFloat
         var height: CGFloat
+        /// The chip run's font size and its ascender-descender box: the height
+        /// is derived from both, so a divergence points at the font actually
+        /// measured (a CJK fallback attribute instead of the mono face, say).
+        var fontSize: CGFloat
+        var fontBox: CGFloat
 
         enum CodingKeys: String, CodingKey {
             case line, x, y
             case width = "w"
             case height = "h"
+            case fontSize = "fs"
+            case fontBox = "fb"
         }
     }
 
@@ -145,6 +156,7 @@ enum LayoutDump {
         // exported geometry drifts right of what would be painted.
         let markerHider = MarkerHider()
         markerHider.listItemSpacing = theme.listItemSpacing
+        markerHider.quoteLevelSpacing = theme.blockMargin
         manager.delegate = markerHider
         let container = NSTextContainer(
             size: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
@@ -163,6 +175,11 @@ enum LayoutDump {
             var blockID: Int
             var subBlockID: Int?
             var kind: String
+            /// The visual owner's own kind, before the sub-scope's kind
+            /// (if any) overrides it: a quote's zero-width blank rows are
+            /// paragraph margins, not rendered rows, and only the owner's
+            /// kind identifies them as such.
+            var rawKind: String
             var depth: Int
         }
         var fragments: [Fragment] = []
@@ -171,13 +188,24 @@ enum LayoutDump {
             rect, used, _, glyphRange, _ in
             let charRange = manager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
             guard charRange.length > 0, charRange.location < storage.length else { return }
-            guard rect.height > 0.5, rect.width >= 0 else { return }
+            // rect.height alone cannot reject the row yet: a thematic break's
+            // collapsed row is decided after the block kind is known below.
+            guard rect.width >= 0 else { return }
             if debugRaw {
                 let text = (storage.string as NSString).substring(with: charRange)
                     .replacingOccurrences(of: "\n", with: "⏎").replacingOccurrences(of: "\r", with: "")
+                let style = storage.attribute(.paragraphStyle, at: charRange.location, effectiveRange: nil)
+                    as? NSParagraphStyle
+                let hidden = MarkdownAttribute.isHidden(storage, at: charRange.location)
+                let styleNote = style.map {
+                    " maxLH=\($0.maximumLineHeight) spB=\($0.paragraphSpacingBefore) headInd=\($0.headIndent)"
+                } ?? " no-style"
                 let message =
                     "frag y=\(rect.minY)...\(rect.maxY) used=\(used.minY)...\(used.maxY) "
-                    + "w=\(rect.width)/\(used.width) chars=\(charRange.location)..\(NSMaxRange(charRange)) '\(text.prefix(30))'\n"
+                    + "w=\(rect.width)/\(used.width) chars=\(charRange.location)..\(NSMaxRange(charRange)) '\(text.prefix(30))'"
+                    + styleNote
+                    + (hidden ? " [hidden]" : "")
+                    + "\n"
                 FileHandle.standardError.write(Data(message.utf8))
             }
             // The fragment may START with boundary characters (the separator
@@ -191,14 +219,34 @@ enum LayoutDump {
                 storage.attribute(MarkdownAttribute.block, at: probeLocation, effectiveRange: nil) == nil
             { probeLocation += 1 }
             guard probeLocation < NSMaxRange(charRange),
-                let blockID = attribute(MarkdownAttribute.block) as? Int,
-                let kind = attribute(MarkdownAttribute.blockKind) as? String
+                let blockID = attribute(MarkdownAttribute.block) as? Int
             else { return }
+            // A row scoped to a child that claims its own rows in the
+            // reference's model (a `pre`/`table` element, a list item) reports
+            // the child's kind and pairs as its own block. A nested paragraph
+            // or quote is claimed by its container and keeps the container's
+            // kind.
+            let selfClaiming: Set<String> = [
+                BlockKind.fences.rawValue, BlockKind.indentedCode.rawValue,
+                BlockKind.table.rawValue, BlockKind.listItem.rawValue,
+                BlockKind.taskItem.rawValue, BlockKind.mathBlock.rawValue,
+                BlockKind.htmlBlock.rawValue, BlockKind.toc.rawValue,
+            ]
+            let subKind = storage.attribute(MarkdownAttribute.subKind, at: probeLocation, effectiveRange: nil)
+                as? String
+            let rawKind = attribute(MarkdownAttribute.blockKind) as? String
+            let kind = subKind.flatMap { selfClaiming.contains($0) ? $0 : nil }
+                ?? rawKind
+            guard let kind else { return }
+            // The boundary hairline filter below must not eat a thematic
+            // break's collapsed row: the painted 2pt rule IS the block's whole
+            // visual, so the kind has to decide before the height does.
+            guard rect.height > 0.5 || kind == BlockKind.hr.rawValue else { return }
             fragments.append(
                 Fragment(
                     rect: rect, used: used, charRange: charRange, blockID: blockID,
                     subBlockID: attribute(MarkdownAttribute.subBlock) as? Int,
-                    kind: kind,
+                    kind: kind, rawKind: rawKind ?? "",
                     depth: attribute(MarkdownAttribute.blockDepth) as? Int ?? 0
                 )
             )
@@ -235,10 +283,23 @@ enum LayoutDump {
             // glyphs (used width and height ~0 — a glued marker, a boundary
             // hairline, a fence delimiter row) is not a rendered row — except
             // a thematic break's, whose painted 2pt rule IS the block's whole
-            // visual.
-            guard used.width > 0.5 || used.height > 0.5
+            // visual. The strut (the style's fixed line height at the row's
+            // first character) decides: a zero-width row on a collapsed strut
+            // can never carry visible glyphs, no matter how much line spacing
+            // a delegate stacks on top of it.
+            let strut =
+                (storage.attribute(
+                    .paragraphStyle, at: fragment.charRange.location, effectiveRange: nil
+                ) as? NSParagraphStyle)?.maximumLineHeight ?? rect.height
+            guard used.width > 0.5 || used.height > 0.5 || strut > 0.5
                 || fragment.kind == BlockKind.hr.rawValue
             else { continue }
+            // A quote's zero-width blank row (the bare `>` line between the
+            // quote's children) is the paragraph margin, not a rendered row -
+            // the reference has no row there either.
+            if used.width <= 0.5, fragment.rawKind == BlockKind.blockquote.rawValue {
+                continue
+            }
             let style =
                 storage.attribute(
                     .paragraphStyle, at: fragment.charRange.location, effectiveRange: nil
@@ -269,7 +330,8 @@ enum LayoutDump {
                 DumpLine(
                     index: lines.count, top: contentTop, bottom: lineBottom,
                     left: used.minX, right: used.maxX,
-                    block: fragment.blockID, kind: fragment.kind, depth: fragment.depth,
+                    block: fragment.blockID, subBlock: fragment.subBlockID, kind: fragment.kind,
+                    depth: fragment.depth,
                     headIndent: style?.headIndent ?? 0,
                     spacingBefore: spacingBefore,
                     lineHeight: lineHeight,
@@ -299,15 +361,17 @@ enum LayoutDump {
                     return false
                 })
             {
-                for chip in BlockDecorator.inlineCodeChipRects(
+                for chip in BlockDecorator.inlineCodeChipRuns(
+                    theme: theme,
                     storage: storage, manager: manager, container: container,
                     lineCharRange: fragment.charRange
                 ) {
-                    let normalized = normalize(chip)
+                    let normalized = normalize(chip.rect)
                     chips.append(
                         DumpChip(
                             line: lineIndex, x: normalized.minX, y: normalized.minY,
-                            width: normalized.width, height: normalized.height
+                            width: normalized.width, height: normalized.height,
+                            fontSize: chip.fontSize, fontBox: chip.fontBox
                         )
                     )
                 }

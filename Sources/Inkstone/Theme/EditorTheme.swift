@@ -130,6 +130,10 @@ struct EditorTheme: Sendable, Equatable {
     /// measured off a rendered document; the bare `.5rem` (8pt) sat a touch tight
     /// and drifted ~1.4pt per item against it.
     var listItemSpacing: CGFloat = 9.4
+    /// `li p, blockquote p { margin: .5rem 0 }` - the margin a collapsed blank
+    /// line inside a quote stands in for, where no other spacing applies. List
+    /// rows get theirs from the marker hider's item spacing instead.
+    var blankLineMargin: CGFloat = 8
     /// `hr { margin: 16px 0 }` - the space above a thematic break; the block
     /// after it contributes its own top spacing, as CSS margin collapsing would.
     var ruleMargin: CGFloat = 16
@@ -285,6 +289,7 @@ struct EditorTheme: Sendable, Equatable {
         copy.codePaddingTop *= factor
         copy.codePaddingBottom *= factor
         copy.listItemSpacing *= factor
+        copy.blankLineMargin *= factor
         copy.ruleMargin *= factor
         copy.fencesMargin *= factor
         return copy

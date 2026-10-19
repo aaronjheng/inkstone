@@ -181,25 +181,40 @@ enum BlockDecorator {
     /// own font box, 2px side padding and the 1px `code, tt` border - not the
     /// full line box a background attribute would fill. Exposed for the
     /// headless layout dump alongside `listMarkerGeometry`.
-    static func inlineCodeChipRects(
+    /// One chip: the painted rect plus the font metrics it was derived from.
+    struct ChipRun {
+        var rect: CGRect
+        var fontSize: CGFloat
+        var fontBox: CGFloat
+    }
+
+    static func inlineCodeChipRuns(
+        theme: EditorTheme,
         storage: NSTextStorage, manager: NSLayoutManager,
         container: NSTextContainer, lineCharRange: NSRange
-    ) -> [CGRect] {
-        var rects: [CGRect] = []
+    ) -> [ChipRun] {
+        var runs: [ChipRun] = []
         storage.enumerateAttribute(
             MarkdownAttribute.codeRun, in: lineCharRange, options: []
         ) { value, range, _ in
             guard (value as? Bool) == true else { return }
-            guard
-                let font = storage.attribute(.font, at: range.location, effectiveRange: nil)
-                    as? NSFont
-            else { return }
             let glyphs = manager.glyphRange(forCharacterRange: range, actualCharacterRange: nil)
             guard glyphs.length > 0 else { return }
             // The bounding rect spans the line's full height; the chip hugs the
             // run's own font box around the line's baseline instead. The baseline
             // sits mid-line: the dominant font's box centres in the fixed line
             // height, and the chip's box hangs from it.
+            //
+            // The storage's font attribute is read AFTER layout, and TextKit 1
+            // rewrites it in place when the run holds characters the set face
+            // cannot render: a CJK code span comes back as PingFang at the same
+            // size, whose box is ~3.4pt taller than the mono face's. The chip is
+            // chrome for the code face, so derive the box from that face at the
+            // run's (preserved) size instead of the substituted attribute.
+            let measured = storage.attribute(.font, at: range.location, effectiveRange: nil)
+                as? NSFont
+            guard let measured else { return }
+            let font = EditorFont.nsMono(theme: theme, size: measured.pointSize)
             let bounding = manager.boundingRect(forGlyphRange: glyphs, in: container)
             let contentHeight = font.ascender - font.descender
             guard contentHeight > 0, bounding.height > 0 else { return }
@@ -218,17 +233,32 @@ enum BlockDecorator {
                 + dominant.ascender
             let contentCenter = baseline - font.ascender + contentHeight / 2
             let padding = EditorMetrics.tiny
-            rects.append(
-                CGRect(
-                    x: bounding.minX - padding - EditorMetrics.hairline,
-                    y: bounding.minY + contentCenter - contentHeight / 2
-                        - EditorMetrics.hairline,
-                    width: bounding.width + (padding + EditorMetrics.hairline) * 2,
-                    height: contentHeight + EditorMetrics.hairline * 2
+            runs.append(
+                ChipRun(
+                    rect: CGRect(
+                        x: bounding.minX - padding - EditorMetrics.hairline,
+                        y: bounding.minY + contentCenter - contentHeight / 2
+                            - EditorMetrics.hairline,
+                        width: bounding.width + (padding + EditorMetrics.hairline) * 2,
+                        height: contentHeight + EditorMetrics.hairline * 2
+                    ),
+                    fontSize: font.pointSize,
+                    fontBox: contentHeight
                 )
             )
         }
-        return rects
+        return runs
+    }
+
+    static func inlineCodeChipRects(
+        storage: NSTextStorage, manager: NSLayoutManager,
+        container: NSTextContainer, lineCharRange: NSRange
+    ) -> [CGRect] {
+        inlineCodeChipRuns(
+            theme: BuiltInTheme.github,
+            storage: storage, manager: manager, container: container,
+            lineCharRange: lineCharRange
+        ).map(\.rect)
     }
 
     /// Draws one rounded background-and-border box per code block.
@@ -465,14 +495,15 @@ enum BlockDecorator {
                     let manager = view.layoutManager, let container = view.textContainer,
                     !isPainted(lineCharRange, in: view)
                 else { break }
-                for chip in inlineCodeChipRects(
+                for chip in inlineCodeChipRuns(
+                    theme: theme,
                     storage: storage, manager: manager, container: container,
                     lineCharRange: lineCharRange
                 ) {
                     // Chip rects are in container coordinates; the line rects the
                     // decorator paints are already offset into the view, so the chip
                     // follows them (see `inlineImageOrigin`).
-                    let rect = chip.offsetBy(dx: inset.width, dy: inset.height)
+                    let rect = chip.rect.offsetBy(dx: inset.width, dy: inset.height)
                     let path = CGPath(
                         roundedRect: rect, cornerWidth: radius, cornerHeight: radius,
                         transform: nil

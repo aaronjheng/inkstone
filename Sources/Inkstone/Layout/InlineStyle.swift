@@ -77,9 +77,15 @@ struct InlineStyle {
     }
 
     static func code(theme: EditorTheme, base: BlockStyle) -> Overrides {
-        Overrides(
+        // `code { font-size: 0.9em }`, except inside headings where
+        // `h1..h6 code { font-size: inherit }` wins - the chip rides the
+        // heading's own size (28pt in an h2, not 0.9 × 28).
+        let size = base.font.pointSize > theme.bodyFontSize
+            ? base.font.pointSize
+            : theme.codeFontSize
+        return Overrides(
             attributes: [
-                .font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
+                .font: EditorFont.nsMono(theme: theme, size: size),
                 .foregroundColor: theme.inlineCodeText.nsColor,
                 // Chrome (the snug rounded chip) is painted by the decorator over
                 // `md.codeRun` runs; a background attribute here would fill the full

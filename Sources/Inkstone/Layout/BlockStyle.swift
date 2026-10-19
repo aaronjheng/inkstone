@@ -413,8 +413,13 @@ extension NSParagraphStyle {
     /// marker shares its line with real text - see `collapsed(from:theme:)`.
     static func markdownRuleLine(spacingBefore: CGFloat = 0) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
-        style.minimumLineHeight = 0.01
-        style.maximumLineHeight = 0.01
+        // The row IS the rule's content box (`hr { height: 2px }`): the painted
+        // bar fills it exactly, so the collapsed margins around it measure from
+        // the bar's edges like the reference's element box. A 0.01 strut here
+        // left every gap around a rule 2pt tighter than the reference (the bar
+        // painted ±1pt outside the layout flow).
+        style.minimumLineHeight = 2
+        style.maximumLineHeight = 2
         style.paragraphSpacing = 0
         // The block after a rule brings its own top spacing, mirroring CSS margin
         // collapsing (`hr { margin: 16px 0 }` collapses with the neighbour's own).

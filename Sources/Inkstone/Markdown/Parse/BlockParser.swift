@@ -307,17 +307,12 @@ public struct BlockParser {
         guard index + 1 < end else { return nil }
         let next = String(lines[index + 1].text)
         guard !next.isEmpty, !current.isEmpty else { return nil }
-        guard let level = SetextHeading.level(for: next) else { return nil }
-        guard !isBlockStart(next) else { return nil }
-        return level
-    }
-
-    private func isBlockStart(_ content: String) -> Bool {
-        ATXHeading.match(content) != nil
-            || HorizontalRule.match(content) != nil
-            || Blockquote.isQuote(content, baseIndent: 0)
-            || ListItem.match(content, baseIndent: 0) != nil
-            || Fence.opening(in: content, baseIndent: 0) != nil
+        // `level(for:)` accepts only pure `=`/`-` runs, which is exactly the
+        // setext underline shape - a list item, quote or fence line cannot
+        // reach here. A dash run doubles as a thematic break, but the setext
+        // underline wins when a paragraph precedes it (CommonMark):
+        // `Foo\n---` is an h2, only a lone `---` is a rule.
+        return SetextHeading.level(for: next)
     }
 
     private func leadingSpaces(_ value: Substring) -> Int? {

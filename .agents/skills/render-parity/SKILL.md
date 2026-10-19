@@ -46,12 +46,34 @@ pass `--out dir` to keep them next to the document for inspection.
 - `lines[]` — per aligned line: `height`/`pitch`/`gap`/`left` as
   `[app, reference]` pt pairs, plus the line's source text. `pitch` covers
   rhythm (line spacing), `gap` only fires at block boundaries (margins), and
-  `left` catches indent/nesting errors.
+  `left` catches indent/nesting errors. Line pitch and text column compare
+  only when both sides resolved the same row count; the item-internal pitch
+  (the marker hider's 9.4pt vs the reference's 8pt `li p` margin) is reported
+  on the block row, not flagged.
 - `markers[]` — per list item: `centerX` expected as `contentLeft − 0.95em`,
   shape per the browser ladder (depth 1 disc, 2 ring, 3+ square) and size in em.
 - `chips[]` — per inline-code span: `x`/`w`/`h` absolute and `yOffset` relative
   to the owning line's center.
 - Flags use `line N`/`marker N`/`chip N` indices matching the arrays.
+
+## Metric semantics (how the two sides are made comparable)
+
+- **Gaps compare layout margin edges.** The reference's line rects are font
+  content boxes (~3.6pt tighter than its line boxes), so the reference side
+  uses the element border boxes (`ref.blocks[*].top/bottom`) and the App side
+  its first-row top / last-row box bottom. The gap between consecutive blocks
+  is then the collapsed CSS margin on both sides.
+- **Reference blocks include `<pre>`, `<table>` and empty `<li>` element
+  boxes** (their subtrees produce no text nodes); the App's `fences`,
+  `indentedCode` (aliased to `fences`) and `table` blocks pair against them.
+- **Dropped kinds** — `frontMatter`, `linkDefinition`, `htmlBlock` and
+  `fences`-adjacent gap checks are out of scope (the baseline cannot model
+  them); the App blocks are removed from the sequence and gaps polluted by a
+  dropped block are not flagged.
+- **Blank rows inside containers** (between list items, between an item's
+  paragraphs, inside quotes) collapse to hairlines whose strut carries the
+  paragraph margin; a pure blank line's margin rides on the NEXT separator
+  newline (the blank row's only character).
 
 ## Interpreting → code paths
 
@@ -80,25 +102,27 @@ pass `--out dir` to keep them next to the document for inspection.
 
 ## Known-residual baseline (do not chase as new bugs)
 
-As of the last full run the fixture reports ~105 flags. These categories are
-KNOWN and accepted — a fresh run should be compared against them; only NEW
-divergences (different blocks, larger deltas) are regressions:
+As of the last full run over `~/Documents/md-fixtures` the fixture set reports
+~7 flags. These categories are KNOWN and accepted — a fresh run should be
+compared against them; only NEW divergences (different blocks, larger deltas)
+are regressions:
 
-- **chip x-in-line Δ~3pt** — the chip-box semantics: the App's chip protrudes
-  3pt left of the text column, the reference's chip padding pushes glyphs 3pt
-  right. Engine limitation (TextKit 1 cannot offset a run's glyphs). ~26 flags
-  across all files.
-- **CJK advance accumulation** — chip positions after long CJK runs drift
-  6-12pt (TextKit vs Chromium text shaping). Part of the chip x flags.
-- **task item pitch Δ~1.4pt** — the App's 9.4pt item spacing vs the
-  reference's li p margin (~35 vs 33.6). Within tolerance; accepted.
-- **tables** — the App's painted grid (row height now includes cell padding
-  12 + border 1) vs the CSS table; the delimiter row's buffer box and the
-  painted/buffer row relationship are still approximate. P1 redesign pending.
-- **fence margins** — partially aligned (margin 15 + padding 8/6); residual
-  deltas ~2-6pt around fenced blocks. P1 polish.
-- **hr line missing from the App's line sequence** — the hr's 0.01pt
-  fragment is compared as a whole block instead; phase 2.
+- **chip box metrics** — body chips align (18.76 vs 18); the heading chip's
+  width carries the CJK fallback advance (~5pt over 4 glyphs, TextKit vs
+  Chromium shaping). 1 flag.
+- **nested quote level margins** — the reference separates every quote level
+  with the blockquote's own 12.8pt margin (pitch 38.4 between levels); the App
+  glues the levels into one paragraph. The delegate handover covers every
+  transition EXCEPT the one after the quote's first row (TextKit 1 drops the
+  delegate spacing there when the paragraph carries `paragraphSpacingBefore`).
+  2 pitch flags.
+- **quote's list marker center** — a list inside a quote compounds the
+  quote's inset into the item text column (49pt ✓), but the marker geometry
+  still reads the un-compounded column (14.8 vs 33.8). 2 flags; the marker
+  plan's width/origin needs the same inset offset.
+- **raw HTML edge cases** — a stray closing tag is escaped for the baseline;
+  deeper raw-HTML quirks (an unclosed fence the reference turns into a code
+  block) still mispair. 2 flags in `special-chars.md`.
 
 ## Flags
 

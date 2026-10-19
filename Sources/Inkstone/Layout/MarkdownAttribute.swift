@@ -60,6 +60,13 @@ enum MarkdownAttribute {
     /// to the lines that carry this key instead.
     static let subBlock = NSAttributedString.Key("md.subBlock")
 
+    /// `md.subKind` - the `BlockKind.rawValue` of the `md.subBlock` block. The
+    /// layout dump reports this as the row's kind when present: a list item's
+    /// nested fence or table is its own block in the reference's model (the
+    /// `pre`/`table` element claims its rows), while a nested quote is claimed
+    /// by its container and keeps the container's kind.
+    static let subKind = NSAttributedString.Key("md.subKind")
+
     /// Marks the *body* lines of a code block - the lines between the hidden
     /// fence delimiters. The decorator unions these lines to draw the block's
     /// background and border as one rounded box, so the invisible fence rows do

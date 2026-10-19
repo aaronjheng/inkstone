@@ -41,6 +41,11 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
     /// the layout knows exactly where the row ends, which is why the gap survives
     /// here.
     var listItemSpacing: CGFloat = 0
+    /// The blockquote's own margin (`blockquote { margin: 0.8em 0 }`), applied
+    /// when a row hands over to the next quote level: the levels are glued into
+    /// one paragraph, so the margin between them reaches the layout through
+    /// this delegate - same trick as the item spacing.
+    var quoteLevelSpacing: CGFloat = 0
 
     func layoutManager(
         _ layoutManager: NSLayoutManager,
@@ -95,6 +100,18 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
     /// block (the trailing newline carries none), so the kind read there - or one
     /// glyph back, when the row ends in something glyph-less - decides whether
     /// this is an item row.
+    ///
+    /// Two rows must NOT receive the spacing:
+    ///
+    /// - A collapsed boundary row (the backfill newline that starts the list's
+    ///   paragraph, proposed at the strut's ~0 height). Spacing there pushed the
+    ///   first item `listItemSpacing` below the block's margin edge - visible as
+    ///   an extra gap between the heading and the list that Typora does not have
+    ///   (16pt measured vs 25.4pt before the fix).
+    /// - The list's LAST row. The next characters belong to a different block
+    ///   (the following heading's or paragraph's boundary backfill), so the
+    ///   item margin must not stack on top of the next block's own spacing -
+    ///   CSS collapses those margins, TextKit would add them.
     func layoutManager(
         _ layoutManager: NSLayoutManager,
         lineSpacingAfterGlyphAt glyphIndex: Int,
@@ -103,17 +120,69 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
         guard listItemSpacing > 0, let storage = layoutManager.textStorage,
             storage.length > 0
         else { return 0 }
-        for location in [min(glyphIndex, storage.length - 1), glyphIndex - 1] {
-            guard location >= 0, location < storage.length,
-                let kind = storage.attribute(
-                    MarkdownAttribute.blockKind, at: location, effectiveRange: nil
-                ) as? String
-            else { continue }
-            if kind == BlockKind.listItem.rawValue || kind == BlockKind.taskItem.rawValue {
-                return listItemSpacing
-            }
+        func kind(at location: Int) -> String? {
+            guard location >= 0, location < storage.length else { return nil }
+            return storage.attribute(MarkdownAttribute.blockKind, at: location, effectiveRange: nil)
+                as? String
         }
-        return 0
+        // A collapsed blank row (a bare `>` line between a quote's paragraphs,
+        // a container's boundary hairline) renders no row; the margin it stands
+        // in for reaches the layout here. The row's own kind decides whose
+        // margin it is: a quote's blank line carries the quote's paragraph
+        // margin, a list's blank line the item spacing (a boundary hairline
+        // between top-level blocks carries the next block's spacing on its own
+        // paragraph style, so it stays flat here).
+        if rect.height <= 1 {
+            // A collapsed boundary row is not a rendered row - never space
+            // after it: the boundary's own paragraph style carries the next
+            // block's collapsed margin, and a list's blank rows take the item
+            // spacing from the row before them.
+            return 0
+        }
+        // The item row itself: the row's last glyph, or one glyph back when the
+        // row ends in something glyph-less.
+        let listKinds: Set<String> = [BlockKind.listItem.rawValue, BlockKind.taskItem.rawValue]
+        let rowKind = [min(glyphIndex, storage.length - 1), glyphIndex - 1]
+            .compactMap { kind(at: $0) }.first
+        // A quote level handover: the levels are glued into one paragraph, so
+        // the blockquote margin between them comes from here. The row's own
+        // content carries its level's `md.subBlock`; when a character shortly
+        // after the row carries a DIFFERENT sub, the next row hands over to a
+        // deeper level and the margin belongs between the two.
+        if rowKind == BlockKind.blockquote.rawValue, quoteLevelSpacing > 0 {
+            func subBlock(at location: Int) -> Int? {
+                guard location >= 0, location < storage.length else { return nil }
+                return storage.attribute(MarkdownAttribute.subBlock, at: location, effectiveRange: nil)
+                    as? Int
+            }
+            let own = subBlock(at: min(glyphIndex, storage.length - 1))
+            var deeper = false
+            var lookahead = 1
+            while !deeper, lookahead <= 8 {
+                let ahead = subBlock(at: glyphIndex + lookahead)
+                if let ahead, ahead != own { deeper = true }
+                lookahead += 1
+            }
+            if ProcessInfo.processInfo.environment["MD_DEBUG_SPACING"] != nil {
+                let note = "quote-level: glyph \(glyphIndex) own \(String(describing: own)) "
+                    + "deeper \(deeper) h \(rect.height)\n"
+                FileHandle.standardError.write(Data(note.utf8))
+            }
+            if deeper { return quoteLevelSpacing }
+        }
+        guard
+            [min(glyphIndex, storage.length - 1), glyphIndex - 1].contains(where: {
+                kind(at: $0).map(listKinds.contains) == true
+            })
+        else { return 0 }
+        // The list's last row: ahead of it the next block's boundary backfill
+        // carries a non-list kind (a few characters in, past the backfill
+        // newline and the row's own glued hidden markers).
+        let lookahead = max(glyphIndex - 1, 0)...min(glyphIndex + 6, storage.length - 1)
+        for location in lookahead where location > glyphIndex {
+            if let ahead = kind(at: location), !listKinds.contains(ahead) { return 0 }
+        }
+        return listItemSpacing
     }
 }
 

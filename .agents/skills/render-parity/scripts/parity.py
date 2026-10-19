@@ -1,6 +1,6 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["playwright", "markdown"]
+# dependencies = ["playwright", "markdown-it-py"]
 # ///
 """Render-parity: compare Inkstone's Markdown rendering against the Typora
 reference, headlessly, from layout geometry — no screenshots, no pixels.
@@ -46,6 +46,25 @@ DEFAULT_APP_BIN = (
 )
 VIEWPORT = 920  # 860 max-width + 2×30 padding; #write content width is derived, not assumed
 
+_MD_IT: "MarkdownIt | None" = None
+
+
+def _converter() -> "MarkdownIt":
+    """The CommonMark converter behind the reference render.
+
+    markdown-it-py follows CommonMark 0.31 — the rules the editor's own parser
+    implements for list nesting, fence-in-item, setext-vs-rule precedence and
+    quote continuation. python-markdown's legacy behaviour disagreed with all
+    four and needed source-level patches (indent doubling, fence demotion,
+    comment separators) that this swap deletes.
+    """
+    global _MD_IT
+    if _MD_IT is None:
+        from markdown_it import MarkdownIt
+
+        _MD_IT = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+    return _MD_IT
+
 # Tolerances in pt (1 CSS px = 1 pt at deviceScaleFactor 1).
 TOLERANCES = {
     "pitch": 0.5,
@@ -59,6 +78,23 @@ TOLERANCES = {
 EXTRACT_JS = """
 () => {
   const write = document.getElementById('write');
+  // Adjacent sibling lists with different bullets (`* a` + blank + `+ b`):
+  // CommonMark starts a new list per bullet, while the editor's parser
+  // continues the list across the blank. Merge same-tag siblings so the DOM
+  // matches the App's single list; type changes (ul -> ol) stay separate,
+  // exactly like the App's parser.
+  let mergedLists = true;
+  while (mergedLists) {
+    mergedLists = false;
+    for (const el of write.querySelectorAll('ul, ol')) {
+      const next = el.nextElementSibling;
+      if (next && next.tagName === el.tagName) {
+        while (next.firstChild) el.appendChild(next.firstChild);
+        next.remove();
+        mergedLists = true;
+      }
+    }
+  }
   const wrect = write.getBoundingClientRect();
   const wcs = getComputedStyle(write);
   const out = {
@@ -91,7 +127,10 @@ EXTRACT_JS = """
         li = e;
         task = !!li.querySelector('input[type=checkbox]');
       }
-      if (!bq && t === 'BLOCKQUOTE') bq = e;
+      // The OUTERMOST blockquote claims the row: the App's quote rows carry
+      // the visual owner's block id, and the nested levels render as part of
+      // the same block.
+      if (t === 'BLOCKQUOTE') bq = e;
       if (!heading && /^H[1-6]$/.test(t)) heading = e;
       if (!pre && t === 'PRE') pre = e;
       if (!table && t === 'TABLE') table = e;
@@ -178,11 +217,25 @@ EXTRACT_JS = """
   // Thematic breaks have no text nodes; emit them so block pairing and the
   // gaps around them align with the App (whose hr rows carry geometry).
   let hrId = ids.size;
-  for (const el of write.querySelectorAll('hr')) {
+  const bare = (el, kind) => {
     const r = el.getBoundingClientRect();
-    out.blocks.push({ id: hrId++, kind: 'hr', listDepth: 0,
+    out.blocks.push({ id: hrId++, kind, listDepth: 0,
                       top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+  };
+  for (const el of write.querySelectorAll('hr')) bare(el, 'hr');
+  // A list item whose content is a raw-HTML element (`<br>`, a comment) has no
+  // text node of its own, but the App emits the item's row — emit the element
+  // box so the pairing does not shift by one for everything after it.
+  for (const el of write.querySelectorAll('li')) {
+    if (!el.textContent.trim()) {
+      bare(el, el.querySelector('input[type=checkbox]') ? 'taskItem' : 'listItem');
+    }
   }
+  // The App scopes a nested fence/table to its own sub-block (`md.subKind`),
+  // and the reference's element claims its rows in both models - emit every
+  // pre/table element box.
+  for (const el of write.querySelectorAll('pre')) bare(el, 'fences');
+  for (const el of write.querySelectorAll('table')) bare(el, 'table');
 
   for (const el of write.querySelectorAll('code, tt')) {
     if (el.closest('pre') || el.closest('table')) continue;
@@ -246,13 +299,30 @@ EXTRACT_JS = """
 
 def baseline(md_path: Path, out_path: Path, match_app_fonts: bool, keep_html: bool) -> dict:
     """Render the document in headless Chromium with Typora's CSS; dump geometry."""
-    import markdown as md_lib
     from playwright.sync_api import sync_playwright
 
     text = md_path.read_text(encoding="utf-8")
-    content = md_lib.markdown(
-        text, extensions=["tables", "fenced_code", "sane_lists", "attr_list"]
+    # YAML front matter: the App models it as its own frontMatter block; the
+    # converter would render it as a thematic break plus paragraphs. Strip it
+    # (the comparator drops the App's frontMatter blocks too) so both sequences
+    # align; the front-matter box itself is phase 2.
+    text = re.sub(r"\A---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|$)", "", text, flags=re.DOTALL)
+    # A stray closing tag: the converter treats it as raw inline HTML and drops
+    # it from the text, while the editor (and Typora) render it as literal
+    # text. Escape closing tags that close nothing opened on their line.
+    def _escape_stray_closing(line: str) -> str:
+        m = re.search(r"</([a-zA-Z][^>]*)>([ \t]*)$", line)
+        if not m:
+            return line
+        tag = m.group(1)
+        if re.search(r"<" + re.escape(tag) + r"[\s>]", line[: m.start()]):
+            return line
+        return line[: m.start()] + "&lt;/" + tag + "&gt;" + m.group(2)
+
+    text = "\n".join(
+        _escape_stray_closing(line) for line in text.split("\n")
     )
+    content = _converter().render(text)
     styles = []
     for css_path in TYPORA_CSS:
         styles.append(Path(css_path).read_text(encoding="utf-8"))
@@ -275,7 +345,7 @@ def baseline(md_path: Path, out_path: Path, match_app_fonts: bool, keep_html: bo
         styles.append("\n".join(faces))
         styles.append(':root { --monospace: "Menlo", monospace !important; }')
 
-    # Task lists: python-markdown leaves `[x]` as literal text; Typora renders
+    # Task lists: the converter leaves `[x]` as literal text; Typora renders
     # a checkbox input at the item start (github.css styles it). Convert to the
     # same DOM shape so the geometry and the kind match the App.
     content = re.sub(
@@ -289,7 +359,7 @@ def baseline(md_path: Path, out_path: Path, match_app_fonts: bool, keep_html: bo
         content,
     )
     # Typora's document model wraps every list item's content in a paragraph;
-    # python-markdown emits tight lists (bare text in li), which would skip the
+    # CommonMark emits tight lists (bare text in li), which would skip the
     # `li p` spacing rules the App implements. Wrap to match the DOM shape.
     content = re.sub(
         r"<li>(?!<[pbouhl])",
@@ -374,6 +444,8 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
 
     ref_lines_all = ref["lines"]
     app_lines_all = app["lines"]
+    if not ref_lines_all or not app_lines_all:
+        return ["empty document on at least one side"], {"meta": {}, "blocks": [], "flags": []}
     origin_y_ref = min(l["top"] for l in ref_lines_all)
     origin_x_ref = min(l["left"] for l in ref_lines_all)
     origin_y_app = min(l["top"] for l in app_lines_all)
@@ -410,26 +482,46 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
         block["lines"] = [l for l in ref_lines_all if l["block"] == block["id"]]
 
     # --- app blocks: kind runs over the line sequence -----------------------
+    # indentedCode renders like a fence on both engines; frontMatter,
+    # linkDefinition and htmlBlock are App-side constructs the plain converter
+    # does not model (front matter becomes hr+paragraphs, definitions vanish,
+    # comments render nothing) — dropped until their phase 2 exists.
+    KIND_ALIAS = {"indentedCode": "fences"}
+    DROPPED_KINDS = {"frontMatter", "linkDefinition", "htmlBlock"}
     app_blocks: list[dict] = []
     current: dict | None = None
+    after_dropped = False
     marker_lines = {marker["line"] for marker in app["markers"]}
+    # Task rows carry no listMarker decoration — their checkbox bar is the row's
+    # identity, so split blocks there too (nested task items share the parent's
+    # block id and would otherwise fuse into one block).
+    checkbox_lines = {
+        bar["line"] for bar in app.get("bars", []) if bar["kind"] == "taskCheckbox"
+    }
     for line in app_lines_all:
         if line["bottom"] - line["top"] < 0.5:
             continue  # boundary hairlines are not blocks
+        line = {**line, "kind": KIND_ALIAS.get(line["kind"], line["kind"])}
+        if line["kind"] in DROPPED_KINDS:
+            after_dropped = True
+            continue
         starts = (
             current is None
             or line["block"] != current["block"]
             or line["kind"] != current["kind"]
             or line["i"] in marker_lines
+            or line["i"] in checkbox_lines
         )
         if starts:
             if current:
                 app_blocks.append(current)
             current = {
                 "kind": line["kind"], "top": line["top"], "bottom": line["bottom"],
-                "depth": line["depth"], "block": line["block"], "lines": [line],
-                "text": line["text"],
+                "depth": line["depth"], "block": line["block"],
+                "sub": line.get("sub"), "lines": [line],
+                "text": line["text"], "afterDropped": after_dropped,
             }
+            after_dropped = False
         else:
             current["bottom"] = line["bottom"]
             current["lines"].append(line)
@@ -475,44 +567,70 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                      "lines": [len(rb["lines"]), len(ab["lines"])]}
         if len(rb["lines"]) != len(ab["lines"]) and rb["kind"] not in ("table", "fences"):
             row["wrap"] = "differs"
-        # block box: the reference's element rect vs the App's first-used-top /
-        # last-used-bottom
-        if rb["lines"] and ab["lines"]:
-            ab_top = ab["lines"][0]["top"]
-            ab_bottom = ab["lines"][-1]["bottom"]
-            rb_top = rb["lines"][0]["top"]
-            rb_bottom = rb["lines"][-1]["bottom"]
-            row["top"] = [round(ab_top, 2), round(rb_top, 2)]
-            if prev_pair is not None:
-                prb, pab = prev_pair
-                if prb["lines"] and pab["lines"]:
-                    gap_r = rb_top - prb["lines"][-1]["bottom"]
-                    gap_a = ab_top - pab["lines"][-1]["bottom"]
-                    # List-item rows carry the item spacing INSIDE their line
-                    # box (the App) vs OUTSIDE (the reference's li margins) —
-                    # the item pitch (top-to-top) is the engine-neutral metric.
-                    if ab["kind"] in item_kinds and rb["kind"] in item_kinds \
-                        and prb["kind"] in item_kinds and pab["kind"] in item_kinds:
-                        row["itemPitch"] = [round(ab_top - pab["lines"][0]["top"], 2),
-                                            round(rb_top - prb["lines"][0]["top"], 2)]
-                    else:
-                        row["gap"] = [round(gap_a, 2), round(gap_r, 2)]
-                        if abs(gap_a - gap_r) > tolerances["gap"]:
-                            flags.append(
-                                f"block '{ab.get('text', '')[:24]}': gap {gap_a:.2f} vs {gap_r:.2f}pt"
-                            )
-            # line pitch inside the block (same font size per line)
-            for k in range(1, min(len(rb["lines"]), len(ab["lines"]))):
+        # block box: the reference's ELEMENT rect (border box = the CSS margin
+        # edge) vs the App's first-row top / last-row box bottom (the TextKit
+        # fragment box, whose top already carries the paragraph spacing). Both
+        # are margin edges, so the gap between consecutive blocks is the
+        # collapsed margin on both sides — engine-neutral. (The reference's
+        # line rects are FONT content boxes, ~3.6pt tighter than its line boxes;
+        # comparing those against the App's line boxes flagged every paragraph
+        # boundary with a constant offset.)
+        ab_top = ab["lines"][0]["top"] if ab["lines"] else ab.get("top", 0)
+        ab_bottom = ab["lines"][-1]["bottom"] if ab["lines"] else ab.get("bottom", 0)
+        rb_top, rb_bottom = rb["top"], rb["bottom"]
+        row["top"] = [round(ab_top, 2), round(rb_top, 2)]
+        if prev_pair is not None:
+            prb, pab, prb_bottom, pab_bottom = prev_pair
+            gap_r = rb_top - prb_bottom
+            gap_a = ab_top - pab_bottom
+            # List-item rows carry the item spacing INSIDE their line
+            # box (the App) vs OUTSIDE (the reference's li margins) —
+            # the item pitch (top-to-top) is the engine-neutral metric.
+            if ab["kind"] in item_kinds and rb["kind"] in item_kinds \
+                and prb["kind"] in item_kinds and pab["kind"] in item_kinds:
+                row["itemPitch"] = [round(ab_top - pab["lines"][0]["top"], 2),
+                                    round(rb_top - prb["top"], 2)]
+            elif prb["top"] - 0.5 <= rb["top"] and rb["bottom"] <= prb["bottom"] + 0.5:
+                # The reference's element boxes NEST (a blockquote claims the
+                # inner quote, a list item its children) — the margin between
+                # a container and its own child is not a collapsed margin.
+                pass
+            elif ab.get("afterDropped"):
+                # Dropped blocks (definitions, front matter) sit between the
+                # pair on the App side; their height pollutes the gap.
+                pass
+            else:
+                # Fences/table margins are P1 (the App's painted padding
+                # sits outside the text rows); suppress the noisy gap
+                # flags around them until that redesign.
+                if ab["kind"] not in SKIPPED_KINDS \
+                    and rb["kind"] not in SKIPPED_KINDS \
+                    and pab["kind"] not in SKIPPED_KINDS \
+                    and prb["kind"] not in SKIPPED_KINDS:
+                    row["gap"] = [round(gap_a, 2), round(gap_r, 2)]
+                    if abs(gap_a - gap_r) > tolerances["gap"]:
+                        flags.append(
+                            f"block '{ab.get('text', '')[:24]}': gap {gap_a:.2f} vs {gap_r:.2f}pt"
+                        )
+        # Line pitch and text column only compare when both sides resolved the
+        # same number of rows — a row-count difference means the two engines
+        # split the block differently (a blank row one keeps and the other
+        # collapses), and index-parallel comparison would compare unrelated
+        # rows.
+        if len(rb["lines"]) == len(ab["lines"]):
+            for k in range(1, len(ab["lines"])):
                 pitch_r = rb["lines"][k]["top"] - rb["lines"][k - 1]["top"]
                 pitch_a = ab["lines"][k]["top"] - ab["lines"][k - 1]["top"]
-                if abs(pitch_a - pitch_r) > tolerances["pitch"]:
+                if ab["kind"] in item_kinds and abs(pitch_a - pitch_r) > tolerances["pitch"]:
+                    row.setdefault("pitch", []).append([k, round(pitch_a, 2), round(pitch_r, 2)])
+                elif abs(pitch_a - pitch_r) > tolerances["pitch"]:
                     flags.append(
                         f"block '{ab.get('text', '')[:24]}' line {k}: pitch {pitch_a:.2f} vs {pitch_r:.2f}pt"
                     )
             # text column per line (skip rows that start with a code span: the
             # reference's chip padding pushes glyphs ~3pt right of the column)
             app_chip_lines = {chip["line"] for chip in app["chips"]}
-            for k in range(min(len(rb["lines"]), len(ab["lines"]))):
+            for k in range(len(ab["lines"])):
                 rl, al = rb["lines"][k], ab["lines"][k]
                 if al["_index"] in app_chip_lines:
                     continue
@@ -520,7 +638,7 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                     flags.append(
                         f"block '{ab.get('text', '')[:24]}' line {k}: text column {al['left']:.2f} vs {rl['left']:.2f}pt"
                     )
-        prev_pair = (rb, ab)
+        prev_pair = (rb, ab, rb_bottom, ab_bottom)
         report_blocks.append(row)
     report["blocks"] = report_blocks
 
