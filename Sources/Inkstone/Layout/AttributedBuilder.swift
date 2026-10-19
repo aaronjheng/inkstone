@@ -67,9 +67,10 @@ struct AttributedBuilder {
                 // CSS margin collapsing: max(previous bottom, own top), minus
                 // what the previous block has already applied after its last
                 // line (TextKit 1 sums the two; the reference collapses them).
-                collapsedSpacing = max(
-                    cssMargin(previousKind), cssMargin(block.kind)
-                ) - previousAppliedAfter
+                collapsedSpacing =
+                    max(
+                        cssMargin(previousKind), cssMargin(block.kind)
+                    ) - previousAppliedAfter
             } else {
                 // The first block: the reference drops a first child's
                 // margin-top (`#write > :first-child` behaviour — measured:
@@ -689,7 +690,8 @@ struct AttributedBuilder {
                 let markerLength = markerPrefixLength(rawLine)
                 let lineContent = String(rawLine.dropFirst(markerLength))
                 let isEmptyLine = lineContent.trimmingCharacters(in: .whitespaces).isEmpty
-                let rowStyle = (blankRow || isEmptyLine)
+                let rowStyle =
+                    (blankRow || isEmptyLine)
                     ? blankLineStyle
                     : (quoteStyle.base[.paragraphStyle] as? NSParagraphStyle)
                 if markerLength > 0 {
@@ -722,6 +724,98 @@ struct AttributedBuilder {
                     strutNextSeparator = false
                 }
                 pendingFirstLine = false
+            }
+
+            /// Emits one paragraph child from its inline nodes instead of raw
+            /// text, so quoted paragraphs keep their inline styling. The rows'
+            /// hidden `> ` markers interleave with the content bytes: each row
+            /// break - a top-level soft or hard break in the node stream - turns
+            /// the row over by appending the newline and the next row's marker
+            /// prefix, exactly where the raw walk would have put them.
+            ///
+            /// Returns false when the nodes cannot rebuild the slice
+            /// byte-for-byte: a break nested inside a container (its newline
+            /// would swallow the next row's marker bytes), a blank row, or any
+            /// drift between the parsed text and the raw lines. The caller then
+            /// takes the raw walk, which is always byte-exact.
+            func emitQuoteParagraphInlines(
+                _ child: BlockNode, _ slice: [String], depth: Int
+            ) -> Bool {
+                guard !slice.isEmpty else { return false }
+                var rows: [(prefix: String, content: String)] = []
+                for line in slice {
+                    if isBlankAtLevel(line) { return false }
+                    let markerLength = markerPrefixLength(line)
+                    rows.append(
+                        (String(line.prefix(markerLength)), String(line.dropFirst(markerLength)))
+                    )
+                }
+                // Every row boundary must be a top-level break the walk can
+                // intercept, and every break must end in the newline it stands
+                // for - otherwise the next row's marker bytes would be lost.
+                func containsBreak(_ nodes: [InlineNode]) -> Bool {
+                    nodes.contains { node in
+                        node.kind == .softBreak || node.kind == .hardBreak
+                            || containsBreak(node.children)
+                    }
+                }
+                func hasNestedBreak(_ nodes: [InlineNode]) -> Bool {
+                    nodes.contains { node in
+                        node.kind != .softBreak && node.kind != .hardBreak
+                            && containsBreak(node.children)
+                    }
+                }
+                let breaks = child.inlines.filter { $0.kind == .softBreak || $0.kind == .hardBreak }
+                guard breaks.count == rows.count - 1, !hasNestedBreak(child.inlines),
+                    breaks.allSatisfy({ $0.verbatim.hasSuffix("\n") })
+                else { return false }
+                // The nodes were parsed from the rows' content; any drift means
+                // emission would lose bytes.
+                guard child.inlines.verbatim == rows.map(\.content).joined(separator: "\n")
+                else { return false }
+                beginLine()
+                if !rows[0].prefix.isEmpty {
+                    appendHiddenRun(
+                        rows[0].prefix, role: .quoteMark, into: result,
+                        style: collapsed, block: visualBlock, depth: depth,
+                        paragraphStyle: quoteStyle.base[.paragraphStyle] as? NSParagraphStyle
+                    )
+                }
+                plainCursor = 0
+                var rowIndex = 0
+                for node in child.inlines {
+                    if node.kind == .softBreak || node.kind == .hardBreak {
+                        // The break's bytes minus its newline - a hard break's
+                        // trailing spaces - are still the previous row's content;
+                        // the newline separates the rows and the next row's
+                        // hidden marker prefix follows it.
+                        rowIndex += 1
+                        let head = String(node.verbatim.dropLast())
+                        if !head.isEmpty {
+                            append(
+                                head, runAttributes(quoteStyle, block: visualBlock, depth: depth),
+                                to: result
+                            )
+                        }
+                        result.append(NSAttributedString(string: "\n"))
+                        let row = rows[rowIndex]
+                        if !row.prefix.isEmpty {
+                            appendHiddenRun(
+                                row.prefix, role: .quoteMark, into: result,
+                                style: collapsed, block: visualBlock, depth: depth,
+                                paragraphStyle: quoteStyle.base[.paragraphStyle]
+                                    as? NSParagraphStyle
+                            )
+                        }
+                        plainCursor += node.plainText.utf16.count
+                    } else {
+                        emit(
+                            inline: node, into: result, style: quoteStyle,
+                            block: visualBlock, depth: depth
+                        )
+                    }
+                }
+                return true
             }
             var lineCursor = 0
             // The quote's own leading blank lines (its leading text when it
@@ -803,13 +897,23 @@ struct AttributedBuilder {
                         )
                     }
                 case .paragraph:
-                    for line in slice {
-                        beginLine()
-                        if isBlankAtLevel(line) {
-                            emitLevelLine(line, blankRow: true)
-                            strutNextSeparator = true
-                        } else {
-                            emitLevelLine(line, blankRow: false)
+                    // The paragraph renders from its inline nodes - emphasis,
+                    // code chips and links stay styled inside the quote, like in
+                    // every paragraph outside one. The rows still come from the
+                    // raw lines: the nodes must rebuild them byte-for-byte and
+                    // each row's hidden `> ` prefix is re-emitted at the break
+                    // that ends the row before it, so the buffer keeps every
+                    // byte. Anything the nodes cannot reconstruct falls back to
+                    // the raw walk.
+                    if !emitQuoteParagraphInlines(child, slice, depth: depth) {
+                        for line in slice {
+                            beginLine()
+                            if isBlankAtLevel(line) {
+                                emitLevelLine(line, blankRow: true)
+                                strutNextSeparator = true
+                            } else {
+                                emitLevelLine(line, blankRow: false)
+                            }
                         }
                     }
                 case .list:
@@ -914,8 +1018,9 @@ struct AttributedBuilder {
             // container's own inset (a quote's 19pt per level), which the
             // depth-based list indent knows nothing about.
             let textColumn = indentOffset + theme.listIndent * CGFloat(max(depth + 1, 1))
-            if indentOffset > 0, let paragraphStyle = style.base[.paragraphStyle]
-                as? NSParagraphStyle,
+            if indentOffset > 0,
+                let paragraphStyle = style.base[.paragraphStyle]
+                    as? NSParagraphStyle,
                 let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle
             {
                 mutable.headIndent += indentOffset
@@ -2599,21 +2704,40 @@ struct AttributedBuilder {
             // ordered and task items still need the marker remnants (`. `,
             // `[x] `) removed from the child's text below.
             guard checked != nil || block.attributes.isOrdered == true else { return inlines }
+            if checked != nil {
+                // The task flag usually arrives as a shortcut reference: the lexer
+                // reads the bare `[x]` as a `[label]` with no destination, its label
+                // the flag itself, so the paragraph's first node is a `.refLink` and
+                // not text. The item's marker prefix already hid the flag's bytes,
+                // so strip that node plus the space the marker consumed after the
+                // `]`, and the content behind it keeps its inline styling.
+                if let first = inlines.first, first.kind == .refLink,
+                    first.prefix == "[", first.suffix == "]",
+                    ["x", "X", " "].contains(first.attributes.reference ?? "")
+                {
+                    var rest = Array(inlines.dropFirst())
+                    if var next = rest.first, next.kind == .text {
+                        while next.payload.hasPrefix(" ") { next.payload.removeFirst() }
+                        if next.payload.isEmpty { rest.removeFirst() } else { rest[0] = next }
+                    }
+                    return rest
+                }
+                // ...or as literal text when the lexer kept the flag unparsed.
+                guard let first = inlines.first, first.kind == .text,
+                    ["[x] ", "[X] ", "[ ] "].contains(String(first.payload.prefix(4)))
+                else { return nil }
+                var node = first
+                node.payload.removeFirst(4)
+                return [node] + Array(inlines.dropFirst())
+            }
             guard let first = inlines.first, first.kind == .text
             else { return nil }
             var node = first
-            if let checked {
-                guard ["[x] ", "[X] ", "[ ] "].contains(String(node.payload.prefix(4))) else {
-                    return nil
-                }
-                node.payload.removeFirst(4)
-            } else {
-                let delimiter = block.attributes.orderedDelimiter
-                guard node.payload.hasPrefix(String(delimiter)) else { return nil }
+            let delimiter = block.attributes.orderedDelimiter
+            guard node.payload.hasPrefix(String(delimiter)) else { return nil }
+            node.payload.removeFirst()
+            if node.payload.hasPrefix(" ") || node.payload.hasPrefix("\t") {
                 node.payload.removeFirst()
-                if node.payload.hasPrefix(" ") || node.payload.hasPrefix("\t") {
-                    node.payload.removeFirst()
-                }
             }
             return [node] + Array(inlines.dropFirst())
         }
