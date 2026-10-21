@@ -186,12 +186,17 @@ enum BlockDecorator {
         var rect: CGRect
         var fontSize: CGFloat
         var fontBox: CGFloat
+        /// The row's engine baseline in container coordinates, exported for
+        /// the dump's position comparison (the reference measures its code
+        /// spans against the same anchor).
+        var baseline: CGFloat
     }
 
     static func inlineCodeChipRuns(
         theme: EditorTheme,
         storage: NSTextStorage, manager: NSLayoutManager,
-        container: NSTextContainer, lineCharRange: NSRange
+        container: NSTextContainer, lineCharRange: NSRange,
+        baselines: [Int: CGFloat]
     ) -> [ChipRun] {
         var runs: [ChipRun] = []
         storage.enumerateAttribute(
@@ -252,10 +257,32 @@ enum BlockDecorator {
                     dominant = candidate
                 }
             }
-            let baseline =
-                (bounding.height - (dominant.ascender - dominant.descender)) / 2
-                + dominant.ascender
-            let contentCenter = baseline - font.ascender + contentHeight / 2
+            // The chip hugs the mono font box, and the mono glyphs sit on the
+            // row's real baseline — captured by the layout delegate. The old
+            // model centred the dominant font's box in the fixed line height,
+            // which is where Chromium puts its baseline, not where TextKit
+            // does (it clamps the box from the descent side), so chips
+            // floated ~3pt below their glyphs. Baseline-relative the model is
+            // unchanged: the box centre sits at `baseline − (asc + desc)/2`.
+            // The layout delegate fires before this paint, so the capture is
+            // always populated; the strut model stays as the fallback.
+            var rowGlyphs = NSRange()
+            _ = manager.lineFragmentRect(
+                forGlyphAt: lineCharRange.location, effectiveRange: &rowGlyphs,
+                withoutAdditionalLayout: true
+            )
+            let baseline: CGFloat
+            if let engineBaseline = baselines[rowGlyphs.location] {
+                // The bounding rect spans the row the glyphs live on, so its
+                // origin is the fragment top the offset measures from.
+                baseline = engineBaseline
+            } else {
+                baseline =
+                    (bounding.height - (dominant.ascender - dominant.descender)) / 2
+                    + dominant.ascender
+            }
+            let absoluteBaseline = bounding.minY + baseline
+            let contentCenter = baseline - (font.ascender + font.descender) / 2
             let padding = EditorMetrics.tiny
             runs.append(
                 ChipRun(
@@ -267,22 +294,12 @@ enum BlockDecorator {
                         height: contentHeight + EditorMetrics.hairline * 2
                     ),
                     fontSize: font.pointSize,
-                    fontBox: contentHeight
+                    fontBox: contentHeight,
+                    baseline: absoluteBaseline
                 )
             )
         }
         return runs
-    }
-
-    static func inlineCodeChipRects(
-        storage: NSTextStorage, manager: NSLayoutManager,
-        container: NSTextContainer, lineCharRange: NSRange
-    ) -> [CGRect] {
-        inlineCodeChipRuns(
-            theme: BuiltInTheme.github,
-            storage: storage, manager: manager, container: container,
-            lineCharRange: lineCharRange
-        ).map(\.rect)
     }
 
     /// The heading rule's y for one line.
@@ -504,7 +521,8 @@ enum BlockDecorator {
                     chipRects = inlineCodeChipRuns(
                         theme: theme,
                         storage: storage, manager: manager, container: container,
-                        lineCharRange: lineCharRange
+                        lineCharRange: lineCharRange,
+                        baselines: view.markerHider.baselines
                     ).map { $0.rect.offsetBy(dx: inset.width, dy: inset.height) }
                 } else {
                     chipRects = []
@@ -638,7 +656,8 @@ enum BlockDecorator {
                 for chip in inlineCodeChipRuns(
                     theme: theme,
                     storage: storage, manager: manager, container: container,
-                    lineCharRange: lineCharRange
+                    lineCharRange: lineCharRange,
+                    baselines: view.markerHider.baselines
                 ) {
                     // Chip rects are in container coordinates; the line rects the
                     // decorator paints are already offset into the view, so the chip

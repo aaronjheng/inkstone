@@ -112,9 +112,13 @@ pass `--out dir` to keep them next to the document for inspection.
 
 As of the last full run over `~/Documents/md-fixtures` the comparison reports
 **0 flags** — block/line/marker/chip geometry, the painted-box comparison
-(fenced-code fills, table boxes, task-checkbox positions) and the heading-rule
+(fenced-code fills, table boxes, task-checkbox positions), the heading-rule
 comparison (baseline→rule distance, previously a blind spot: the reference's
-`rules` were collected but never compared) are aligned.
+`rules` were collected but never compared), the chip's vertical position
+(chip y − line baseline vs the reference's span y − strut baseline; the App's
+chips used to hang off a Chromium-style strut model that put them ~2pt above
+the glyphs) and the table's per-row tops (against the reference's `tr` rects)
+are aligned.
 
 Fixed on the way to this baseline (do not regress):
 

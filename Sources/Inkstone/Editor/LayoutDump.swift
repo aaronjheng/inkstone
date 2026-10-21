@@ -81,9 +81,15 @@ enum LayoutDump {
         /// measured (a CJK fallback attribute instead of the mono face, say).
         var fontSize: CGFloat
         var fontBox: CGFloat
+        /// The row's engine baseline (normalized coords), exported only for
+        /// the position comparison: the reference measures its code span
+        /// against the same anchor, and both engines sit the glyphs at
+        /// different heights inside an identical line box. Omitted when the
+        /// capture is missing.
+        var baseline: CGFloat?
 
         enum CodingKeys: String, CodingKey {
-            case line, x, y
+            case line, x, y, baseline
             case width = "w"
             case height = "h"
             case fontSize = "fs"
@@ -105,9 +111,12 @@ enum LayoutDump {
         /// baseline→rule distance however each engine sits the glyphs inside
         /// the line box. Omitted from the JSON when `nil`.
         var baseline: CGFloat?
+        /// Painted row tops, exported only for `tableBox`: the comparator
+        /// checks each row's top against the reference's `tr` rects.
+        var rows: [CGFloat]?
 
         enum CodingKeys: String, CodingKey {
-            case line, kind, x, y, baseline
+            case line, kind, x, y, baseline, rows
             case width = "w"
             case height = "h"
         }
@@ -117,7 +126,8 @@ enum LayoutDump {
             // the JSON keys) above, which carry the same style debt.
             // swiftlint:disable:next identifier_name
             line: Int, kind: String, x: CGFloat, y: CGFloat,
-            width: CGFloat, height: CGFloat, baseline: CGFloat? = nil
+            width: CGFloat, height: CGFloat, baseline: CGFloat? = nil,
+            rows: [CGFloat]? = nil
         ) {
             self.line = line
             self.kind = kind
@@ -126,6 +136,7 @@ enum LayoutDump {
             self.width = width
             self.height = height
             self.baseline = baseline
+            self.rows = rows
         }
     }
 
@@ -510,14 +521,19 @@ enum LayoutDump {
                 for chip in BlockDecorator.inlineCodeChipRuns(
                     theme: theme,
                     storage: storage, manager: manager, container: container,
-                    lineCharRange: fragment.charRange
+                    lineCharRange: fragment.charRange,
+                    baselines: markerHider.baselines
                 ) {
                     let normalized = normalize(chip.rect)
+                    // The baseline rides the same origin shift as the rect.
+                    let normalizedBaseline =
+                        topDown ? chip.baseline - originY : originY + originY - chip.baseline
                     chips.append(
                         DumpChip(
                             line: lineIndex, x: normalized.minX, y: normalized.minY,
                             width: normalized.width, height: normalized.height,
-                            fontSize: chip.fontSize, fontBox: chip.fontBox
+                            fontSize: chip.fontSize, fontBox: chip.fontBox,
+                            baseline: normalizedBaseline
                         )
                     )
                 }
@@ -588,11 +604,13 @@ enum LayoutDump {
                     case .none:
                         strutY = rect.maxY - EditorMetrics.hairline
                     }
-                    let chipRects = BlockDecorator.inlineCodeChipRuns(
+                    let chipRuns = BlockDecorator.inlineCodeChipRuns(
                         theme: theme,
                         storage: storage, manager: manager, container: container,
-                        lineCharRange: fragment.charRange
-                    ).map(\.rect)
+                        lineCharRange: fragment.charRange,
+                        baselines: markerHider.baselines
+                    )
+                    let chipRects = chipRuns.map(\.rect)
                     bars.append(
                         DumpBar(
                             line: lineIndex, kind: "headingRule", x: rect.minX,
@@ -681,11 +699,20 @@ enum LayoutDump {
             )
         }
         for box in tableBoxes.values {
+            // Row tops exactly as `paintTable` walks them, so the comparator
+            // sees the painted geometry.
+            let top = box.rect.minY + box.margin
+            var rows: [CGFloat] = []
+            var cursor: CGFloat = 0
+            for rowHeight in box.grid.rowHeights {
+                rows.append(top + cursor)
+                cursor += rowHeight
+            }
             bars.append(
                 DumpBar(
                     line: box.line, kind: "tableBox", x: box.rect.minX,
-                    y: box.rect.minY + box.margin, width: box.rect.width,
-                    height: box.grid.totalHeight
+                    y: top, width: box.rect.width,
+                    height: box.grid.totalHeight, rows: rows
                 )
             )
         }

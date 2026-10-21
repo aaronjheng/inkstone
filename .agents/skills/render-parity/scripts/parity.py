@@ -70,9 +70,10 @@ TOLERANCES = {
     "pitch": 0.5,
     "height": 0.5,
     # canvas fontBoundingBoxAscent quantizes to whole CSS px (measured 38/30
-    # for the 36/28pt heading faces), so the reference's baseline→rule gap
-    # carries ±0.5pt of rounding noise against the App's fractional metrics.
+    # for the 36/28pt heading faces), so baseline-relative comparisons carry
+    # ±0.5pt of rounding noise against the App's fractional metrics.
     "headingRule": 1.0,
+    "chipPos": 1.0,
     "left": 0.5,
     "gap": 1.5,
     "marker": 0.5,
@@ -254,14 +255,43 @@ EXTRACT_JS = """
     if (el.querySelector('img') && !el.textContent.trim()) bare(el, 'paragraph');
   }
 
+  const cv = document.createElement('canvas').getContext('2d');
   for (const el of write.querySelectorAll('code, tt')) {
     if (el.closest('pre') || el.closest('table')) continue;
     const r = el.getBoundingClientRect();
     const s = getComputedStyle(el);
+    // The comparator's engine-neutral anchor for the chip's vertical position
+    // is the line's baseline: both engines draw the chip around glyphs that
+    // sit on it, and both engines place that baseline at different heights
+    // inside an identical line box. The baseline comes from the STRUT (the
+    // block's own font, whatever the runs are): block content top + row
+    // index × line height + half-leading + ascent, all measurable here. The
+    // line rects cannot be used — an all-code row reports the mono box, not
+    // the strut's.
+    let baselineY = null;
+    const block = blockOf(el.parentElement);
+    if (block) {
+      const bid = idOf(block.el);
+      const ps = getComputedStyle(block.el);
+      const lh = parseFloat(ps.lineHeight);
+      cv.font = `${ps.fontStyle} ${ps.fontWeight} ${ps.fontSize} ${ps.fontFamily}`;
+      const m = cv.measureText('Mg');
+      if (!Number.isNaN(lh) && lh > 0) {
+        const cy = r.top + r.height / 2;
+        const rowIdx = out.lines.filter(
+          (L) => L.block === bid && L.top <= cy
+        ).length - 1;
+        const halfLead = (lh - (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent)) / 2;
+        baselineY =
+          block.el.getBoundingClientRect().top + rowIdx * lh + halfLead
+          + m.fontBoundingBoxAscent;
+      }
+    }
     out.codeSpans.push({
       x: r.left, y: r.top, w: r.width, h: r.height,
       radius: parseFloat(s.borderRadius) || 0,
       border: s.borderTopWidth, background: s.backgroundColor,
+      baselineY,
     });
   }
   for (const el of write.querySelectorAll('li')) {
@@ -291,6 +321,16 @@ EXTRACT_JS = """
   for (const el of write.querySelectorAll('table')) {
     const r = el.getBoundingClientRect();
     out.tables.push({ x: r.left, y: r.top, w: r.width, h: r.height });
+    // Per-row geometry: the block's total box already compares, and the row
+    // tops catch cell-padding/pitch drift the total can absorb.
+    const bid = idOf(el);
+    const blk = out.blocks.find((b) => b.id === bid);
+    if (blk) {
+      blk.rows = [...el.querySelectorAll('tr')].map((tr) => {
+        const rr = tr.getBoundingClientRect();
+        return { y: rr.top, h: rr.height };
+      });
+    }
   }
   for (const el of write.querySelectorAll('blockquote')) {
     const r = el.getBoundingClientRect();
@@ -301,7 +341,6 @@ EXTRACT_JS = """
       color: s.color,
     });
   }
-  const cv = document.createElement('canvas').getContext('2d');
   for (const el of write.querySelectorAll('h1, h2')) {
     const s = getComputedStyle(el);
     if (parseFloat(s.borderBottomWidth) > 0) {
@@ -527,6 +566,8 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
             if "top" in item:
                 item["top"] -= origin_y_ref
                 item["bottom"] -= origin_y_ref
+            for table_row in item.get("rows", []) or []:
+                table_row["y"] -= origin_y_ref
             # A task item's checkbox rides on the item: shift its box too, so
             # the comparator can flag its position against the App's bar.
             if "checkbox" in item and item["checkbox"]:
@@ -535,6 +576,8 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
     for chip in app["chips"]:
         chip["x"] -= origin_x_app
         chip["y"] -= origin_y_app
+        if chip.get("baseline") is not None:
+            chip["baseline"] -= origin_y_app
     # The heading-rule comparison is origin-independent (rule y − baseline),
     # but the gap sections below measure from the rule's absolute y when the
     # previous block is a ruled heading — shift both sides' rule geometry like
@@ -549,6 +592,8 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
             bar["y"] -= origin_y_app
             if bar.get("baseline") is not None:
                 bar["baseline"] -= origin_y_app
+        if bar["kind"] == "tableBox" and bar.get("rows") is not None:
+            bar["rows"] = [r - origin_y_app for r in bar["rows"]]
 
     flags: list[str] = []
     report: dict = {"meta": {"ref": ref["meta"], "app": app["meta"]}, "blocks": [], "flags": flags}
@@ -799,6 +844,28 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                             f"{ab['kind']} box '{ab.get('text', '')[:20]}': {key} "
                             f"{app_v:.2f} vs {ref_v:.2f}pt"
                         )
+                # Per-row geometry: the row tops relative to each side's own
+                # box top catch cell-padding/pitch drift the total height can
+                # absorb. The reference's tr rects ride its element top; the
+                # App's rows ride the painted fill top.
+                ref_rows = rb.get("rows") or []
+                app_rows = box.get("rows") or []
+                if ref_rows and app_rows:
+                    row["rows"] = [len(app_rows), len(ref_rows)]
+                    if len(ref_rows) != len(app_rows):
+                        flags.append(
+                            f"table '{ab.get('text', '')[:20]}': row count "
+                            f"{len(app_rows)} vs {len(ref_rows)}"
+                        )
+                    else:
+                        for ri, (ar, rr) in enumerate(zip(app_rows, ref_rows)):
+                            rel_a = ar - box["y"]
+                            rel_r = rr["y"] - rb["top"]
+                            if abs(rel_a - rel_r) > tolerances["gap"]:
+                                flags.append(
+                                    f"table '{ab.get('text', '')[:20]}' row {ri}: "
+                                    f"top {rel_a:.2f} vs {rel_r:.2f}pt"
+                                )
                 # The box's vertical position drifts with every heading's
                 # element-box overhang upstream, so it is compared as a GAP
                 # from the previous block's bottom, at the margin edge: the
@@ -1000,6 +1067,17 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
             flags.append(f"chip {k}: width {chip['w']:.2f} vs {span['w']:.2f}pt")
         if abs(chip["h"] - span["h"]) > tolerances["chip"]:
             flags.append(f"chip {k}: height {chip['h']:.2f} vs {span['h']:.2f}pt")
+        # Vertical position, anchored to the line's baseline on both sides:
+        # the engines place the glyphs at different heights inside an
+        # identical line box, so an absolute y would flag every line.
+        if chip.get("baseline") is not None and span.get("baselineY") is not None:
+            gap_a = chip["y"] - chip["baseline"]
+            gap_r = span["y"] - span["baselineY"]
+            row["baselineGap"] = [round(gap_a, 2), round(gap_r, 2)]
+            if abs(gap_a - gap_r) > tolerances["chipPos"]:
+                flags.append(
+                    f"chip {k}: baseline gap {gap_a:.2f} vs {gap_r:.2f}pt"
+                )
         report["chips"].append(row)
 
     report["flags"] = flags
