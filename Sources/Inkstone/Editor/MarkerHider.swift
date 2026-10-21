@@ -139,6 +139,43 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
             // spacing from the row before them.
             return 0
         }
+        // A container-nested code block's rows carry the CONTAINER's block kind
+        // (the visual owner: a list item), so the kind check below reads them
+        // as item rows and spacing was applied to every code line (measured
+        // 32.4pt pitch inside a list-item fence against 23.04). The sub-kind is
+        // the row's own scope: code rows manage their own line height.
+        if let sub = storage.attribute(
+            MarkdownAttribute.subKind,
+            at: min(glyphIndex, storage.length - 1),
+            effectiveRange: nil
+        ) as? String, sub == BlockKind.fences.rawValue
+            || sub == BlockKind.indentedCode.rawValue
+            || sub == BlockKind.htmlBlock.rawValue
+            || sub == BlockKind.mathBlock.rawValue
+        {
+            return 0
+        }
+        // Don't apply the item spacing when the next content is a container-
+        // nested code block: the code manages its own line height and the fill's
+        // top chrome provides the gap. The lookahead finds the code's subKind
+        // within the boundary region after this row's last glyph.
+        var codeAhead = false
+        var codeOffset = 1
+        while codeOffset <= 12, glyphIndex + codeOffset < storage.length {
+            if let sub = storage.attribute(
+                MarkdownAttribute.subKind,
+                at: glyphIndex + codeOffset, effectiveRange: nil
+            ) as? String, sub == BlockKind.fences.rawValue
+                || sub == BlockKind.indentedCode.rawValue
+                || sub == BlockKind.htmlBlock.rawValue
+                || sub == BlockKind.mathBlock.rawValue
+            {
+                codeAhead = true
+                break
+            }
+            codeOffset += 1
+        }
+        if codeAhead { return 0 }
         // The item row itself: the row's last glyph, or one glyph back when the
         // row ends in something glyph-less.
         let listKinds: Set<String> = [BlockKind.listItem.rawValue, BlockKind.taskItem.rawValue]
@@ -146,29 +183,55 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
             .compactMap { kind(at: $0) }.first
         // A quote level handover: the levels are glued into one paragraph, so
         // the blockquote margin between them comes from here. The row's own
-        // content carries its level's `md.subBlock`; when a character shortly
-        // after the row carries a DIFFERENT sub, the next row hands over to a
-        // deeper level and the margin belongs between the two.
+        // content carries its level's `md.subBlock`; the first character shortly
+        // after the row that carries a DIFFERENT sub is the next row handing
+        // over to another level. The margin only belongs between the two when
+        // the handover is direct:
+        //
+        // - A blank row between (a bare `>` line) lays out its own strut at
+        //   exactly the quote margin - spacing here doubled every level gap
+        //   crossed by a blank line (measured 51.2pt pitch vs 38.4). Two row
+        //   breaks between the row and the handover char mean a strut sits
+        //   between.
+        // - A different `md.block` means the next row belongs to another
+        //   block entirely (the next quote after this one): the boundary
+        //   backfill between blocks already carries the collapsed margin.
         if rowKind == BlockKind.blockquote.rawValue, quoteLevelSpacing > 0 {
             func subBlock(at location: Int) -> Int? {
                 guard location >= 0, location < storage.length else { return nil }
                 return storage.attribute(MarkdownAttribute.subBlock, at: location, effectiveRange: nil)
                     as? Int
             }
-            let own = subBlock(at: min(glyphIndex, storage.length - 1))
-            var deeper = false
+            func blockID(at location: Int) -> Int? {
+                guard location >= 0, location < storage.length else { return nil }
+                return storage.attribute(MarkdownAttribute.block, at: location, effectiveRange: nil)
+                    as? Int
+            }
+            func character(at location: Int) -> Character? {
+                guard location >= 0, location < storage.length else { return nil }
+                return (storage.string as NSString).substring(with: NSRange(location: location, length: 1))
+                    .first
+            }
+            let probe = min(glyphIndex, storage.length - 1)
+            let own = subBlock(at: probe)
+            let ownBlock = blockID(at: probe)
+            // Walk to the first differently-scoped character, counting row
+            // breaks (`\r\n` counts once: only the `\n` is counted). The window
+            // must span a row terminator plus a deep level's marker prefix.
+            var handover: Int?
+            var rowBreaks = 0
             var lookahead = 1
-            while !deeper, lookahead <= 8 {
-                let ahead = subBlock(at: glyphIndex + lookahead)
-                if let ahead, ahead != own { deeper = true }
+            while handover == nil, lookahead <= 16, glyphIndex + lookahead < storage.length {
+                let at = glyphIndex + lookahead
+                if let block = blockID(at: at), block != ownBlock { break }
+                if let sub = subBlock(at: at), sub != own {
+                    handover = at
+                } else if character(at: at) == "\n" {
+                    rowBreaks += 1
+                }
                 lookahead += 1
             }
-            if ProcessInfo.processInfo.environment["MD_DEBUG_SPACING"] != nil {
-                let note = "quote-level: glyph \(glyphIndex) own \(String(describing: own)) "
-                    + "deeper \(deeper) h \(rect.height)\n"
-                FileHandle.standardError.write(Data(note.utf8))
-            }
-            if deeper { return quoteLevelSpacing }
+            if handover != nil, rowBreaks == 1 { return quoteLevelSpacing }
         }
         guard
             [min(glyphIndex, storage.length - 1), glyphIndex - 1].contains(where: {

@@ -117,13 +117,20 @@ struct EditorTheme: Sendable, Equatable {
     /// `.md-fences { padding: 8px 0 6px }` plus the CSS cascade's horizontal
     /// inset: `.md-fences` 4px + `.CodeMirror-lines` 4px + `pre` 4px = 12.
     var codePadding: CGFloat = 8
-    var codePaddingLeft: CGFloat? = 12
+    /// The code content's left inset measured against the rendered document:
+    /// the reference's content sits 14pt in from the fill edge.
+    var codePaddingLeft: CGFloat? = 11
     /// Painted insets around a code block's body, from the theme's
     /// `.md-fences { padding-top: 8px; padding-bottom: 6px }`: the paragraph
     /// style cannot express per-block top/bottom padding, so the decorator
     /// grows the first/last body line's background by these amounts.
-    var codePaddingTop: CGFloat = 8
-    var codePaddingBottom: CGFloat = 6
+    /// The reference's fence pad box = rows + 14pt (padding 8 + 6). The App's
+    /// ink sits ~2pt lower inside its line box (Menlo vs Consolas metrics), so
+    /// the top inset is 2 under the reference's padding and the bottom 2 over:
+    /// the rendered ink lands on the reference's positions and the box height
+    /// still matches the baseline's.
+    var codePaddingTop: CGFloat = 6
+    var codePaddingBottom: CGFloat = 8
     /// `li p { margin: .5rem 0 }` in the original's base style - the gap between
     /// consecutive list items (`li { margin: 0 }` itself contributes none). The
     /// reference renders a 35pt baseline pitch per row (25.6pt line box + 9.4pt),

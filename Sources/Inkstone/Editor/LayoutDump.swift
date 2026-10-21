@@ -183,7 +183,6 @@ enum LayoutDump {
             var depth: Int
         }
         var fragments: [Fragment] = []
-        var debugRaw = arguments.contains("--debug-fragments")
         manager.enumerateLineFragments(forGlyphRange: manager.glyphRange(for: container)) {
             rect, used, _, glyphRange, _ in
             let charRange = manager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
@@ -191,23 +190,6 @@ enum LayoutDump {
             // rect.height alone cannot reject the row yet: a thematic break's
             // collapsed row is decided after the block kind is known below.
             guard rect.width >= 0 else { return }
-            if debugRaw {
-                let text = (storage.string as NSString).substring(with: charRange)
-                    .replacingOccurrences(of: "\n", with: "⏎").replacingOccurrences(of: "\r", with: "")
-                let style = storage.attribute(.paragraphStyle, at: charRange.location, effectiveRange: nil)
-                    as? NSParagraphStyle
-                let hidden = MarkdownAttribute.isHidden(storage, at: charRange.location)
-                let styleNote = style.map {
-                    " maxLH=\($0.maximumLineHeight) spB=\($0.paragraphSpacingBefore) headInd=\($0.headIndent)"
-                } ?? " no-style"
-                let message =
-                    "frag y=\(rect.minY)...\(rect.maxY) used=\(used.minY)...\(used.maxY) "
-                    + "w=\(rect.width)/\(used.width) chars=\(charRange.location)..\(NSMaxRange(charRange)) '\(text.prefix(30))'"
-                    + styleNote
-                    + (hidden ? " [hidden]" : "")
-                    + "\n"
-                FileHandle.standardError.write(Data(message.utf8))
-            }
             // The fragment may START with boundary characters (the separator
             // newline a glued thematic break lays out behind) that carry no
             // block attributes; probe forward to the block's own first char.
@@ -223,20 +205,41 @@ enum LayoutDump {
             else { return }
             // A row scoped to a child that claims its own rows in the
             // reference's model (a `pre`/`table` element, a list item) reports
-            // the child's kind and pairs as its own block. A nested paragraph
-            // or quote is claimed by its container and keeps the container's
-            // kind.
+            // the child's kind and pairs as its own block. Raw HTML is NOT one
+            // of those - except under a list item: the baseline's block model
+            // claims every raw element for the nearest li (its element boxes
+            // are pre/table/li only), so a raw block nested in an item must
+            // report the item's kind or the pairing shifts by one for every
+            // block after it. Anywhere else (top level, inside a quote) the
+            // App renders the raw source as its own block, something the
+            // pure-CSS baseline cannot model - keep the kind; the comparator
+            // drops it like the reference's unrendered markup.
             let selfClaiming: Set<String> = [
                 BlockKind.fences.rawValue, BlockKind.indentedCode.rawValue,
                 BlockKind.table.rawValue, BlockKind.listItem.rawValue,
                 BlockKind.taskItem.rawValue, BlockKind.mathBlock.rawValue,
-                BlockKind.htmlBlock.rawValue, BlockKind.toc.rawValue,
+                BlockKind.toc.rawValue,
             ]
             let subKind = storage.attribute(MarkdownAttribute.subKind, at: probeLocation, effectiveRange: nil)
                 as? String
             let rawKind = attribute(MarkdownAttribute.blockKind) as? String
-            let kind = subKind.flatMap { selfClaiming.contains($0) ? $0 : nil }
-                ?? rawKind
+            let kind: String?
+            if subKind == BlockKind.htmlBlock.rawValue {
+                // Under a list item the li claims the row (the baseline's
+                // element boxes are li/pre/table only) - report the item's
+                // kind or the pairing shifts by one for every block after it.
+                // Anywhere else (top level, inside a quote) the raw block is
+                // the App's own editing surface, which the pure-CSS baseline
+                // cannot model - keep the raw kind; the comparator drops it
+                // like the reference's unrendered markup.
+                kind = (rawKind == BlockKind.listItem.rawValue
+                    || rawKind == BlockKind.taskItem.rawValue)
+                    ? rawKind
+                    : BlockKind.htmlBlock.rawValue
+            } else {
+                kind = subKind.flatMap { selfClaiming.contains($0) ? $0 : nil }
+                    ?? rawKind
+            }
             guard let kind else { return }
             // The boundary hairline filter below must not eat a thematic
             // break's collapsed row: the painted 2pt rule IS the block's whole
@@ -275,6 +278,30 @@ enum LayoutDump {
         var markers: [DumpMarker] = []
         var chips: [DumpChip] = []
         var bars: [DumpBar] = []
+        // Painted block boxes (fenced code bodies, painted tables): accumulated
+        // over the block's fragments with the same geometry the decoration layer
+        // paints (`paintCodeBlocks` / `paintTable`), then exported as bars so the
+        // comparator can align them against the baseline's `pre`/`table` element
+        // boxes.
+        struct CodeBoxAccumulator {
+            var rect: NSRect?
+            var plan: DecorationPlan
+            var sawFirst = false
+            var sawLast = false
+            var firstLine: Int?
+            /// The smallest body-row head indent: the container column the
+            /// fence's fill hangs from (the body rows indent by the container
+            /// plus the code padding).
+            var headIndent: CGFloat?
+        }
+        var codeBoxes: [Int: CodeBoxAccumulator] = [:]
+        struct TableBoxAccumulator {
+            var rect: NSRect
+            var margin: CGFloat
+            var grid: TableGrid
+            var line: Int
+        }
+        var tableBoxes: [Int: TableBoxAccumulator] = [:]
         for fragment in fragments {
             let rect = normalize(fragment.rect)
             let used = normalize(fragment.used)
@@ -354,6 +381,82 @@ enum LayoutDump {
                     MarkdownAttribute.painted, at: fragment.charRange.location,
                     effectiveRange: nil
                 ) as? Bool == true
+
+            // Box accumulation: the owner resolves like paintCodeBlocks does -
+            // the nested fence's own id when the sub-scope carries the plan,
+            // else the block's.
+            if !painted {
+                for (plan, subScoped) in plans {
+                    switch plan {
+                    case .codeBlock(_, _, _, let topInset, let bottomInset):
+                        let owner = subScoped
+                            ? (fragment.subBlockID ?? fragment.blockID)
+                            : fragment.blockID
+                        var bodyRange = NSRange()
+                        let isBodyLine = storage.attribute(
+                            MarkdownAttribute.codeBody,
+                            at: fragment.charRange.location,
+                            effectiveRange: &bodyRange
+                        ) != nil
+                        var sawFirst = false
+                        var sawLast = false
+                        if isBodyLine {
+                            if fragment.charRange.location == bodyRange.location {
+                                sawFirst = true
+                            }
+                            if NSMaxRange(fragment.charRange) >= NSMaxRange(bodyRange) {
+                                sawLast = true
+                            }
+                        }
+                        var box = codeBoxes[owner] ?? CodeBoxAccumulator(
+                            rect: nil, plan: plan
+                        )
+                        box.rect = box.rect.map { $0.union(rect) } ?? rect
+                        box.sawFirst = box.sawFirst || sawFirst
+                        box.sawLast = box.sawLast || sawLast
+                        if box.firstLine == nil { box.firstLine = lineIndex }
+                        if isBodyLine {
+                            // The row's fragment may start with the previous
+                            // row's glued terminator ("\n"): probe forward to
+                            // the row's own first character for the style -
+                            // the terminator carries the previous row's
+                            // paragraph, whose head indent is not this row's.
+                            var probe = fragment.charRange.location
+                            let ns = storage.string as NSString
+                            while probe < NSMaxRange(fragment.charRange),
+                                ns.substring(with: NSRange(location: probe, length: 1)) == "\n"
+                            {
+                                probe += 1
+                            }
+                            if probe < NSMaxRange(fragment.charRange),
+                                let rowStyle = storage.attribute(
+                                    .paragraphStyle, at: probe, effectiveRange: nil
+                                ) as? NSParagraphStyle
+                            {
+                                box.headIndent = min(box.headIndent ?? rowStyle.headIndent, rowStyle.headIndent)
+                            }
+                        }
+                        codeBoxes[owner] = box
+                        break
+                    case .tableGrid(let grid):
+                        let owner = subScoped
+                            ? (fragment.subBlockID ?? fragment.blockID)
+                            : fragment.blockID
+                        // Once per block, from its first fragment, exactly like
+                        // the painter's `isBlockStart` guard.
+                        if tableBoxes[owner] == nil {
+                            tableBoxes[owner] = TableBoxAccumulator(
+                                rect: rect,
+                                margin: style?.paragraphSpacingBefore ?? 0,
+                                grid: grid, line: lineIndex
+                            )
+                        }
+                        break
+                    default:
+                        break
+                    }
+                }
+            }
 
             if !painted,
                 plans.contains(where: { plan, _ in
@@ -449,21 +552,70 @@ enum LayoutDump {
                             lineCharRange: fragment.charRange, in: output, storage: storage
                         )
                     else { break }
-                    let side: CGFloat = 12
+                    // Same geometry the painter draws: the browser's 13pt
+                    // default checkbox, 6pt below the line box top, right edge
+                    // 3pt before the text column.
+                    let side: CGFloat = 13
                     bars.append(
                         DumpBar(
                             line: lineIndex, kind: "taskCheckbox",
-                            x: rect.minX + checkboxWidth - side - 4,
-                            y: rect.midY - side / 2, width: side, height: side
+                            x: rect.minX + checkboxWidth - side - 3,
+                            y: rect.minY + 6, width: side, height: side
                         )
                     )
                 case .codeBlock, .alertBox, .tocPlaceholder, .tocEntries, .emojiGlyph,
                     .frontMatterTable, .tableGrid, .inlineImage:
-                    // Painted-block chrome (tables, TOC, front matter) and fenced
-                    // code boxes are phase 2; their text rows are already dumped.
+                    // The painted boxes are accumulated per block above and
+                    // exported after the loop; per-line chrome is handled in
+                    // the cases above.
                     continue
                 }
             }
+        }
+
+        // Finalize the painted block boxes: the code box grows by the theme's
+        // painted insets exactly as `paintCodeBlocks` grows its rect; the table
+        // box hangs from the first fragment's top plus the block margin, as
+        // `paintTable` positions it.
+        for box in codeBoxes.values {
+            guard case let .codeBlock(_, _, _, topInset, bottomInset) = box.plan,
+                var rect = box.rect, let line = box.firstLine
+            else { continue }
+            // Headless layout shows the whole document: both padding insets
+            // always apply (the painter gates them on viewport visibility).
+            rect.origin.y -= topInset
+            rect.size.height += topInset + bottomInset
+            // The fill's left edge is the container column the fence hangs in:
+            // the body rows' head indent minus the code padding. A nested fence
+            // (inside a quote or list item) then indents with its container
+            // exactly like the reference's pre. Same border-ring inset the
+            // painter applies.
+            if let headIndent = box.headIndent {
+                // The union spans the full container width; the fill keeps that
+                // right edge and takes its left from the container column:
+                // width = container right - new left (the old maxX moved with
+                // the origin, so `maxX - minX` was a no-op and the box ran past
+                // the container's right edge by the whole origin shift).
+                let containerRight = rect.maxX
+                rect.origin.x = headIndent - (theme.codePaddingLeft ?? theme.codePadding)
+                rect.size.width = containerRight - rect.minX
+            }
+            rect = rect.insetBy(dx: EditorMetrics.hairline, dy: 0)
+            bars.append(
+                DumpBar(
+                    line: line, kind: "codeBlock", x: rect.minX, y: rect.minY,
+                    width: rect.width, height: rect.height
+                )
+            )
+        }
+        for box in tableBoxes.values {
+            bars.append(
+                DumpBar(
+                    line: box.line, kind: "tableBox", x: box.rect.minX,
+                    y: box.rect.minY + box.margin, width: box.rect.width,
+                    height: box.grid.totalHeight
+                )
+            )
         }
 
         let dump = Dump(

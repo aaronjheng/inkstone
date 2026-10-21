@@ -160,15 +160,38 @@ public struct BlockParser {
     private mutating func splitLines(_ value: String) -> [Line] {
         var result: [Line] = []
         var offset = 0
-        for segment in value.split(separator: "\n", omittingEmptySubsequences: false) {
-            var clean = segment
+        // `\r\n` is a single grapheme cluster in Swift, so a plain `split` on
+        // `"\n"` never splits a CRLF line: the terminator stayed glued to the
+        // line's text, no block pattern matched, and a CRLF document parsed as
+        // one paragraph. Split on both terminators instead and record which one
+        // each line ended with - `slice` re-assembles the file with it.
+        var segmentStart = value.startIndex
+        var cursor = value.startIndex
+        while cursor < value.endIndex {
+            let character = value[cursor]
+            guard character == "\r\n" || character == "\n" else {
+                cursor = value.index(after: cursor)
+                continue
+            }
+            let hasCR = character == "\r\n"
+            result.append(
+                Line(text: value[segmentStart..<cursor], offset: offset, hasCR: hasCR)
+            )
+            offset += value[segmentStart..<cursor].utf16.count + (hasCR ? 2 : 1)
+            cursor = value.index(after: cursor)
+            segmentStart = cursor
+        }
+        // The tail: a last line without a terminator. A trailing lone `\r`
+        // (no `\n`) strips like the old split-then-strip did.
+        if segmentStart < value.endIndex || result.isEmpty {
+            var text = value[segmentStart..<value.endIndex]
             var hasCR = false
-            if clean.hasSuffix("\r") {
-                clean = clean.dropLast()
+            if text.hasSuffix("\r") {
+                text = text.dropLast()
                 hasCR = true
             }
-            result.append(Line(text: clean, offset: offset, hasCR: hasCR))
-            offset += segment.utf16.count + 1
+            result.append(Line(text: text, offset: offset, hasCR: hasCR))
+            offset += text.utf16.count + (hasCR ? 2 : 1)
         }
         return result
     }

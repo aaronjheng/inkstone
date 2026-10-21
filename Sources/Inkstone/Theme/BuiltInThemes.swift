@@ -53,17 +53,23 @@ enum BuiltInTheme {
         alertBackground: DynamicColor(0xF1F8FF, 0x1F2A37),
         alertBorder: DynamicColor(0x54AEFF, 0x388BFD),
         syntax: SyntaxPalette(
-            keyword: DynamicColor(0xD73A49, 0xFF7B72),
-            string: DynamicColor(0x032F62, 0xA5D6FF),
-            number: DynamicColor(0x005CC5, 0x79C0FF),
-            comment: DynamicColor(0x6A737D, 0x8B949E),
-            tag: DynamicColor(0x22863A, 0x7EE787),
-            attribute: DynamicColor(0x6F42C1, 0xD2A8FF),
-            function: DynamicColor(0x6F42C1, 0xD2A8FF),
-            type: DynamicColor(0x005CC5, 0x79C0FF),
-            operator: DynamicColor(0xD73A49, 0xFF7B72),
-            punctuation: DynamicColor(0x5A5A5A, 0x8B949E),
-            plain: DynamicColor(0x333333, 0xC9D1D9),
+            // Typora renders fenced code with CodeMirror's stock light palette
+            // (codemirror.css `.cm-s-inner` rules): keyword #708, def #00f,
+            // string #a11, number #164, comment #a50, type reference #05a,
+            // builtin #30a, attribute #00c, operator #981a1a, plain #000 - the
+            // colours sampled off a rendered document, not the github-light
+            // theme this palette was originally modelled on.
+            keyword: DynamicColor(0x770088, 0xFF7B72),
+            string: DynamicColor(0xAA1111, 0xA5D6FF),
+            number: DynamicColor(0x116644, 0x79C0FF),
+            comment: DynamicColor(0xAA5500, 0x8B949E),
+            tag: DynamicColor(0x117700, 0x7EE787),
+            attribute: DynamicColor(0x0000CC, 0xD2A8FF),
+            function: DynamicColor(0x0000FF, 0xD2A8FF),
+            type: DynamicColor(0x0055AA, 0x79C0FF),
+            operator: DynamicColor(0x981A1A, 0xFF7B72),
+            punctuation: DynamicColor(0x000000, 0x8B949E),
+            plain: DynamicColor(0x000000, 0xC9D1D9),
             marker: DynamicColor(0xD94F8A, 0xFF7B9C)
         ),
         headingRules: [1: DynamicColor(0xEEEEEE, 0x444C56), 2: DynamicColor(0xEEEEEE, 0x444C56)],

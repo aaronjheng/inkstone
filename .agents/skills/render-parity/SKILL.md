@@ -54,6 +54,14 @@ pass `--out dir` to keep them next to the document for inspection.
   shape per the browser ladder (depth 1 disc, 2 ring, 3+ square) and size in em.
 - `chips[]` — per inline-code span: `x`/`w`/`h` absolute and `yOffset` relative
   to the owning line's center.
+- `boxes`/`boxGap` on fences/table block rows — the App's painted fill vs the
+  baseline's `pre`/`table` padding box (the element box shrunk by its computed
+  borders), and the fill's margin-edge gap to the previous block. The
+  vertical position is compared as a gap because absolute y drifts with every
+  heading's element-box half-leading overhang upstream.
+- `checkboxes[]` — per task item: `x`/`y`/`size` against the reference's
+  input box; x and width are flagged, y is report-only (it inherits the
+  list-pitch calibration gap below).
 - Flags use `line N`/`marker N`/`chip N` indices matching the arrays.
 
 ## Metric semantics (how the two sides are made comparable)
@@ -102,27 +110,48 @@ pass `--out dir` to keep them next to the document for inspection.
 
 ## Known-residual baseline (do not chase as new bugs)
 
-As of the last full run over `~/Documents/md-fixtures` the fixture set reports
-~7 flags. These categories are KNOWN and accepted — a fresh run should be
-compared against them; only NEW divergences (different blocks, larger deltas)
-are regressions:
+As of the last full run over `~/Documents/md-fixtures` the block/line/marker/
+chip comparison reports **0 flags**, and the phase-2 painted-box comparison
+(fenced-code fills, table boxes, task-checkbox positions) reports **7**, all in
+two edge shapes:
 
-- **chip box metrics** — body chips align (18.76 vs 18); the heading chip's
-  width carries the CJK fallback advance (~5pt over 4 glyphs, TextKit vs
-  Chromium shaping). 1 flag.
-- **nested quote level margins** — the reference separates every quote level
-  with the blockquote's own 12.8pt margin (pitch 38.4 between levels); the App
-  glues the levels into one paragraph. The delegate handover covers every
-  transition EXCEPT the one after the quote's first row (TextKit 1 drops the
-  delegate spacing there when the paragraph carries `paragraphSpacingBefore`).
-  2 pitch flags.
-- **quote's list marker center** — a list inside a quote compounds the
-  quote's inset into the item text column (49pt ✓), but the marker geometry
-  still reads the un-compounded column (14.8 vs 33.8). 2 flags; the marker
-  plan's width/origin needs the same inset offset.
-- **raw HTML edge cases** — a stray closing tag is escaped for the baseline;
-  deeper raw-HTML quirks (an unclosed fence the reference turns into a code
-  block) still mispair. 2 flags in `special-chars.md`.
+- **fence inside a quote or list item** (6 flags: w/h/gap) — the App's
+  painted fill spans the full container width and its row layout ignores the
+  container's right padding; the reference's `pre` indents to the container's
+  content column (the quote's 1em right padding included). Aligning needs the
+  quote/list right-padding modelled in the row layout — TextKit 1 has no
+  per-paragraph right inset, so this needs a container-level width model.
+- **long wrapped code line** (code.md, 1 flag: h) — the App wraps the CJK-
+  long line into three rows against the reference's two at the same width and
+  face (verified: pinning the baseline to the App's SF Mono via @font-face
+  still laid out two) — the wrap granularity differs (`byWordWrapping` keeps
+  the long ASCII run whole and packs rows differently from `pre-wrap`'s
+  per-character breaking). Fixing needs a wrap-mode decision, not a font
+  change.
+
+Everything else previously listed (heading chip CJK width, nested quote level
+margins, quote list-marker centers, special-chars raw-HTML mispairing) is
+fixed.
+
+Layout pitfalls that were found on the way and are easy to re-step into:
+
+- `"\r\n"` is a single grapheme cluster in Swift — `split(separator: "\n")`
+  never splits CRLF text. The parser's `splitLines` and the builder's
+  `splitRawLines` both split on both terminators; do not reintroduce a plain
+  `split` on source slices.
+- TextKit applies `paragraphSpacingBefore` at a CRLF line's `\n` half even
+  when the glyph row is a collapsed strut — strut styles must carry
+  `paragraphSpacingBefore = 0` (their height comes from the fixed line
+  height).
+- `NSLayoutManager.boundingRect(forGlyphRange:)` pads CJK runs at
+  attribute-run boundaries (~5.5pt over four glyphs) while the laid-out
+  advances are exact — measure chip/run widths from glyph locations, not the
+  bounding rect.
+- An image's alt text is zero-width only while the picture loads. Baking the
+  hidden flag in unconditionally turned every unloadable picture into a blank
+  row (the type doc promises degradation to the alt text) — the flag must
+  follow the load, and the baseline must emit image-only paragraphs as bare
+  blocks (their alt lives in the img attribute, so they have no text nodes).
 
 ## Flags
 

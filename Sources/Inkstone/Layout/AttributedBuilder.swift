@@ -20,6 +20,39 @@ import SwiftTreeSitter
 /// Block markers (`#`, `- `, `|`, fences) and inline markers (`**`, `[`, `` ` ``)
 /// are emitted with `md.hidden = true`; `MarkerHider` turns that into zero
 /// advance, which reproduces the original's clean reading surface.
+/// Splits a source slice into raw lines on both terminators.
+///
+/// `\r\n` is a single grapheme cluster in Swift, so `split(separator: "\n")`
+/// never splits a CRLF slice: every line's terminator stayed glued to its
+/// text, containers saw one giant raw line, and the blank-line machinery
+/// never fired. Splitting on both terminators keeps each line's trailing
+/// `\r` in its text - the emitters treat it as content, which is what keeps
+/// their byte accounting unchanged - and counts a terminator-terminated
+/// tail as the old split did.
+func splitRawLines(_ source: String) -> [String] {
+    var lines: [String] = []
+    var current = ""
+    for character in source {
+        switch character {
+        case "\r\n":
+            current.append("\r")
+            lines.append(current)
+            current = ""
+        case "\n":
+            lines.append(current)
+            current = ""
+        default:
+            current.append(character)
+        }
+    }
+    if !current.isEmpty || lines.isEmpty
+        || source.hasSuffix("\n") || source.hasSuffix("\r\n")
+    {
+        lines.append(current)
+    }
+    return lines
+}
+
 @MainActor
 struct AttributedBuilder {
     private let theme: EditorTheme
@@ -103,6 +136,14 @@ struct AttributedBuilder {
             if block.kind == .fences {
                 spacingOverride += theme.codePaddingTop
             }
+            // A body-less fence (empty code block) has no body row to hang the
+            // chrome on: its delimiter rows keep the full line height, and the
+            // border + padding-top (9pt) ride on the boundary spacing instead -
+            // the delimiter's own spacing is dropped where its glyphs glue
+            // backwards into this boundary.
+            let bodyLessFence =
+                block.kind == .fences
+                && splitRawLines(block.source).count == 2
             state.append(
                 block: block, into: result, depth: 0,
                 spacingBefore: spacingOverride
@@ -145,6 +186,9 @@ struct AttributedBuilder {
             boundary.paragraphSpacingBefore =
                 MarkdownAttribute.isHidden(result, at: contentStart)
                 ? (collapsedSpacing ?? 0)
+                    + (bodyLessFence
+                        ? theme.codePaddingTop + EditorMetrics.hairline
+                        : 0)
                 : 0
             // The hairline's AFTER-spacing must stay zero: it copies the block's
             // own style (a heading carries 16), and for blocks whose first row
@@ -385,10 +429,54 @@ struct AttributedBuilder {
             case .fences:
                 appendFences(block, into: result, depth: depth)
             case .indentedCode:
-                emitPlain(
-                    block.source, into: result, style: BlockStyle.codeFence(theme: theme),
-                    block: block, depth: depth
-                )
+                // Same chrome as a fenced block: the registered box plan and the
+                // codeBody marker the decorator unions its fill from. The
+                // collapsed margin applies like every top-level block. The
+                // common leading whitespace is the SYNTAX that makes this an
+                // indented code block - the reference strips it from the rendered
+                // content, so it goes out as hidden runs (the buffer keeps the
+                // bytes) instead of double-indenting the content.
+                let body = BlockStyle.codeFence(theme: theme)
+                register(body.decoration, for: block.id)
+                let start = result.length
+                let codeLines = splitRawLines(block.source)
+                var commonIndent = Int.max
+                for line in codeLines where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                    commonIndent = min(commonIndent, line.prefix(while: { $0 == " " }).count)
+                }
+                if commonIndent == Int.max { commonIndent = 0 }
+                var lastCodeStyle = body.base[.paragraphStyle] as? NSParagraphStyle
+                for (index, codeLine) in codeLines.enumerated() {
+                    if index > 0 {
+                        if let style = lastCodeStyle {
+                            result.append(
+                                NSAttributedString(string: "\n", attributes: [.paragraphStyle: style])
+                            )
+                        } else {
+                            result.append(NSAttributedString(string: "\n"))
+                        }
+                    }
+                    let rowStart = result.length
+                    let spaces = codeLine.prefix(while: { $0 == " " }).count
+                    let hiddenSpaces = min(spaces, commonIndent)
+                    if hiddenSpaces > 0 {
+                        var hidden = body.base
+                        hidden[.paragraphStyle] = lastCodeStyle
+                        hidden[MarkdownAttribute.hidden] = !context.showsAllMarkers
+                        append(
+                            String(codeLine.prefix(hiddenSpaces)), hidden, to: result
+                        )
+                    }
+                    let rest = String(codeLine.dropFirst(hiddenSpaces))
+                    if !rest.isEmpty {
+                        emitPlain(rest, into: result, style: body, block: block, depth: depth)
+                    }
+                    lastCodeStyle = body.base[.paragraphStyle] as? NSParagraphStyle
+                    result.addAttribute(
+                        MarkdownAttribute.codeBody, value: true,
+                        range: NSRange(location: rowStart, length: result.length - rowStart)
+                    )
+                }
             case .mathBlock:
                 appendMathBlock(block, into: result, depth: depth)
             case .htmlBlock:
@@ -494,7 +582,7 @@ struct AttributedBuilder {
             // them in the file. `raw` hands those lines back: one per line of the
             // list's own source, byte-identical to the file. At the top level the
             // list's source lines *are* the raw lines.
-            let sourceLines = block.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            let sourceLines = splitRawLines(block.source)
             let rawLines = raw ?? sourceLines
             guard !block.children.isEmpty else {
                 if !firstLinePreceded { result.append(NSAttributedString(string: "\n")) }
@@ -554,8 +642,7 @@ struct AttributedBuilder {
                         lineCursor += 1
                     }
                 }
-                let itemLines = (item.leadingText + item.source)
-                    .split(separator: "\n", omittingEmptySubsequences: false).count
+                let itemLines = splitRawLines(item.leadingText + item.source).count
                 let sliceEnd = min(lineCursor + itemLines, rawLines.count)
                 guard sliceEnd > lineCursor else { break }
                 beginLine()
@@ -600,9 +687,7 @@ struct AttributedBuilder {
             level: Int, raw: [String]? = nil, owner: BlockNode?,
             firstLinePreceded: Bool
         ) {
-            let sourceLines = block.source.split(
-                separator: "\n", omittingEmptySubsequences: false
-            ).map(String.init)
+            let sourceLines = splitRawLines(block.source)
             // The raw lines carry EVERY ancestor marker: the caller hands its
             // own slice down verbatim, and this level hides the full prefix
             // (one `> ` group per ancestor, this level's own included). Stripping
@@ -666,13 +751,18 @@ struct AttributedBuilder {
                 let prefix = markerPrefixLength(line)
                 guard prefix > 0 else { return isBlankLine(line) }
                 return String(line.dropFirst(prefix))
-                    .trimmingCharacters(in: .whitespaces).isEmpty
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
             }
 
             // An empty `>` line separates the quote's paragraphs: the reference
             // renders it as the paragraph margin (12.8 at the top level), not a
             // full line. The strut carries that margin - TextKit drops
-            // `paragraphSpacingBefore` on these glued empty rows.
+            // `paragraphSpacingBefore` on these glued empty rows. Its own
+            // `paragraphSpacingBefore` must be zeroed: the style inherits the
+            // body margin from the paragraph style it copies, and TextKit DOES
+            // apply it when a CRLF line's `\n` half opens the row (measured
+            // 25.6pt struts where the margin is 12.8) - the height comes from
+            // the fixed line height alone.
             var blankLineStyle: NSMutableParagraphStyle?
             if let paragraphStyle = quoteStyle.base[.paragraphStyle]
                 as? NSParagraphStyle,
@@ -681,18 +771,34 @@ struct AttributedBuilder {
             {
                 mutable.minimumLineHeight = theme.blockMargin
                 mutable.maximumLineHeight = theme.blockMargin
+                mutable.paragraphSpacingBefore = 0
                 blankLineStyle = mutable
+            }
+            // Leading blank rows (before the quote's first content row) are
+            // hairlines, not struts: the boundary hairline before the block
+            // already carries the block's collapsed margin, and a strut here
+            // doubled every quote that OPENS with a blank line (measured 25.6pt
+            // where the reference shows one 12.8 margin).
+            var leadingBlankLineStyle: NSMutableParagraphStyle?
+            if let mutable = blankLineStyle?.mutableCopy()
+                as? NSMutableParagraphStyle
+            {
+                mutable.minimumLineHeight = 0.01
+                mutable.maximumLineHeight = 0.01
+                leadingBlankLineStyle = mutable
             }
 
             /// Hides the line's full marker prefix and renders the rest at this
             /// level's indent. `blankRow` styles the row as a paragraph margin.
-            func emitLevelLine(_ rawLine: String, blankRow: Bool) {
+            func emitLevelLine(_ rawLine: String, blankRow: Bool, leadingBlank: Bool = false) {
                 let markerLength = markerPrefixLength(rawLine)
                 let lineContent = String(rawLine.dropFirst(markerLength))
-                let isEmptyLine = lineContent.trimmingCharacters(in: .whitespaces).isEmpty
+                let blankContent = lineContent
+                    .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                let strut = leadingBlank ? leadingBlankLineStyle : blankLineStyle
                 let rowStyle =
-                    (blankRow || isEmptyLine)
-                    ? blankLineStyle
+                    (blankRow || blankContent)
+                    ? strut
                     : (quoteStyle.base[.paragraphStyle] as? NSParagraphStyle)
                 if markerLength > 0 {
                     appendHiddenRun(
@@ -701,27 +807,47 @@ struct AttributedBuilder {
                         paragraphStyle: rowStyle
                     )
                 }
-                if !isEmptyLine {
-                    emitPlain(
-                        lineContent, into: result,
-                        style: quoteStyle, block: visualBlock, depth: depth
-                    )
+                if !lineContent.isEmpty {
+                    if blankContent {
+                        // A whitespace-only remainder - a CRLF line's `\r` -
+                        // stays in the buffer as a hidden run on the blank row's
+                        // strut: emitting it as content laid out a full-height
+                        // row (TextKit breaks at the lone `\r`), one per blank
+                        // line in every CRLF quote.
+                        appendHiddenRun(
+                            lineContent, role: .quoteMark, into: result,
+                            style: collapsed, block: visualBlock, depth: depth,
+                            paragraphStyle: rowStyle
+                        )
+                    } else {
+                        emitPlain(
+                            lineContent, into: result,
+                            style: quoteStyle, block: visualBlock, depth: depth
+                        )
+                    }
                 }
             }
             var pendingFirstLine = true
             // Set after a blank line: the next separator newline is that blank
             // row's only character, and the row's paragraph margin rides on its
             // strut (TextKit drops paragraphSpacingBefore on these glued empty
-            // rows - see blankLineStyle above).
+            // rows - see blankLineStyle above). `strutIsLeading` distinguishes
+            // the hairline a leading blank row collapses to from the margin
+            // strut a mid-quote blank carries.
             var strutNextSeparator = false
+            var strutIsLeading = false
             func beginLine() {
                 if !(pendingFirstLine && firstLinePreceded) {
                     let range = NSRange(location: result.length, length: 1)
                     result.append(NSAttributedString(string: "\n"))
-                    if strutNextSeparator, let style = blankLineStyle {
+                    if strutNextSeparator,
+                        let style = strutIsLeading
+                            ? leadingBlankLineStyle : blankLineStyle
+                    {
                         result.addAttribute(.paragraphStyle, value: style, range: range)
                     }
                     strutNextSeparator = false
+                    strutIsLeading = false
                 }
                 pendingFirstLine = false
             }
@@ -819,11 +945,14 @@ struct AttributedBuilder {
             }
             var lineCursor = 0
             // The quote's own leading blank lines (its leading text when it
-            // sits nested inside a container) come out first.
+            // sits nested inside a container) come out first - as hairlines:
+            // the boundary before the block carries the collapsed margin, and
+            // a strut here doubled it.
             while lineCursor < rawLines.count, isBlankAtLevel(rawLines[lineCursor]) {
                 beginLine()
-                emitLevelLine(rawLines[lineCursor], blankRow: true)
+                emitLevelLine(rawLines[lineCursor], blankRow: true, leadingBlank: true)
                 strutNextSeparator = true
+                strutIsLeading = true
                 lineCursor += 1
             }
             for child in block.children {
@@ -849,9 +978,15 @@ struct AttributedBuilder {
                 let slice = Array(rawLines[lineCursor..<end])
                 switch child.kind {
                 case .blockquote:
+                    // Same first-line rule as the list child below: as the
+                    // quote's very first child the nested quote continues the
+                    // boundary break, and an extra break here had no source
+                    // byte - it shifted every byte after it and dropped the
+                    // file's final newline on save.
                     appendQuote(
                         child, into: result, depth: depth, level: level + 1,
-                        raw: slice, owner: visualBlock, firstLinePreceded: false
+                        raw: slice, owner: visualBlock,
+                        firstLinePreceded: firstLinePreceded && lineCursor == 0
                     )
                 case .heading:
                     // The reference renders the heading inside the quote at its
@@ -920,22 +1055,33 @@ struct AttributedBuilder {
                     // The list claims its own rows in the reference's model (the
                     // li beats the blockquote); its items indent from the quote's
                     // inset, not from zero. A pending blank-row strut rides on
-                    // the list's first separator newline.
+                    // the list's first separator newline. The first line is
+                    // preceded only when no rows went out before it AND the
+                    // boundary already emitted this quote's first break: as the
+                    // quote's very first child the list continues that boundary,
+                    // and an extra break here had no source byte - it shifted
+                    // every byte after it and dropped the file's final newline
+                    // on save. After blank rows the break is their terminator
+                    // (the strut - or the leading hairline - rides on it).
                     appendList(
                         child, into: result, depth: depth, raw: slice,
-                        owner: visualBlock, firstLinePreceded: false,
+                        owner: visualBlock,
+                        firstLinePreceded: firstLinePreceded && lineCursor == 0,
                         indentOffset: inset,
-                        leadingStrut: strutNextSeparator ? blankLineStyle : nil
+                        leadingStrut: strutNextSeparator
+                            ? (strutIsLeading ? leadingBlankLineStyle : blankLineStyle)
+                            : nil
                     )
                     strutNextSeparator = false
                 default:
                     // Fences and tables are painted children; they go through
                     // the child emitter with the quote's indent as their column.
+                    // Same first-line rule as the list above.
                     emitChildContent(
                         child, slice, into: result, depth: depth,
                         owner: visualBlock, textColumn: inset,
                         continuationStyle: quoteStyle,
-                        firstLinePreceded: false
+                        firstLinePreceded: firstLinePreceded && lineCursor == 0
                     )
                 }
                 lineCursor = end
@@ -959,7 +1105,7 @@ struct AttributedBuilder {
             raw: [String]? = nil, owner: BlockNode? = nil, firstLinePreceded: Bool = false,
             indentOffset: CGFloat = 0, leadingStrut: NSMutableParagraphStyle? = nil
         ) {
-            let sourceLines = block.source.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+            let sourceLines = splitRawLines(block.source)
             let rawLines = raw ?? sourceLines
             // The item's lines keep `md.block` pointing at the enclosing item the
             // editor already tracks - focus, reparse and painted-block reveal see one
@@ -1012,21 +1158,40 @@ struct AttributedBuilder {
                     theme: theme, ordered: ordered, depth: depth + 1, marker: marker
                 )
             }
-            register(style.decoration, for: block.id)
             // The item's text column: where the first line's content starts, and
             // where continuation content below aligns. `indentOffset` carries the
             // container's own inset (a quote's 19pt per level), which the
             // depth-based list indent knows nothing about.
             let textColumn = indentOffset + theme.listIndent * CGFloat(max(depth + 1, 1))
-            if indentOffset > 0,
-                let paragraphStyle = style.base[.paragraphStyle]
+            if indentOffset > 0 {
+                if let paragraphStyle = style.base[.paragraphStyle]
                     as? NSParagraphStyle,
-                let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle
-            {
-                mutable.headIndent += indentOffset
-                mutable.firstLineHeadIndent += indentOffset
-                style.base[.paragraphStyle] = mutable
+                    let mutable = paragraphStyle.mutableCopy()
+                        as? NSMutableParagraphStyle
+                {
+                    mutable.headIndent += indentOffset
+                    mutable.firstLineHeadIndent += indentOffset
+                    style.base[.paragraphStyle] = mutable
+                }
+                // The marker plan's width is a paint-space distance from the line's
+                // origin, and the line fragment rect starts at the container edge -
+                // not at the text column - so the container's inset must ride on it
+                // as well. Without it the bullet/checkbox drew at the un-compounded
+                // depth column, 19pt left of the reference inside a quote.
+                style.decoration = style.decoration.map { plan in
+                    switch plan {
+                    case .listMarker(let text, let width, let alignment):
+                        return .listMarker(
+                            text: text, width: width + indentOffset, alignment: alignment
+                        )
+                    case .taskCheckbox(let checked, let width):
+                        return .taskCheckbox(checked: checked, width: width + indentOffset)
+                    default:
+                        return plan
+                    }
+                }
             }
+            register(style.decoration, for: block.id)
             // The item's paragraph style without the marker decoration, for lines
             // that render inside the item but carry no marker of their own.
             let continuationStyle = BlockStyle(
@@ -1140,8 +1305,7 @@ struct AttributedBuilder {
             // already emitted it, the walk starts one line in.
             var lineCursor = 1
             for (index, child) in block.children.enumerated() {
-                let childLines = (child.leadingText + child.source)
-                    .split(separator: "\n", omittingEmptySubsequences: false).count
+                let childLines = splitRawLines(child.leadingText + child.source).count
                 let ownsLine0 = index == 0 && !line0Handled
                 // When the marker path above already emitted line 0, the first
                 // child's own line 0 went out with it: only its remaining lines are
@@ -1280,8 +1444,7 @@ struct AttributedBuilder {
                     base: [
                         .paragraphStyle: NSParagraphStyle.withHeadIndents(
                             base.base[.paragraphStyle] as? NSParagraphStyle,
-                            indent: textColumn + (theme.codePaddingLeft ?? theme.codePadding),
-                            spacingBefore: theme.codePaddingTop
+                            indent: textColumn + (theme.codePaddingLeft ?? theme.codePadding)
                         )
                     ],
                     decoration: []
@@ -1327,6 +1490,8 @@ struct AttributedBuilder {
                 )
             case .indentedCode:
                 let base = BlockStyle.codeFence(theme: theme)
+                register(base.decoration, for: child.id)
+                let codeStart = result.length
                 let codeStyle = BlockStyle(
                     font: base.font,
                     textColor: base.textColor,
@@ -1338,9 +1503,47 @@ struct AttributedBuilder {
                     ],
                     decoration: []
                 )
-                emitPlainLines(
-                    raw, into: result, depth: depth, style: codeStyle, block: owner,
-                    firstLinePreceded: firstLinePreceded
+                // The common leading whitespace is the SYNTAX that makes this an
+                // indented code block - the reference strips it from the rendered
+                // content, so it goes out hidden (the buffer keeps the bytes).
+                var commonIndent = Int.max
+                for line in raw where !line.trimmingCharacters(in: .whitespaces).isEmpty {
+                    commonIndent = min(commonIndent, line.prefix(while: { $0 == " " }).count)
+                }
+                if commonIndent == Int.max { commonIndent = 0 }
+                var lastCodeStyle = codeStyle.base[.paragraphStyle] as? NSParagraphStyle
+                for (index, line) in raw.enumerated() {
+                    if index > 0 || !firstLinePreceded {
+                        if let style = lastCodeStyle {
+                            result.append(
+                                NSAttributedString(string: "\n", attributes: [.paragraphStyle: style])
+                            )
+                        } else {
+                            result.append(NSAttributedString(string: "\n"))
+                        }
+                    }
+                    let rowStart = result.length
+                    let spaces = line.prefix(while: { $0 == " " }).count
+                    let hiddenSpaces = min(spaces, commonIndent)
+                    if hiddenSpaces > 0 {
+                        var hidden = codeStyle.base
+                        hidden[.paragraphStyle] = lastCodeStyle
+                        hidden[MarkdownAttribute.hidden] = !context.showsAllMarkers
+                        append(String(line.prefix(hiddenSpaces)), hidden, to: result)
+                    }
+                    let rest = String(line.dropFirst(hiddenSpaces))
+                    if !rest.isEmpty {
+                        emitPlain(rest, into: result, style: codeStyle, block: owner, depth: depth)
+                    }
+                    lastCodeStyle = codeStyle.base[.paragraphStyle] as? NSParagraphStyle
+                    result.addAttribute(
+                        MarkdownAttribute.codeBody, value: true,
+                        range: NSRange(location: rowStart, length: result.length - rowStart)
+                    )
+                }
+                result.addAttribute(
+                    MarkdownAttribute.codeBody, value: true,
+                    range: NSRange(location: codeStart, length: result.length - codeStart)
                 )
             case .hr:
                 register(
@@ -1531,8 +1734,35 @@ struct AttributedBuilder {
             depth: Int, block: BlockNode, style: BlockStyle, firstLinePreceded: Bool
         ) {
             let collapsed = BlockStyle.collapsed(from: style, theme: theme)
-            let lines = child.source.split(separator: "\n", omittingEmptySubsequences: false)
-                .map(String.init)
+            let lines = splitRawLines(child.source)
+            // The delimiter rows render no glyphs; their line boxes stand for
+            // the reference's border + padding chrome above and below the code
+            // (the top-level emitter does the same - a full-height delimiter row
+            // pushed the container's box content down by a whole line). A
+            // body-less fence keeps the full height: its one visible line box is
+            // the whole block.
+            var openDelimiterStyle = style.base[.paragraphStyle] as? NSParagraphStyle
+            var closeDelimiterStyle = style.base[.paragraphStyle] as? NSParagraphStyle
+            let hasBody = lines.contains(where: { !isFenceLine($0) })
+            if hasBody {
+                // The rendered gap between the container's row and the box's
+                // first content row measures 22pt against the reference's 22pt
+                // only when the open delimiter stands for the line height minus
+                // the fill's top inset (23.04 - 6); the chrome-height guess
+                // undershot by 10pt.
+                let openChrome = theme.bodyLineHeight * theme.codeFontSize
+                    - theme.codePaddingTop
+                if let mutable = openDelimiterStyle?.mutableCopy() as? NSMutableParagraphStyle {
+                    mutable.minimumLineHeight = 0.01
+                    mutable.maximumLineHeight = openChrome
+                    openDelimiterStyle = mutable
+                }
+                if let mutable = closeDelimiterStyle?.mutableCopy() as? NSMutableParagraphStyle {
+                    mutable.minimumLineHeight = 0.01
+                    mutable.maximumLineHeight = theme.codePaddingBottom + EditorMetrics.hairline
+                    closeDelimiterStyle = mutable
+                }
+            }
             func isFenceLine(_ line: String) -> Bool {
                 let (_, rest) = splitIndent(line)
                 return Fence.opening(in: rest, baseIndent: 0) != nil
@@ -1565,6 +1795,7 @@ struct AttributedBuilder {
                     }
                 }
                 let (indent, rest) = splitIndent(rawLine)
+                let opensNow = !opened && isFenceLine(rawLine)
                 if !opened {
                     if isFenceLine(rawLine) {
                         opened = true
@@ -1581,7 +1812,8 @@ struct AttributedBuilder {
                 if isFenceLine(rawLine) {
                     appendHiddenRun(
                         rest, role: .fenceDelimiter, into: result,
-                        style: collapsed, block: block, depth: depth
+                        style: collapsed, block: block, depth: depth,
+                        paragraphStyle: opensNow ? openDelimiterStyle : closeDelimiterStyle
                     )
                     continue
                 }
@@ -1685,36 +1917,122 @@ struct AttributedBuilder {
 
         private func appendFences(_ block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
             let source = block.source
-            let lines = source.split(separator: "\n", omittingEmptySubsequences: false)
+            let lines = splitRawLines(source)
             let body = BlockStyle.codeFence(theme: theme)
             let collapsed = BlockStyle.collapsed(from: body, theme: theme)
             register(body.decoration, for: block.id)
+            // The delimiter rows render no glyphs. Their line boxes stand for
+            // the reference's chrome above/below the code: the open row = the
+            // border + padding-top, the close row = the border +
+            // padding-bottom. A body-less fence (empty code block) keeps the
+            // full height: its one visible line box is the whole block, like
+            // the reference's empty pre. The row's glyphs glue backwards into
+            // the preceding fragment, so the height has to come from the fixed
+            // line height - a `paragraphSpacingBefore` on the style is dropped
+            // at the glued boundary.
+            var openDelimiterStyle = blockMarkerStyle
+            var closeDelimiterStyle = blockMarkerStyle
+            let hasBody = lines.enumerated().contains { !isDelimiterLine($0.element, index: $0.offset) }
+            // For a body-less fence these span the whole content (both delimiter
+            // runs and the terminator between them) and mark its codeBody range.
+            var firstDelimiterStart: Int?
+            var lastDelimiterEnd: Int?
+            if hasBody {
+                if let mutable = openDelimiterStyle?.mutableCopy() as? NSMutableParagraphStyle {
+                    mutable.minimumLineHeight = 0.01
+                    mutable.maximumLineHeight = theme.codePaddingTop + EditorMetrics.hairline
+                    openDelimiterStyle = mutable
+                }
+                if let mutable = closeDelimiterStyle?.mutableCopy() as? NSMutableParagraphStyle {
+                    mutable.minimumLineHeight = 0.01
+                    mutable.maximumLineHeight = theme.codePaddingBottom + EditorMetrics.hairline
+                    closeDelimiterStyle = mutable
+                }
+            }
 
-            func isFenceLine(_ line: Substring) -> Bool {
-                let text = String(line)
-                return Fence.opening(in: text, baseIndent: 0) != nil
-                    || Fence.closing(text, for: block.opening) != nil
+            // The delimiter lines: the fence's own opening (always the first
+            // line) and the line that CLOSES this fence - a same-character run
+            // at least as long as the opening. Interior lines that merely look
+            // like a fence (a ``` inside a ```` block) are content: treating
+            // them as delimiters collapsed their rows and squeezed the block.
+            func isDelimiterLine(_ line: String, index: Int) -> Bool {
+                if index == 0 {
+                    return Fence.opening(in: line, baseIndent: 0) != nil
+                }
+                return Fence.closing(line, for: block.opening) != nil
             }
 
             // The body is parsed once, so a construct that spans lines colours
             // across all of them; the ranges come back relative to `bodyText`
             // and are clipped to each line as it is emitted.
-            let bodyText = lines.filter { !isFenceLine($0) }.joined(separator: "\n")
+            let bodyText = lines.enumerated().filter { !isDelimiterLine($0.element, index: $0.offset) }
+                .map(\.element)
+                .joined(separator: "\n")
             let highlights = CodeHighlighter.shared.highlights(
                 in: bodyText, language: block.attributes.language
             )
             var highlightCursor = 0
             var bodyOffset = 0
+            // The row separator carries the PREVIOUS line's paragraph style:
+            // TextKit reads a line's height from its first character, and an
+            // empty body row's only character is its own terminator - without
+            // the style an empty row fell back to the default height (14pt
+            // against the code's 23.04) and squeezed every fence with a blank
+            // line.
+            var lastLineStyle = openDelimiterStyle
             for (index, line) in lines.enumerated() {
-                if index > 0 { result.append(NSMutableAttributedString(string: "\n")) }
-                if isFenceLine(line) {
+                if index > 0 {
+                    if hasBody {
+                        // A fence with body rows separates them plainly: the body
+                        // rows carry the block identity themselves, and extra
+                        // attributes here made the paint union the separator row
+                        // into every box (+7pt on each).
+                        if let style = lastLineStyle {
+                            result.append(
+                                NSAttributedString(string: "\n", attributes: [.paragraphStyle: style])
+                            )
+                        } else {
+                            result.append(NSAttributedString(string: "\n"))
+                        }
+                    } else {
+                        // An empty fence's only row is this terminator, and the
+                        // paint's line collection reads the block from the row's
+                        // first character - without it the row was dropped and
+                        // the empty fence's box never painted. Only the block
+                        // attribute and the delimiter's paragraph style: the full
+                        // body base brought the code font's line height and
+                        // regressed every fence's box by the delimiter's height.
+                        var separatorAttrs: [NSAttributedString.Key: Any] = [
+                            MarkdownAttribute.block: block.id,
+                            MarkdownAttribute.blockKind: BlockKind.fences.rawValue,
+                        ]
+                        if let style = lastLineStyle {
+                            separatorAttrs[.paragraphStyle] = style
+                        }
+                        result.append(NSAttributedString(string: "\n", attributes: separatorAttrs))
+                    }
+                }
+                if isDelimiterLine(line, index: index) {
+                    let runStart = result.length
                     appendHiddenRun(
                         String(line), role: .fenceDelimiter, into: result,
-                        style: collapsed, block: block, depth: depth
+                        style: collapsed, block: block, depth: depth,
+                        paragraphStyle: index == 0 ? openDelimiterStyle : closeDelimiterStyle
                     )
+                    lastLineStyle = index == 0 ? openDelimiterStyle : closeDelimiterStyle
+                    if !hasBody {
+                        // A body-less fence's delimiter rows ARE its content:
+                        // the body range spans both runs and the terminator
+                        // between them, so the terminator's line box joins the
+                        // fill's union (the rendered box is one line box plus
+                        // chrome, like the reference's empty pre).
+                        firstDelimiterStart = firstDelimiterStart ?? runStart
+                        lastDelimiterEnd = result.length
+                    }
                 } else {
                     let start = result.length
                     emitPlain(String(line), into: result, style: body, block: block, depth: depth)
+                    lastLineStyle = body.base[.paragraphStyle] as? NSParagraphStyle
                     let lineRange = NSRange(location: start, length: result.length - start)
                     // The plain colour goes down first; token colours override it.
                     result.addAttribute(
@@ -1731,6 +2049,12 @@ struct AttributedBuilder {
                     )
                     bodyOffset += line.utf16.count + 1
                 }
+            }
+            if !hasBody, let start = firstDelimiterStart, let end = lastDelimiterEnd {
+                result.addAttribute(
+                    MarkdownAttribute.codeBody, value: true,
+                    range: NSRange(location: start, length: end - start)
+                )
             }
         }
 
@@ -1771,7 +2095,7 @@ struct AttributedBuilder {
         private func appendMathBlock(
             _ block: BlockNode, into result: NSMutableAttributedString, depth: Int
         ) {
-            let lines = block.source.split(separator: "\n", omittingEmptySubsequences: false)
+            let lines = splitRawLines(block.source)
             let body = BlockStyle.mathBlock(theme: theme)
             let collapsed = BlockStyle.collapsed(from: body, theme: theme)
             for (index, line) in lines.enumerated() {
@@ -1795,8 +2119,7 @@ struct AttributedBuilder {
 
         private func appendTable(_ block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
             var style = BlockStyle.table(theme: theme)
-            var rows = block.source.split(separator: "\n", omittingEmptySubsequences: false)
-                .map(String.init)
+            var rows = splitRawLines(block.source)
             // The block's own trailing newline shows up as a final empty component.
             if rows.last?.isEmpty == true { rows.removeLast() }
 
@@ -1890,8 +2213,7 @@ struct AttributedBuilder {
         private func appendFrontMatter(
             _ block: BlockNode, into result: NSMutableAttributedString, depth: Int
         ) {
-            var rows = block.source.split(separator: "\n", omittingEmptySubsequences: false)
-                .map(String.init)
+            var rows = splitRawLines(block.source)
             if rows.last?.isEmpty == true { rows.removeLast() }
             let front = FrontMatterLayout.parse(
                 source: block.source,
@@ -2175,7 +2497,8 @@ struct AttributedBuilder {
                 appendDelimited(
                     node, into: result, style: style, block: block, depth: depth,
                     open: .codeOpen, close: .codeClose,
-                    override: InlineStyle.code(theme: theme, base: style)
+                    override: InlineStyle.code(theme: theme, base: style),
+                    hiddenPayloadPadding: codePadding(of: node)
                 )
                 register(
                     [
@@ -2211,9 +2534,10 @@ struct AttributedBuilder {
                 let start = result.length
                 let plainStart = plainCursor
                 // The alt text is the placeholder the picture is drawn over, so it is
-                // zero width too. It is not a marker, though: revealing it would put the
-                // `![…]` syntax back without the path, so the hidden flag is set here
-                // rather than through `appendHiddenRun`.
+                // zero width when the picture loads. When the file is missing or
+                // unreadable it degrades to the alt text rather than to a blank
+                // box - the hidden flag follows the load, it is not a marker, and
+                // revealing it would put the `![…]` syntax back without the path.
                 let imageAttributes = runAttributes(
                     InlineStyle.image(theme: theme, base: style).applied(to: style),
                     block: block, depth: depth
@@ -2228,7 +2552,7 @@ struct AttributedBuilder {
                     )
                 }
                 result.addAttribute(
-                    MarkdownAttribute.hidden, value: true && !context.showsAllMarkers,
+                    MarkdownAttribute.hidden, value: height > 0 && !context.showsAllMarkers,
                     range: NSRange(location: start, length: result.length - start)
                 )
                 appendHiddenRun(
@@ -2410,7 +2734,8 @@ struct AttributedBuilder {
         private func appendDelimited(
             _ node: InlineNode, into result: NSMutableAttributedString,
             style: BlockStyle, block: BlockNode, depth: Int,
-            open: MarkerRole, close: MarkerRole, override overrideStyle: InlineStyle.Overrides
+            open: MarkerRole, close: MarkerRole, override overrideStyle: InlineStyle.Overrides,
+            hiddenPayloadPadding: (leading: String, trailing: String)? = nil
         ) {
             let inlineIndex = inlineNodes.count
             let hiddenStyle = BlockStyle.collapsed(from: style, theme: theme)
@@ -2418,6 +2743,15 @@ struct AttributedBuilder {
                 node.prefix, role: open, into: result, style: hiddenStyle,
                 block: block, depth: depth, inlineIndex: inlineIndex
             )
+            // Source bytes flanking the payload that render as nothing (a code
+            // span's stripped space padding): emitted hidden, right inside the
+            // delimiters, so the buffer keeps them without widening the chip.
+            if let padding = hiddenPayloadPadding {
+                appendHiddenRun(
+                    padding.leading, role: open, into: result, style: hiddenStyle,
+                    block: block, depth: depth, inlineIndex: inlineIndex
+                )
+            }
             // Passing the unmodified `style` here is what made every delimited
             // element a no-op: `***bold italic***` and `**bold *italic***` rendered
             // as plain body text. The override has to reach the children as a style.
@@ -2448,10 +2782,32 @@ struct AttributedBuilder {
                     contentRange: NSRange(location: start, length: contentEnd - start)
                 )
             )
+            if let padding = hiddenPayloadPadding {
+                appendHiddenRun(
+                    padding.trailing, role: close, into: result, style: hiddenStyle,
+                    block: block, depth: depth, inlineIndex: inlineIndex
+                )
+            }
             appendHiddenRun(
                 node.suffix, role: close, into: result, style: hiddenStyle,
                 block: block, depth: depth, inlineIndex: inlineIndex
             )
+        }
+
+        /// The source bytes a code span's delimiters pad their payload with.
+        ///
+        /// CommonMark strips one leading and trailing space from a space-padded
+        /// body for rendering; the payload holds the stripped form and `rawBody`
+        /// the source form, so the difference is exactly the padding - kept in
+        /// the buffer as hidden runs, dropped from the drawn text.
+        private func codePadding(of node: InlineNode) -> (leading: String, trailing: String)? {
+            guard let raw = node.rawBody, raw != node.payload,
+                let range = raw.range(of: node.payload)
+            else { return nil }
+            let leading = String(raw[..<range.lowerBound])
+            let trailing = String(raw[range.upperBound...])
+            if leading.isEmpty, trailing.isEmpty { return nil }
+            return (leading, trailing)
         }
 
         /// Emits a run that carries no visible width.
@@ -2556,7 +2912,7 @@ struct AttributedBuilder {
             let heading = BlockStyle.heading(theme: theme, level: block.attributes.level)
             let style = BlockStyle.collapsed(from: heading, theme: theme)
             let emitted = String(block.inlines.verbatim)
-            for line in block.source.split(separator: "\n", omittingEmptySubsequences: false) {
+            for line in splitRawLines(block.source) {
                 let text = String(line)
                 if text.trimmingCharacters(in: .whitespaces).isEmpty {
                     appendHiddenRun(text, role: .headingHash, into: result, style: style, block: block, depth: depth)

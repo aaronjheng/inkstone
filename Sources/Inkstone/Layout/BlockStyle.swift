@@ -105,14 +105,11 @@ struct BlockStyle {
             padding: theme.codePaddingLeft ?? theme.codePadding
         )
         // The painted box grows by the padding insets (top 8 / bottom 6); the
-        // paragraph carries the same spacing so the line geometry matches the
-        // box the comparator sees in the reference.
-        if let mutable = paragraphStyle.mutableCopy() as? NSMutableParagraphStyle {
-            mutable.paragraphSpacing = theme.codePaddingBottom
-            style.base[.paragraphStyle] = mutable
-        } else {
-            style.base[.paragraphStyle] = paragraphStyle
-        }
+        // exported box carries the same growth. The rows themselves carry no
+        // spacing: the reference's `pre` is one paragraph and its lines pitch
+        // at the bare line height - a spacing here opened every pair of rows
+        // by the padding (measured 29.04pt pitch against 23.04).
+        style.base[.paragraphStyle] = paragraphStyle
         style.decoration.append(
             .codeBlock(
                 background: theme.codeBlockBackground.nsColor,
@@ -381,8 +378,11 @@ extension NSParagraphStyle {
         style.minimumLineHeight = lineHeight
         style.maximumLineHeight = lineHeight
         style.paragraphSpacing = 0
-        // Code blocks honour explicit line breaks rather than reflowing.
-        style.lineBreakMode = .byClipping
+        // The reference's `#write pre { white-space: pre-wrap }` soft-wraps
+        // code at the container edge (measured: a long CJK line laid out two
+        // rows against the App's one) - clipping here left every long line a
+        // row short.
+        style.lineBreakMode = .byWordWrapping
         return style
     }
 

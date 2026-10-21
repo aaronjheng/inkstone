@@ -137,7 +137,8 @@ final class CodeHighlighter {
             let tree = parser.parse(source)
         else { return [] }
         let cursor = highlighting.query.execute(in: tree)
-        return cursor.resolve(with: Predicate.Context(string: source)).highlights()
+        let ranges = cursor.resolve(with: Predicate.Context(string: source)).highlights()
+        return ranges
     }
 
     /// The theme colour for a tree-sitter capture name.

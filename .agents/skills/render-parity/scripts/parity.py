@@ -219,8 +219,13 @@ EXTRACT_JS = """
   let hrId = ids.size;
   const bare = (el, kind) => {
     const r = el.getBoundingClientRect();
+    const s = getComputedStyle(el);
     out.blocks.push({ id: hrId++, kind, listDepth: 0,
-                      top: r.top, bottom: r.bottom, left: r.left, right: r.right });
+                      top: r.top, bottom: r.bottom, left: r.left, right: r.right,
+                      borderTop: parseFloat(s.borderTopWidth) || 0,
+                      borderRight: parseFloat(s.borderRightWidth) || 0,
+                      borderBottom: parseFloat(s.borderBottomWidth) || 0,
+                      borderLeft: parseFloat(s.borderLeftWidth) || 0 });
   };
   for (const el of write.querySelectorAll('hr')) bare(el, 'hr');
   // A list item whose content is a raw-HTML element (`<br>`, a comment) has no
@@ -233,9 +238,17 @@ EXTRACT_JS = """
   }
   // The App scopes a nested fence/table to its own sub-block (`md.subKind`),
   // and the reference's element claims its rows in both models - emit every
-  // pre/table element box.
+  // pre/table element box. The computed borders ride along: the App's painted
+  // box is the padding box (fill), and `.md-fences` carries a 1px border, so
+  // the comparator shrinks the element box to the same semantics.
   for (const el of write.querySelectorAll('pre')) bare(el, 'fences');
   for (const el of write.querySelectorAll('table')) bare(el, 'table');
+  // An image-only paragraph has no text nodes (the alt lives in the img's
+  // attribute), but the App emits the alt row - emit the p's element box so
+  // the pairing holds for every document with pictures.
+  for (const el of write.querySelectorAll('p')) {
+    if (el.querySelector('img') && !el.textContent.trim()) bare(el, 'paragraph');
+  }
 
   for (const el of write.querySelectorAll('code, tt')) {
     if (el.closest('pre') || el.closest('table')) continue;
@@ -367,6 +380,21 @@ def baseline(md_path: Path, out_path: Path, match_app_fonts: bool, keep_html: bo
         content,
     )
     content = re.sub(r"</li>", "</p></li>", content)
+    # Typora's own pre elements carry the `md-fences` class, whose rules own
+    # the code block's box (font-size .9rem, border, padding 8/4/6/4, margins
+    # 15). The plain converter emits bare `<pre>` and those rules never fire -
+    # the measured box came out as raw rows with no padding. Add the class so
+    # the baseline's box matches the App's painted chrome.
+    content = content.replace("<pre>", '<pre class="md-fences">')
+    # python-markdown keeps the fenced content's final newline inside the pre;
+    # Chromium renders it as a phantom trailing line box (+23pt per block). The
+    # App (and Typora) show one row per source line - strip it.
+    content = re.sub(
+        r'(<pre class="md-fences"><code[^>]*>)(.*?)</code>',
+        lambda m: m.group(1) + re.sub(r"\n\Z", "", m.group(2)) + "</code>",
+        content,
+        flags=re.DOTALL,
+    )
     html = (
         "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
         + "\n".join(styles)
@@ -463,18 +491,27 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
         l["right"] -= origin_x_app
     for section in ("blocks", "listItems", "codeSpans", "tables", "blockquotes"):
         for item in ref.get(section, []):
-            for key in ("left", "x", "contentLeft"):
+            for key in ("left", "right", "x", "contentLeft"):
                 if key in item:
                     item[key] -= origin_x_ref
             if "top" in item:
                 item["top"] -= origin_y_ref
                 item["bottom"] -= origin_y_ref
+            # A task item's checkbox rides on the item: shift its box too, so
+            # the comparator can flag its position against the App's bar.
+            if "checkbox" in item and item["checkbox"]:
+                item["checkbox"]["x"] -= origin_x_ref
+                item["checkbox"]["y"] -= origin_y_ref
     for chip in app["chips"]:
         chip["x"] -= origin_x_app
         chip["y"] -= origin_y_app
 
     flags: list[str] = []
     report: dict = {"meta": {"ref": ref["meta"], "app": app["meta"]}, "blocks": [], "flags": flags}
+    # Painted-box bars indexed by dump line, for the fences/table box comparison.
+    bars_by_line: dict[int, list[dict]] = {}
+    for bar in app.get("bars", []):
+        bars_by_line.setdefault(bar["line"], []).append(bar)
 
     # --- reference blocks: element rects + their lines + text ---------------
     ref_blocks = sorted(ref["blocks"], key=lambda b: b["top"])
@@ -560,6 +597,7 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
     item_kinds = {"listItem", "taskItem"}
     report_blocks: list[dict] = []
     prev_pair: tuple[dict, dict] | None = None
+    prev_box_bottom: float | None = None
     for rb, ab in pairs:
         row: dict = {"kind": ab["kind"],
                      "text": ab.get("text", "")[:40],
@@ -612,6 +650,73 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                         flags.append(
                             f"block '{ab.get('text', '')[:24]}': gap {gap_a:.2f} vs {gap_r:.2f}pt"
                         )
+        # Painted block boxes: the App's fence/table chrome vs the baseline's
+        # `pre`/`table` element boxes (both origin-normalized). The line-level
+        # gap above stays suppressed for these kinds — the box is the
+        # meaningful geometry, and it includes the padding the text rows lack.
+        if ab["kind"] in ("fences", "table"):
+            want = "codeBlock" if ab["kind"] == "fences" else "tableBox"
+            box = next(
+                (
+                    bar
+                    for line in ab["lines"]
+                    for bar in bars_by_line.get(line["_index"], [])
+                    if bar["kind"] == want
+                ),
+                None,
+            )
+            if box is not None and all(k in rb for k in ("left", "right", "top", "bottom")):
+                # The App's painted box is the padding box (fill); shrink the
+                # reference's element box by its computed borders to the same
+                # semantics. Border-collapse tables carry their outer border on
+                # the cells, so the table element reports 0 and stays as-is.
+                bt = rb.get("borderTop", 0)
+                bl = rb.get("borderLeft", 0)
+                br = rb.get("borderRight", 0)
+                bb = rb.get("borderBottom", 0)
+                ref_x = rb["left"] + bl
+                ref_w = rb["right"] - rb["left"] - bl - br
+                ref_h = rb["bottom"] - rb["top"] - bt - bb
+                row["box"] = {
+                    "x": [round(box["x"], 2), round(ref_x, 2)],
+                    "w": [round(box["w"], 2), round(ref_w, 2)],
+                    "h": [round(box["h"], 2), round(ref_h, 2)],
+                }
+                for key, app_v, ref_v in (
+                    ("x", box["x"], ref_x),
+                    ("w", box["w"], ref_w),
+                    ("h", box["h"], ref_h),
+                ):
+                    if abs(app_v - ref_v) > tolerances["gap"]:
+                        flags.append(
+                            f"{ab['kind']} box '{ab.get('text', '')[:20]}': {key} "
+                            f"{app_v:.2f} vs {ref_v:.2f}pt"
+                        )
+                # The box's vertical position drifts with every heading's
+                # element-box overhang upstream, so it is compared as a GAP
+                # from the previous block's bottom, at the margin edge: the
+                # App's fill top sits 1pt (the border ring) below its margin
+                # edge; a painted table hangs the block margin below its own
+                # first row's top (the row's `spacingBefore`).
+                if prev_pair is not None:
+                    if ab["kind"] == "fences":
+                        app_edge = box["y"] - 1
+                    else:
+                        app_edge = box["y"] - ab["lines"][0].get("spacingBefore", 0)
+                    # When the previous block is itself a painted box, its
+                    # margin edge is a border ring below its fill bottom - the
+                    # line-based bottom would count that ring twice.
+                    prev_app_bottom = prev_pair[1]["bottom"]
+                    if prev_pair[1]["kind"] in ("fences", "table") and prev_box_bottom is not None:
+                        prev_app_bottom = prev_box_bottom + 1
+                    gap_app = app_edge - prev_app_bottom
+                    gap_ref = rb["top"] - prev_pair[0]["bottom"]
+                    row["boxGap"] = [round(gap_app, 2), round(gap_ref, 2)]
+                    if abs(gap_app - gap_ref) > tolerances["gap"]:
+                        flags.append(
+                            f"{ab['kind']} box '{ab.get('text', '')[:20]}': gap "
+                            f"{gap_app:.2f} vs {gap_ref:.2f}pt"
+                        )
         # Line pitch and text column only compare when both sides resolved the
         # same number of rows — a row-count difference means the two engines
         # split the block differently (a blank row one keeps and the other
@@ -638,6 +743,10 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                     flags.append(
                         f"block '{ab.get('text', '')[:24]}' line {k}: text column {al['left']:.2f} vs {rl['left']:.2f}pt"
                     )
+        if "box" in row:
+            prev_box_bottom = box["y"] + box["h"]
+        else:
+            prev_box_bottom = None
         prev_pair = (rb, ab, rb_bottom, ab_bottom)
         report_blocks.append(row)
     report["blocks"] = report_blocks
@@ -686,10 +795,19 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
         box = item["checkbox"]
         report["checkboxes"].append({
             "i": k,
+            "x": [round(bar["x"], 2), round(box["x"], 2)],
+            "y": [round(bar["y"], 2), round(box["y"], 2)],
             "size": [round(bar["w"], 2), round(bar["h"], 2)],
             "refSize": [round(box["w"], 2), round(box["h"], 2)],
             "checked": bool(box["checked"]),
         })
+        if abs(bar["x"] - box["x"]) > tolerances["marker"]:
+            flags.append(f"checkbox {k}: x {bar['x']:.2f} vs {box['x']:.2f}pt")
+        if abs(bar["w"] - box["w"]) > tolerances["marker"]:
+            flags.append(f"checkbox {k}: width {bar['w']:.2f} vs {box['w']:.2f}pt")
+        # y is measured but not flagged: it inherits the documented list-pitch
+        # calibration gap (the pure-CSS baseline pitches items ~1.4pt tighter
+        # than Typora, accumulating over a list) - see the calibration note.
 
     # --- inline-code chips -----------------------------------------------------
     ref_spans, app_chips = ref["codeSpans"], app["chips"]

@@ -115,13 +115,13 @@ enum BlockDecorator {
         }
     }
 
-    /// One visible line fragment and the block identity the decorator needs to
-    /// scope its chrome. A struct rather than a tuple: four named members read
-    /// better and keep the large-tuple lint quiet.
+    /// One visible line fragment. The block identity resolves after the
+    /// enumeration (a storage read in the enumeration block raised the
+    /// "edited during layout" exception).
     private struct LineFragment {
         var rect: NSRect
         var charRange: NSRange
-        var blockID: Int
+        var blockID: Int = 0
         var subBlockID: Int?
     }
 
@@ -218,6 +218,30 @@ enum BlockDecorator {
             let bounding = manager.boundingRect(forGlyphRange: glyphs, in: container)
             let contentHeight = font.ascender - font.descender
             guard contentHeight > 0, bounding.height > 0 else { return }
+            // The run's horizontal extent comes from the laid-out advances, not
+            // from the bounding rect: TextKit 1 pads the bounding box at
+            // attribute-run boundaries for CJK glyphs (~5.5pt over four), while
+            // the glyphs' locations carry the exact advances (28.0pt per full-width
+            // glyph at 28pt, matching the reference's shaping). The next glyph's
+            // location is the run's end; when the run ends its line, the
+            // fragment's used width is. The bounding rect is kept only for the
+            // vertical maths, which stays empirically aligned.
+            let firstGlyph = glyphs.location
+            let nextGlyph = NSMaxRange(glyphs)
+            var lineGlyphs = NSRange()
+            _ = manager.lineFragmentRect(
+                forGlyphAt: firstGlyph, effectiveRange: &lineGlyphs,
+                withoutAdditionalLayout: true
+            )
+            let xStart = manager.location(forGlyphAt: firstGlyph).x
+            let xEnd: CGFloat
+            if nextGlyph < manager.numberOfGlyphs, NSLocationInRange(nextGlyph, lineGlyphs) {
+                xEnd = manager.location(forGlyphAt: nextGlyph).x
+            } else {
+                xEnd = manager.lineFragmentUsedRect(
+                    forGlyphAt: firstGlyph, effectiveRange: nil, withoutAdditionalLayout: true
+                ).maxX
+            }
             var dominant = font
             storage.enumerateAttribute(.font, in: lineCharRange, options: []) {
                 candidate, _, _ in
@@ -236,10 +260,10 @@ enum BlockDecorator {
             runs.append(
                 ChipRun(
                     rect: CGRect(
-                        x: bounding.minX - padding - EditorMetrics.hairline,
+                        x: xStart - padding - EditorMetrics.hairline,
                         y: bounding.minY + contentCenter - contentHeight / 2
                             - EditorMetrics.hairline,
-                        width: bounding.width + (padding + EditorMetrics.hairline) * 2,
+                        width: xEnd - xStart + (padding + EditorMetrics.hairline) * 2,
                         height: contentHeight + EditorMetrics.hairline * 2
                     ),
                     fontSize: font.pointSize,
@@ -283,6 +307,11 @@ enum BlockDecorator {
             var rect: NSRect?
             var sawFirst = false
             var sawLast = false
+            var owner: Int
+            /// The smallest body-row head indent: the container column the
+            /// fence's fill hangs from (a fence inside a quote or list item
+            /// indents with its container, like the reference's pre).
+            var headIndent: CGFloat?
         }
         var boxes: [Int: Accumulator] = [:]
         for line in lines {
@@ -316,10 +345,30 @@ enum BlockDecorator {
                 if line.charRange.location == bodyRange.location { sawFirst = true }
                 if NSMaxRange(line.charRange) >= NSMaxRange(bodyRange) { sawLast = true }
             }
-            var box = boxes[ownerID] ?? Accumulator(plan: plan)
+            var box = boxes[ownerID] ?? Accumulator(plan: plan, owner: ownerID)
             box.rect = box.rect.map { $0.union(line.rect) } ?? line.rect
             box.sawFirst = box.sawFirst || sawFirst
             box.sawLast = box.sawLast || sawLast
+            if isBodyLine {
+                // The row's fragment may start with the previous row's glued
+                // terminator: probe forward to the row's own first character -
+                // the terminator carries the previous row's paragraph, whose
+                // head indent is not this row's.
+                var probe = line.charRange.location
+                let ns = storage.string as NSString
+                while probe < NSMaxRange(line.charRange),
+                    ns.substring(with: NSRange(location: probe, length: 1)) == "\n"
+                {
+                    probe += 1
+                }
+                if probe < NSMaxRange(line.charRange),
+                    let rowStyle = storage.attribute(
+                        .paragraphStyle, at: probe, effectiveRange: nil
+                    ) as? NSParagraphStyle
+                {
+                    box.headIndent = min(box.headIndent ?? rowStyle.headIndent, rowStyle.headIndent)
+                }
+            }
             boxes[ownerID] = box
         }
 
@@ -335,6 +384,23 @@ enum BlockDecorator {
             if box.sawLast {
                 rect.size.height += bottomInset
             }
+            // The fill's left edge is the container column the fence hangs in:
+            // the body rows' head indent minus the code padding. A fence inside
+            // a quote or list item then indents with its container exactly like
+            // the reference's pre. The border ring sits inside the element edge
+            // in the reference (`box-sizing: border-box`): the background fills
+            // the padding box, 1pt narrower each side than the full-bleed union.
+            if let headIndent = box.headIndent {
+                // The union spans the full container width; the fill keeps that
+                // right edge and takes its left from the container column:
+                // width = container right - new left (the old maxX moved with
+                // the origin, so `maxX - minX` was a no-op and the box ran past
+                // the container's right edge by the whole origin shift).
+                let containerRight = rect.maxX
+                rect.origin.x = headIndent - (theme.codePaddingLeft ?? theme.codePadding)
+                rect.size.width = containerRight - rect.minX
+            }
+            rect = rect.insetBy(dx: EditorMetrics.hairline, dy: 0)
             rect = rect.offsetBy(dx: inset.width, dy: inset.height)
             let path = CGPath(
                 roundedRect: rect, cornerWidth: radius, cornerHeight: radius, transform: nil
@@ -453,11 +519,15 @@ enum BlockDecorator {
                         planOrigin: subScoped ? (subBlockID ?? blockID) : blockID, lineCharRange: lineCharRange, in: layout,
                         storage: view.textStorage)
                 else { break }
-                let side: CGFloat = 12
-                // Right edge 4pt before the text column, like the drawn bullets.
+                // The reference's checkbox: the browser's 13pt default input,
+                // absolutely positioned at the item's top-left with
+                // `margin-top: calc(1em - 10px)` - i.e. 6pt below the line box
+                // top, right edge 3pt before the text column.
+                let side: CGFloat = 13
+                // Right edge 3pt before the text column, like the drawn bullets.
                 let box = CGRect(
-                    x: lineRect.minX + width - side - 4,
-                    y: lineRect.midY - side / 2,
+                    x: lineRect.minX + width - side - 3,
+                    y: lineRect.minY + 6,
                     width: side, height: side
                 )
                 context.setStrokeColor(theme.text.nsColor.withAlphaComponent(0.55).cgColor)
