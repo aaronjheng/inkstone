@@ -99,11 +99,33 @@ enum LayoutDump {
         var y: CGFloat
         var width: CGFloat
         var height: CGFloat
+        /// The line's engine baseline (container coords), exported only for
+        /// `headingRule`: the comparator's engine-neutral metric is the
+        /// baseline→rule distance, which matches the reference's own
+        /// baseline→rule distance however each engine sits the glyphs inside
+        /// the line box. Omitted from the JSON when `nil`.
+        var baseline: CGFloat?
 
         enum CodingKeys: String, CodingKey {
-            case line, kind, x, y
+            case line, kind, x, y, baseline
             case width = "w"
             case height = "h"
+        }
+
+        init(
+            // The x/y param labels mirror the pre-existing x/y properties (and
+            // the JSON keys) above, which carry the same style debt.
+            // swiftlint:disable:next identifier_name
+            line: Int, kind: String, x: CGFloat, y: CGFloat,
+            width: CGFloat, height: CGFloat, baseline: CGFloat? = nil
+        ) {
+            self.line = line
+            self.kind = kind
+            self.x = x
+            self.y = y
+            self.width = width
+            self.height = height
+            self.baseline = baseline
         }
     }
 
@@ -293,6 +315,11 @@ enum LayoutDump {
             /// fence's fill hangs from (the body rows indent by the container
             /// plus the code padding).
             var headIndent: CGFloat?
+            /// The rows resolve to a blockquote container: the reference's
+            /// blockquote carries 1em right padding and its pre paints inside
+            /// it, so the exported fill clamps to that edge (the painter's
+            /// mirror).
+            var quoteNested = false
         }
         var codeBoxes: [Int: CodeBoxAccumulator] = [:]
         struct TableBoxAccumulator {
@@ -411,7 +438,23 @@ enum LayoutDump {
                         var box = codeBoxes[owner] ?? CodeBoxAccumulator(
                             rect: nil, plan: plan
                         )
-                        box.rect = box.rect.map { $0.union(rect) } ?? rect
+                        // The fill spans the block's body rows only, matching
+                        // the painter: delimiter rows reach here as their own
+                        // fragments inside a container (the top-level emitter's
+                        // rows glue into the boundary and never resolve to the
+                        // fence), and unioning them grew every container fence's
+                        // box by their full line height (83.12 against 60.09).
+                        if isBodyLine {
+                            box.rect = box.rect.map { $0.union(rect) } ?? rect
+                        }
+                        if !box.quoteNested,
+                            let containerKind = storage.attribute(
+                                MarkdownAttribute.blockKind,
+                                at: fragment.charRange.location, effectiveRange: nil
+                            ) as? String
+                        {
+                            box.quoteNested = containerKind == BlockKind.blockquote.rawValue
+                        }
                         box.sawFirst = box.sawFirst || sawFirst
                         box.sawLast = box.sawLast || sawLast
                         if box.firstLine == nil { box.firstLine = lineIndex }
@@ -528,12 +571,37 @@ enum LayoutDump {
                             width: barWidth, height: rect.height
                         )
                     )
-                case .headingRule:
+                case .headingRule(_, let baselineGap):
+                    // The exact geometry the painter draws: baseline (delegate
+                    // capture) + the reference's baseline→rule distance, never
+                    // above an inline code box the reference's border follows
+                    // down (`headingRuleY`). The baseline is exported so the
+                    // comparator can flag the engine-neutral gap; `topDown`
+                    // mirrors `normalize`.
+                    let baseline = markerHider.baselines[fragment.charRange.location]
+                    let strutY: CGFloat
+                    switch baseline {
+                    case .some(let offset):
+                        strutY = topDown
+                            ? rect.minY + offset + baselineGap
+                            : rect.maxY - offset + baselineGap
+                    case .none:
+                        strutY = rect.maxY - EditorMetrics.hairline
+                    }
+                    let chipRects = BlockDecorator.inlineCodeChipRuns(
+                        theme: theme,
+                        storage: storage, manager: manager, container: container,
+                        lineCharRange: fragment.charRange
+                    ).map(\.rect)
                     bars.append(
                         DumpBar(
                             line: lineIndex, kind: "headingRule", x: rect.minX,
-                            y: rect.maxY - EditorMetrics.hairline, width: rect.width,
-                            height: EditorMetrics.hairline
+                            y: BlockDecorator.headingRuleY(strutY: strutY, chipRects: chipRects),
+                            width: rect.width,
+                            height: EditorMetrics.hairline,
+                            baseline: baseline.map {
+                                topDown ? rect.minY + $0 : rect.maxY - $0
+                            }
                         )
                     )
                 case .horizontalRule(_, let ruleHeight):
@@ -595,8 +663,12 @@ enum LayoutDump {
                 // right edge and takes its left from the container column:
                 // width = container right - new left (the old maxX moved with
                 // the origin, so `maxX - minX` was a no-op and the box ran past
-                // the container's right edge by the whole origin shift).
-                let containerRight = rect.maxX
+                // the container's right edge by the whole origin shift). A
+                // quote's content box carries 1em right padding in the
+                // reference (`blockquote { padding: 0 1em }`) and its pre
+                // paints inside it.
+                let rightInset = box.quoteNested ? theme.bodyFontSize : 0
+                let containerRight = rect.maxX - rightInset
                 rect.origin.x = headIndent - (theme.codePaddingLeft ?? theme.codePadding)
                 rect.size.width = containerRight - rect.minX
             }

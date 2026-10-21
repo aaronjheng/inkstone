@@ -41,20 +41,64 @@ struct BlockStyle {
     }
 
     static func heading(theme: EditorTheme, level: Int) -> BlockStyle {
+        let font = EditorFont.nsHeading(
+            theme: theme, level: level, weight: nsWeight(theme.headingWeight(level))
+        )
+        let lineHeight = theme.headingLineHeight(level)
         var style = BlockStyle(
-            font: EditorFont.nsHeading(
-                theme: theme, level: level, weight: nsWeight(theme.headingWeight(level))
-            ),
+            font: font,
             textColor: theme.headingTextColor?.nsColor ?? theme.text.nsColor
         )
-        style.base[.paragraphStyle] = NSParagraphStyle.markdownHeading(
-            lineHeight: theme.headingLineHeight(level),
-            margin: theme.headingMargin
-        )
+        var after = theme.headingMargin
         if let rule = theme.headingRule(level) {
-            style.decoration.append(.headingRule(color: rule.nsColor))
+            // The reference's baseline→rule distance (see DecorationPlan
+            // .headingRule): `(H − asc − desc)/2` with the font's hhea
+            // metrics — 7.63pt for h1, 6.29pt for h2 at body size 16.
+            let baselineGap = (lineHeight - font.ascender - font.descender) / 2
+            style.decoration.append(
+                .headingRule(color: rule.nsColor, baselineGap: baselineGap)
+            )
+            // The rule consumes part of the heading's bottom spacing: it
+            // hangs above the line-box bottom, while the reference's border
+            // sits AT the box bottom and still leaves the collapsed margin
+            // plus its own 1pt below it. The style shrinks by the CJK
+            // fallback's descent model — the larger descent a heading line
+            // mixes (`ruleBottomShrink`); a Latin-only row hands the
+            // difference back through the layout delegate
+            // (`MarkerHider.lineSpacingAfterGlyphAt`). The builder's collapse
+            // accounting keeps reporting the full margin for the heading, or
+            // the reduction would be handed right back to the next block.
+            style.base[MarkdownAttribute.headingRuleGap] = baselineGap
+            after -= Self.ruleBottomShrink(fontSize: font.pointSize, baselineGap: baselineGap)
         }
+        style.base[.paragraphStyle] = NSParagraphStyle.markdownHeading(
+            lineHeight: lineHeight,
+            margin: theme.headingMargin,
+            after: after
+        )
         return style
+    }
+
+    /// The part of a ruled heading's bottom spacing the rule itself consumes.
+    ///
+    /// The rule hangs `δ` above the line-box bottom (see `DecorationPlan
+    /// .headingRule`): `δ = descUsed − baselineGap`, where `descUsed` is the
+    /// descent TextKit clamps the fixed line height with — the largest
+    /// descent among the faces actually on the line, rounded to whole points
+    /// (measured on the engine: 12pt at h1's 36pt and 10pt at h2's 28pt for
+    /// the CJK fallback, whose face descends 0.34em; 11pt and 8pt for
+    /// Open Sans-only rows). This models the CJK fallback — the larger
+    /// descent a heading line mixes, and the common case in CJK documents;
+    /// `MarkerHider` hands the difference back for Latin-only rows at layout
+    /// time, where the row's faces are known. The reference's border leaves
+    /// `margin + 1pt` between the rule and the next content (border 1pt
+    /// inside the element, the collapsed margin below it), so the spacing
+    /// shrinks by `δ − 1` and the rule→content distance matches on both
+    /// sides. Measured at the default body size 16; a scaled theme inherits
+    /// the model (error ≤ 1pt).
+    static func ruleBottomShrink(fontSize: CGFloat, baselineGap: CGFloat) -> CGFloat {
+        let descUsed = (fontSize * 0.34).rounded()
+        return max(0, descUsed - baselineGap - 1)
     }
 
     static func listItem(theme: EditorTheme, ordered: Bool, depth: Int, marker: String) -> BlockStyle {
@@ -255,7 +299,18 @@ struct BlockStyle {
 /// align chrome to wrapped text lines rather than to the block's nominal origin -
 /// which is what makes a multi-line code block or a wrapped quote look right.
 enum DecorationPlan {
-    case headingRule(color: NSColor)
+    /// A heading's bottom rule (`h1 { border-bottom: 1px solid }`).
+    ///
+    /// `baselineGap` is the reference's baseline→rule distance, computed at
+    /// build time from the heading font's own metrics: Chromium centres the
+    /// strut's ascender+descender inside the fixed line box, so its baseline
+    /// sits `(lineHeight − ascender − descender)/2` above the box bottom, and
+    /// the rule (the border-bottom) sits at that box bottom. The App's own
+    /// baseline comes from the layout delegate at paint time (TextKit clamps
+    /// the line box from below — the descent side — so the engines place the
+    /// same glyphs at different heights inside an identical line box, and the
+    /// rule must hang off the baseline, not off the box, to visually match).
+    case headingRule(color: NSColor, baselineGap: CGFloat)
     case quoteBar(color: NSColor, width: CGFloat, inset: CGFloat)
     case listMarker(text: String, width: CGFloat, alignment: NSTextAlignment)
     case taskCheckbox(checked: Bool, width: CGFloat)
@@ -318,7 +373,7 @@ extension NSParagraphStyle {
         return copy
     }
 
-    static func markdownHeading(lineHeight: CGFloat, margin: CGFloat) -> NSParagraphStyle {
+    static func markdownHeading(lineHeight: CGFloat, margin: CGFloat, after: CGFloat? = nil) -> NSParagraphStyle {
         let style = NSMutableParagraphStyle()
         style.minimumLineHeight = lineHeight
         style.maximumLineHeight = lineHeight
@@ -327,7 +382,10 @@ extension NSParagraphStyle {
         // after the last line, like the CSS box model. The following block's
         // spacing is collapsed against it by the builder (see the boundary
         // backfill there), so the visible gap is max(bottom, top) as in CSS.
-        style.paragraphSpacing = margin
+        // The ruled levels pass a reduced `after`: the rule itself consumes
+        // part of it, because it hangs above the line-box bottom (see
+        // `ruleBottomShrink`).
+        style.paragraphSpacing = after ?? margin
         style.lineBreakMode = .byWordWrapping
         return style
     }
@@ -381,8 +439,11 @@ extension NSParagraphStyle {
         // The reference's `#write pre { white-space: pre-wrap }` soft-wraps
         // code at the container edge (measured: a long CJK line laid out two
         // rows against the App's one) - clipping here left every long line a
-        // row short.
-        style.lineBreakMode = .byWordWrapping
+        // row short. `pre-wrap` breaks between any two characters, so the
+        // matching TextKit mode is per-character wrapping: word wrapping kept
+        // a long ASCII run whole and packed the CJK line into one row too
+        // many (measured 3 rows against the reference's 2).
+        style.lineBreakMode = .byCharWrapping
         return style
     }
 

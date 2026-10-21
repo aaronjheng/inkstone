@@ -110,24 +110,91 @@ pass `--out dir` to keep them next to the document for inspection.
 
 ## Known-residual baseline (do not chase as new bugs)
 
-As of the last full run over `~/Documents/md-fixtures` the block/line/marker/
-chip comparison reports **0 flags**, and the phase-2 painted-box comparison
-(fenced-code fills, table boxes, task-checkbox positions) reports **7**, all in
-two edge shapes:
+As of the last full run over `~/Documents/md-fixtures` the comparison reports
+**0 flags** — block/line/marker/chip geometry, the painted-box comparison
+(fenced-code fills, table boxes, task-checkbox positions) and the heading-rule
+comparison (baseline→rule distance, previously a blind spot: the reference's
+`rules` were collected but never compared) are aligned.
 
-- **fence inside a quote or list item** (6 flags: w/h/gap) — the App's
-  painted fill spans the full container width and its row layout ignores the
-  container's right padding; the reference's `pre` indents to the container's
-  content column (the quote's 1em right padding included). Aligning needs the
-  quote/list right-padding modelled in the row layout — TextKit 1 has no
-  per-paragraph right inset, so this needs a container-level width model.
-- **long wrapped code line** (code.md, 1 flag: h) — the App wraps the CJK-
-  long line into three rows against the reference's two at the same width and
-  face (verified: pinning the baseline to the App's SF Mono via @font-face
-  still laid out two) — the wrap granularity differs (`byWordWrapping` keeps
-  the long ASCII run whole and packs rows differently from `pre-wrap`'s
-  per-character breaking). Fixing needs a wrap-mode decision, not a font
-  change.
+Fixed on the way to this baseline (do not regress):
+
+- **long wrapped code line** (code.md h) — `markdownCode` uses
+  `.byCharWrapping`, matching `pre-wrap`'s per-character breaking;
+  `byWordWrapping` kept the long ASCII run whole and packed one row too many.
+- **indented code box gap** — the block's leading whitespace is hidden syntax,
+  glues the first row into the boundary, and the block's own spacing never
+  applies there; the boundary hairline carries `collapsedSpacing +
+  codePaddingTop` for `.indentedCode` (the fence rides the same on its
+  delimiter's marker style). `cssMargin(.indentedCode)` is `fencesMargin` (a
+  bare `pre` in the reference).
+- **container fence height** — the fill unions *body* rows only
+  (BlockDecorator and LayoutDump both): container delimiter rows are their own
+  fragments (the top-level's glue into the boundary), and unioning them grew
+  every container fence by full line heights. The delimiter rows collapse to
+  hairlines and the hidden indent run carries the delimiter's own paragraph
+  style — the row's height reads from its first character, and the indent's
+  code style pushed every delimiter row to the full code line height.
+- **quote-nested fence rows** — a quote's slice keeps its `> ` markers;
+  `emitFenceLines` strips them (nested levels included) before probing for the
+  delimiters and hides them on every row, or the delimiters read as content.
+- **blank strut before a container fence** — the strut (the quote's
+  `blankLineStyle` for its children, the fence's collapsed separator for an
+  item's leading blank) carries `fencesMargin + codePaddingTop + 1pt` when the
+  next child is a code block, or the fill hangs 9pt short of the reference's
+  edge; paragraph struts keep `blockMargin`.
+- **quote-nested fill width** — the reference's blockquote carries 1em right
+  padding and its `pre` paints inside it; the fill clamps its right edge by
+  `theme.bodyFontSize` when the rows resolve to a blockquote container (the
+  rows carry the container's `md.blockKind`). `tailIndent` is NOT usable here:
+  a positive value collapsed the quote's fence *and* table rows entirely.
+- **container-fence gap metric** — the baseline nests the reference's `pre`
+  inside its `li`/`blockquote` element box, so the gap against the container's
+  element bottom is negative by construction. When the reference element nests
+  (`top < previous bottom`), the comparator measures against the container's
+  own last text line plus its half-leading instead.
+- **heading rule anchor** — the rule hung at `lineRect.maxY − hairline`, but
+  the TextKit 1 fragment rect includes the heading's 1rem `paragraphSpacing`,
+  which put the rule 15pt into the paragraph's bottom margin (22–23pt under
+  the ink against the reference's 3–3.5pt). The reference's `github.css`
+  border-bottom sits at the heading's line-box bottom (no padding-bottom), but
+  the engines place the same glyphs at different heights inside an identical
+  clamped box — TextKit 1 clamps a fixed line height from the descent side
+  (`baseline = boxTop + H − maxDescent`, CJK fallback PingFang descends
+  0.333em vs Open Sans' 0.293em), Chromium centres the strut — so the rule is
+  anchored to the ENGINE BASELINE plus the reference's baseline→rule distance
+  `(H − ascender − descender)/2` (7.63pt h1 / 6.29pt h2), computed at build
+  time in `BlockStyle.heading` into the plan. The baseline itself is captured
+  per line by `MarkerHider` from the `shouldSetLineFragmentRect` delegate
+  (TextKit 1 does fire it; the offset measures from the fragment rect's top,
+  paragraph spacing included) — no public API hands it back afterwards, and
+  the attribute fonts never name the CJK fallback face. A heading whose line
+  carries an inline code chip follows the chip down instead
+  (`BlockDecorator.headingRuleY`): the reference's border rides the code box
+  (2pt below the strut at h2 size, border = chip bottom + 0.3pt). The
+  comparator verifies the engine-neutral baseline→rule distance; headings
+  with inline code are skipped on both sides (the App's chip position was
+  never calibrated against the reference's — sizes compare, positions do
+  not), and the tolerance is 1.0pt because canvas
+  `fontBoundingBoxAscent` quantizes to whole CSS px (measured 38/30 for the
+  36/28pt faces).
+- **heading rule → following content** — the reference's border leaves
+  `collapsed margin + 1pt` between the rule and the next block (the border
+  is inside the element, the margin below it), i.e. 17pt for a paragraph;
+  the App's rule hangs `δ` above the line-box bottom, so the heading's
+  after-spacing shrinks by `δ − 1` (`BlockStyle.ruleBottomShrink`), the
+  collapse accounting keeps reporting the full margin (or the reduction
+  would be handed right back), and `MarkerHider.lineSpacingAfterGlyphAt`
+  corrects the difference for the faces actually on the row — the engine
+  rounds the clamped line's descent to whole points from the row's largest
+  descent (CJK fallback PingFang descends 0.34em → 12/10pt at h1/h2;
+  Open Sans-only rows descend 11/8pt), and a Latin-only row hands the
+  difference back additively (negative delegate returns are clamped to 0 —
+  measured; the delegate also fires BEFORE `shouldSetLineFragmentRect` for
+  the same row, so the captured-baseline map is empty there and the row's
+  substituted font attributes are read instead). The comparator measures
+  the gap after a ruled heading from the rule on both sides
+  (`prev_rule_edges`); chip-bearing headings skip the gap entirely
+  (`prev_ruled_chip` — the rule rides the chip there).
 
 Everything else previously listed (heading chip CJK width, nested quote level
 margins, quote list-marker centers, special-chars raw-HTML mispairing) is

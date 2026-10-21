@@ -25,6 +25,10 @@ final class MarkdownTextView: NSTextView {
     private(set) var layout = LayoutOutput(attributed: NSAttributedString())
     private(set) var theme: EditorTheme
     private let hider = MarkerHider()
+    /// Read access for the decoration layer: the heading rule hangs off the
+    /// engine's baseline, which only this delegate captured (`MarkerHider
+    /// .baselines`).
+    var markerHider: MarkerHider { hider }
     /// Incremental-reparse state.
     var focusedBlockID: Int?
     private var reparseTimer: Timer?

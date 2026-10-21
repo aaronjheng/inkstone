@@ -69,6 +69,10 @@ def _converter() -> "MarkdownIt":
 TOLERANCES = {
     "pitch": 0.5,
     "height": 0.5,
+    # canvas fontBoundingBoxAscent quantizes to whole CSS px (measured 38/30
+    # for the 36/28pt heading faces), so the reference's baseline→rule gap
+    # carries ±0.5pt of rounding noise against the App's fractional metrics.
+    "headingRule": 1.0,
     "left": 0.5,
     "gap": 1.5,
     "marker": 0.5,
@@ -297,12 +301,38 @@ EXTRACT_JS = """
       color: s.color,
     });
   }
+  const cv = document.createElement('canvas').getContext('2d');
   for (const el of write.querySelectorAll('h1, h2')) {
     const s = getComputedStyle(el);
     if (parseFloat(s.borderBottomWidth) > 0) {
       const r = el.getBoundingClientRect();
+      // The comparator's engine-neutral anchor for the App's heading rule is
+      // the baseline→rule distance: both engines draw the rule at the same
+      // distance from the line's baseline, even though they place the glyphs
+      // at different heights inside an identical clamped line box. The line
+      // rect is the font content box (top = baseline − ascent), and canvas
+      // TextMetrics reports that ascent for the computed font (the strut —
+      // 'Mg' measures the Latin face even on CJK headings).
+      cv.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+      const ascent = cv.measureText('Mg').fontBoundingBoxAscent;
+      // The last TEXT node's rect, not the range's last rect: a heading with
+      // trailing inline content (a code span inside the heading) ends with the
+      // inline element's box, whose top is not the heading font box the strut
+      // ascent belongs to.
+      let lastTextRect = null;
+      const walker2 = document.createTreeWalker(el, NodeFilter.SHOW_TEXT, {
+        acceptNode(n) { return n.textContent.trim() ? NodeFilter.FILTER_ACCEPT : NodeFilter.FILTER_REJECT; },
+      });
+      while (walker2.nextNode()) {
+        const rg2 = document.createRange();
+        rg2.selectNodeContents(walker2.currentNode);
+        const rs = rg2.getClientRects();
+        if (rs.length) lastTextRect = rs[rs.length - 1];
+      }
       out.rules.push({ y: r.bottom - parseFloat(s.borderBottomWidth), w: r.width,
-                       color: s.borderBottomColor });
+                       color: s.borderBottomColor,
+                       hasInlineCode: !!el.querySelector('code'),
+                       baselineY: lastTextRect ? lastTextRect.top + ascent : null });
     }
   }
   return out;
@@ -505,6 +535,20 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
     for chip in app["chips"]:
         chip["x"] -= origin_x_app
         chip["y"] -= origin_y_app
+    # The heading-rule comparison is origin-independent (rule y − baseline),
+    # but the gap sections below measure from the rule's absolute y when the
+    # previous block is a ruled heading — shift both sides' rule geometry like
+    # every other positioned artifact.
+    for rule in ref.get("rules", []):
+        if rule.get("y") is not None:
+            rule["y"] -= origin_y_ref
+        if rule.get("baselineY") is not None:
+            rule["baselineY"] -= origin_y_ref
+    for bar in app.get("bars", []):
+        if bar["kind"] == "headingRule":
+            bar["y"] -= origin_y_app
+            if bar.get("baseline") is not None:
+                bar["baseline"] -= origin_y_app
 
     flags: list[str] = []
     report: dict = {"meta": {"ref": ref["meta"], "app": app["meta"]}, "blocks": [], "flags": flags}
@@ -512,6 +556,58 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
     bars_by_line: dict[int, list[dict]] = {}
     for bar in app.get("bars", []):
         bars_by_line.setdefault(bar["line"], []).append(bar)
+    # Lines carrying an inline-code chip: headings on those lines draw their
+    # rule from the chip's box (the reference's border follows the code box
+    # down), and the chip's own position was never calibrated against the
+    # reference's — the gap geometry there is unverifiable.
+    chip_lines = {c["line"] for c in app.get("chips", [])}
+
+    def prev_rule_edges(prb: dict, pab: dict) -> tuple[float | None, float | None]:
+        """The rule's y on both sides when the previous block is a ruled
+        heading, else (None, None).
+
+        The App's rule hangs above the heading's line-box bottom (the engines
+        place the glyphs at different heights inside an identical clamped
+        box), and the reference's border-bottom sits at its element bottom —
+        so any gap measured from the box edges after a ruled heading is
+        offset by construction. Measured from the rule instead, the visual
+        gap matches (the App's heading style hands back the consumed
+        spacing; see `BlockStyle.ruleBottomShrink`). Headings whose line
+        carries an inline chip are skipped: the rule rides the chip there and
+        the chip's vertical position is uncalibrated."""
+        bar = next(
+            (
+                b
+                for line in pab.get("lines", [])
+                for b in bars_by_line.get(line.get("_index", -1), [])
+                if b["kind"] == "headingRule" and line.get("_index") not in chip_lines
+            ),
+            None,
+        )
+        if bar is None or bar.get("baseline") is None:
+            return None, None
+        rule_ref = next(
+            (
+                r["y"]
+                for r in ref.get("rules", [])
+                if r.get("y") is not None and abs(r["y"] - (prb["bottom"] - 1)) <= 0.75
+            ),
+            None,
+        )
+        if rule_ref is None:
+            return None, None
+        return rule_ref, bar["y"]
+
+    def prev_ruled_chip(prb: dict, pab: dict) -> bool:
+        """True when the previous block is a ruled heading whose line carries
+        an inline chip — the rule rides the chip there and the chip's vertical
+        position was never calibrated against the reference's, so neither the
+        rule-relative nor the box-edge gap is verifiable."""
+        return any(
+            b["kind"] == "headingRule" and line.get("_index") in chip_lines
+            for line in pab.get("lines", [])
+            for b in bars_by_line.get(line.get("_index", -1), [])
+        )
 
     # --- reference blocks: element rects + their lines + text ---------------
     ref_blocks = sorted(ref["blocks"], key=lambda b: b["top"])
@@ -621,6 +717,16 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
             prb, pab, prb_bottom, pab_bottom = prev_pair
             gap_r = rb_top - prb_bottom
             gap_a = ab_top - pab_bottom
+            # A ruled heading's rule hangs above its line-box bottom — measure
+            # the visual gap from the rule on both sides (see prev_rule_edges).
+            rule_r, rule_a = prev_rule_edges(prb, pab)
+            if rule_r is not None:
+                gap_r = rb_top - rule_r
+                gap_a = ab_top - rule_a
+            # A chip-bearing ruled heading above: the neighbourhood is
+            # uncalibrated (see prev_ruled_chip) — report the box gap, flag
+            # nothing.
+            suppress = rule_r is None and prev_ruled_chip(prb, pab)
             # List-item rows carry the item spacing INSIDE their line
             # box (the App) vs OUTSIDE (the reference's li margins) —
             # the item pitch (top-to-top) is the engine-neutral metric.
@@ -644,7 +750,8 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                 if ab["kind"] not in SKIPPED_KINDS \
                     and rb["kind"] not in SKIPPED_KINDS \
                     and pab["kind"] not in SKIPPED_KINDS \
-                    and prb["kind"] not in SKIPPED_KINDS:
+                    and prb["kind"] not in SKIPPED_KINDS \
+                    and not suppress:
                     row["gap"] = [round(gap_a, 2), round(gap_r, 2)]
                     if abs(gap_a - gap_r) > tolerances["gap"]:
                         flags.append(
@@ -703,16 +810,41 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                         app_edge = box["y"] - 1
                     else:
                         app_edge = box["y"] - ab["lines"][0].get("spacingBefore", 0)
-                    # When the previous block is itself a painted box, its
-                    # margin edge is a border ring below its fill bottom - the
-                    # line-based bottom would count that ring twice.
-                    prev_app_bottom = prev_pair[1]["bottom"]
-                    if prev_pair[1]["kind"] in ("fences", "table") and prev_box_bottom is not None:
-                        prev_app_bottom = prev_box_bottom + 1
-                    gap_app = app_edge - prev_app_bottom
-                    gap_ref = rb["top"] - prev_pair[0]["bottom"]
+                    rule_r, rule_a = prev_rule_edges(prev_pair[0], prev_pair[1])
+                    suppress = rule_r is None and prev_ruled_chip(prev_pair[0], prev_pair[1])
+                    if rule_r is not None:
+                        # Ruled heading above: measure from the rule on both
+                        # sides (see prev_rule_edges) — the App's fill edge
+                        # vs the App's rule, the reference's element top vs
+                        # its border-bottom y.
+                        gap_app = app_edge - rule_a
+                        gap_ref = rb["top"] - rule_r
+                    else:
+                        # When the previous block is itself a painted box, its
+                        # margin edge is a border ring below its fill bottom - the
+                        # line-based bottom would count that ring twice.
+                        prev_app_bottom = prev_pair[1]["bottom"]
+                        if prev_pair[1]["kind"] in ("fences", "table") and prev_box_bottom is not None:
+                            prev_app_bottom = prev_box_bottom + 1
+                        gap_app = app_edge - prev_app_bottom
+                        gap_ref = rb["top"] - prev_pair[0]["bottom"]
+                    if rb["top"] < prev_pair[0]["bottom"] - 0.5 and prev_pair[0]["lines"]:
+                        # The reference nests this element inside the previous
+                        # container (a pre inside an li/blockquote element box):
+                        # the container's bottom includes the child, so the
+                        # margin edge is the container's own last text line —
+                        # against the container's element bottom the gap is
+                        # negative by construction and compares nothing. The
+                        # reference's line rects are font content boxes, so the
+                        # margin edge adds the line's half-leading back.
+                        last_line = prev_pair[0]["lines"][-1]
+                        line_box = ref["meta"]["fontSize"] * 1.6
+                        half_leading = max(
+                            0.0, (line_box - (last_line["bottom"] - last_line["top"])) / 2
+                        )
+                        gap_ref = rb["top"] - (last_line["bottom"] + half_leading)
                     row["boxGap"] = [round(gap_app, 2), round(gap_ref, 2)]
-                    if abs(gap_app - gap_ref) > tolerances["gap"]:
+                    if not suppress and abs(gap_app - gap_ref) > tolerances["gap"]:
                         flags.append(
                             f"{ab['kind']} box '{ab.get('text', '')[:20]}': gap "
                             f"{gap_app:.2f} vs {gap_ref:.2f}pt"
@@ -808,6 +940,51 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
         # y is measured but not flagged: it inherits the documented list-pitch
         # calibration gap (the pure-CSS baseline pitches items ~1.4pt tighter
         # than Typora, accumulating over a list) - see the calibration note.
+
+    # --- heading rules ----------------------------------------------------------
+    # The reference's h1/h2 border-bottom vs the App's painted bar. The rule
+    # is not at the same distance from the line BOX on both sides: TextKit
+    # clamps the fixed line height from the descent side, Chromium centres the
+    # strut, so the same glyphs sit at different heights inside an identical
+    # box. The engine-neutral metric is the baseline→rule distance, which the
+    # App preserves from the reference by construction — and which this flags
+    # if either engine's capture drifts.
+    # Headings carrying inline code are skipped on BOTH sides (chip_lines,
+    # defined with bars_by_line above): the reference's border follows the
+    # code box down (2pt at h2 size) while the App's chip box hangs from a
+    # strut model whose position was never calibrated against the reference's
+    # (chip sizes compare; positions do not), so the App's rule sits at the
+    # strut anchor there — visually below the chip, but at a distance this
+    # comparator cannot verify yet.
+    ref_rules = [
+        r for r in ref.get("rules", [])
+        if r.get("baselineY") is not None and not r.get("hasInlineCode")
+    ]
+    app_rules = [
+        b for b in app.get("bars", [])
+        if b["kind"] == "headingRule" and b.get("baseline") is not None
+        and b["line"] not in chip_lines
+    ]
+    if len(ref_rules) != len(app_rules):
+        flags.append(
+            f"heading rules: {len(app_rules)} app bars vs {len(ref_rules)} reference rules"
+        )
+    report["headingRules"] = []
+    for k in range(min(len(ref_rules), len(app_rules))):
+        rr, ab = ref_rules[k], app_rules[k]
+        gap_r = rr["y"] - rr["baselineY"]
+        gap_a = ab["y"] - ab["baseline"]
+        report["headingRules"].append({
+            "i": k,
+            "gap": [round(gap_a, 2), round(gap_r, 2)],
+            "w": [round(ab["w"], 2), round(rr["w"], 2)],
+        })
+        if abs(gap_a - gap_r) > tolerances["headingRule"]:
+            flags.append(
+                f"heading rule {k}: baseline gap {gap_a:.2f} vs {gap_r:.2f}pt"
+            )
+        if abs(ab["w"] - rr["w"]) > tolerances["headingRule"]:
+            flags.append(f"heading rule {k}: width {ab['w']:.2f} vs {rr['w']:.2f}pt")
 
     # --- inline-code chips -----------------------------------------------------
     ref_spans, app_chips = ref["codeSpans"], app["chips"]

@@ -47,6 +47,27 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
     /// this delegate - same trick as the item spacing.
     var quoteLevelSpacing: CGFloat = 0
 
+    /// The layout engine's own baseline offset, per line fragment, keyed by
+    /// the line's first character location.
+    ///
+    /// Captured from `shouldSetLineFragmentRect`: with a fixed line height
+    /// (`min == max`, the heading styles) TextKit clamps the line box from the
+    /// descent side, so the real baseline depends on the fonts actually on the
+    /// line — including CJK fallback faces the text storage never names
+    /// (PingFang descends 0.333em where Open Sans descends 0.293em, a 1pt
+    /// swing at h1 size). No public API hands that number back after the fact,
+    /// so it is recorded as the layout happens. The offset measures from the
+    /// fragment rect's top, paragraph spacing included (verified: a heading
+    /// with `spacingBefore` 16 reports 16 + the box offset).
+    ///
+    /// The one mutable cache in this class, and safe: entries are keyed by
+    /// glyph location and refreshed whenever TextKit re-lays that line — the
+    /// same lifetime as TextKit's own glyph/fragment caches. Lines before an
+    /// edit keep their location and their offset; lines after it re-layout and
+    /// overwrite. Never cleared on invalidation: a partial re-layout would
+    /// drop baselines for lines that will not re-fire.
+    private(set) var baselines: [Int: CGFloat] = [:]
+
     func layoutManager(
         _ layoutManager: NSLayoutManager,
         shouldGenerateGlyphs glyphs: UnsafePointer<CGGlyph>,
@@ -94,6 +115,20 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
         return glyphRange.length
     }
 
+    /// Records the engine's proposed baseline for each line (see `baselines`).
+    /// Returning `true` keeps the proposed values — layout is untouched.
+    func layoutManager(
+        _ layoutManager: NSLayoutManager,
+        shouldSetLineFragmentRect lineFragmentRect: UnsafeMutablePointer<NSRect>,
+        lineFragmentUsedRect: UnsafeMutablePointer<NSRect>,
+        baselineOffset: UnsafeMutablePointer<CGFloat>,
+        in textContainer: NSTextContainer,
+        forGlyphRange glyphRange: NSRange
+    ) -> Bool {
+        baselines[glyphRange.location] = baselineOffset.pointee
+        return true
+    }
+
     /// The gap below a list-item row.
     ///
     /// The row's last content character carries `md.blockKind` for the row's own
@@ -117,9 +152,54 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
         lineSpacingAfterGlyphAt glyphIndex: Int,
         withProposedLineFragmentRect rect: NSRect
     ) -> CGFloat {
-        guard listItemSpacing > 0, let storage = layoutManager.textStorage,
+        guard let storage = layoutManager.textStorage,
             storage.length > 0
         else { return 0 }
+        // A ruled heading's rows (see `BlockStyle.ruleBottomShrink`): the
+        // style's after-spacing assumes the CJK fallback's descent — the
+        // larger of the descents a heading line can mix. A row whose faces
+        // descend less (a Latin-only heading: Open Sans only) gets the
+        // difference handed back here, so the rule→content distance stays the
+        // reference's `margin + 1` (the collapsed margin below the border)
+        // for every heading regardless of script. Additive-only by engine
+        // constraint — TextKit clamps negative returns (measured) — which is
+        // why the style shrinks by the CJK amount and this corrects upward.
+        // The row's fonts are read instead of the captured baseline: this
+        // delegate fires BEFORE `shouldSetLineFragmentRect` for the same row
+        // (measured), so the baseline map is empty here — but glyph
+        // generation has already substituted the fallback face into the
+        // storage's font attribute, which is exactly what the descent depends
+        // on. Only the row before other blocks gets it: a wrapped heading's
+        // earlier rows must not space themselves apart.
+        if let rowChars = ruledHeadingRowChars(layoutManager, glyphIndex: glyphIndex, storage: storage) {
+            // A later row of the same heading follows: no spacing between them.
+            let next = NSMaxRange(rowChars)
+            if next < storage.length,
+                storage.attribute(MarkdownAttribute.headingRuleGap, at: next, effectiveRange: nil) != nil
+            {
+                return 0
+            }
+            guard
+                let style = storage.attribute(
+                    .paragraphStyle, at: rowChars.location, effectiveRange: nil
+                ) as? NSParagraphStyle,
+                let baselineGap = storage.attribute(
+                    MarkdownAttribute.headingRuleGap, at: rowChars.location, effectiveRange: nil
+                ) as? CGFloat
+            else { return 0 }
+            var maxDescent: CGFloat = 0
+            storage.enumerateAttribute(.font, in: rowChars, options: []) { value, _, _ in
+                if let font = value as? NSFont {
+                    maxDescent = max(maxDescent, -font.descender)
+                }
+            }
+            guard maxDescent > 0 else { return 0 }
+            // The engine rounds the clamped line's descent to whole points.
+            let descUsed = maxDescent.rounded()
+            let needed = style.paragraphSpacingBefore + 1 - (descUsed - baselineGap)
+            return max(0, needed - style.paragraphSpacing)
+        }
+        guard listItemSpacing > 0 else { return 0 }
         func kind(at location: Int) -> String? {
             guard location >= 0, location < storage.length else { return nil }
             return storage.attribute(MarkdownAttribute.blockKind, at: location, effectiveRange: nil)
@@ -246,6 +326,29 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
             if let ahead = kind(at: location), !listKinds.contains(ahead) { return 0 }
         }
         return listItemSpacing
+    }
+
+    /// The character range of this row when it belongs to a ruled heading
+    /// (carries `md.headingRuleGap`), else nil. The row's glyph range comes
+    /// out with `withoutAdditionalLayout` — this fires mid-layout, and a
+    /// plain query could re-enter it.
+    private func ruledHeadingRowChars(
+        _ layoutManager: NSLayoutManager, glyphIndex: Int, storage: NSTextStorage
+    ) -> NSRange? {
+        var rowGlyphs = NSRange()
+        layoutManager.lineFragmentRect(
+            forGlyphAt: min(glyphIndex, storage.length - 1),
+            effectiveRange: &rowGlyphs, withoutAdditionalLayout: true
+        )
+        let rowChars = layoutManager.characterRange(
+            forGlyphRange: rowGlyphs, actualGlyphRange: nil
+        )
+        guard rowChars.length > 0, rowChars.location < storage.length,
+            storage.attribute(
+                MarkdownAttribute.headingRuleGap, at: rowChars.location, effectiveRange: nil
+            ) != nil
+        else { return nil }
+        return rowChars
     }
 }
 

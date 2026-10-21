@@ -285,6 +285,25 @@ enum BlockDecorator {
         ).map(\.rect)
     }
 
+    /// The heading rule's y for one line.
+    ///
+    /// The reference hangs the border-bottom at the heading's line-box
+    /// bottom. For a plain heading that is the strut's extent, expressed off
+    /// the engine baseline: `strutY` (the reference's own baseline→rule
+    /// distance — see `DecorationPlan.headingRule`). When the heading carries
+    /// inline code, the code box reaches below the strut (measured 2pt at h2
+    /// size) and the reference's border follows it down — anchoring to the
+    /// strut alone would draw the rule straight through the painted chip
+    /// (chip bottom 1118.97 vs strut anchor 1115.90 on the fixtures' h2 with
+    /// an inline code span). So the rule sits at the lower of the two: the
+    /// strut anchor, or the lowest chip's bottom edge plus the reference's
+    /// border-to-chip gap (measured 0.3pt: border top 1171.83 over chip box
+    /// bottom 1171.53). `chipRects` come in the same space as `strutY`.
+    static func headingRuleY(strutY: CGFloat, chipRects: [CGRect]) -> CGFloat {
+        guard let lowest = chipRects.map(\.maxY).max() else { return strutY }
+        return max(strutY, lowest + 0.3)
+    }
+
     /// Draws one rounded background-and-border box per code block.
     ///
     /// Typora paints a single box around the whole fence (`border: 1px solid
@@ -312,6 +331,10 @@ enum BlockDecorator {
             /// fence's fill hangs from (a fence inside a quote or list item
             /// indents with its container, like the reference's pre).
             var headIndent: CGFloat?
+            /// The rows resolve to a blockquote container: the reference's
+            /// blockquote carries 1em right padding and its pre paints inside
+            /// it, so the fill clamps to that edge.
+            var quoteNested = false
         }
         var boxes: [Int: Accumulator] = [:]
         for line in lines {
@@ -346,7 +369,22 @@ enum BlockDecorator {
                 if NSMaxRange(line.charRange) >= NSMaxRange(bodyRange) { sawLast = true }
             }
             var box = boxes[ownerID] ?? Accumulator(plan: plan, owner: ownerID)
-            box.rect = box.rect.map { $0.union(line.rect) } ?? line.rect
+            // The fill spans the block's body rows only. Delimiter rows reach
+            // here as their own fragments inside a container (the top-level
+            // emitter's rows glue into the boundary and never resolve to the
+            // fence), and unioning them grew every container fence's box by
+            // their full line height (measured 83.12 against 60.09).
+            if isBodyLine {
+                box.rect = box.rect.map { $0.union(line.rect) } ?? line.rect
+            }
+            if !box.quoteNested,
+                let containerKind = storage.attribute(
+                    MarkdownAttribute.blockKind, at: line.charRange.location,
+                    effectiveRange: nil
+                ) as? String
+            {
+                box.quoteNested = containerKind == BlockKind.blockquote.rawValue
+            }
             box.sawFirst = box.sawFirst || sawFirst
             box.sawLast = box.sawLast || sawLast
             if isBodyLine {
@@ -395,8 +433,12 @@ enum BlockDecorator {
                 // right edge and takes its left from the container column:
                 // width = container right - new left (the old maxX moved with
                 // the origin, so `maxX - minX` was a no-op and the box ran past
-                // the container's right edge by the whole origin shift).
-                let containerRight = rect.maxX
+                // the container's right edge by the whole origin shift). A
+                // quote's content box carries 1em right padding in the
+                // reference (`blockquote { padding: 0 1em }`) and its pre
+                // paints inside it.
+                let rightInset = box.quoteNested ? theme.bodyFontSize : 0
+                let containerRight = rect.maxX - rightInset
                 rect.origin.x = headIndent - (theme.codePaddingLeft ?? theme.codePadding)
                 rect.size.width = containerRight - rect.minX
             }
@@ -436,14 +478,42 @@ enum BlockDecorator {
             // (the item's marker) keys on `md.block`, a nested plan (a quote bar, a
             // code background inside an item) on `md.subBlock`.
             switch plan {
-            case let .headingRule(color):
+            case let .headingRule(color, baselineGap):
                 // Under the heading, not across it: the text view is flipped, so the
                 // bottom of the line fragment is `maxY`. Anchoring to `minY` drew the
                 // rule at the top of the line, straight through the glyphs.
+                //
+                // And anchoring to `maxY` alone put it in the paragraph's bottom
+                // margin: the fragment rect includes the 1rem `paragraphSpacing`,
+                // which measured 15pt of air under the ink against the reference's
+                // 3–3.5pt. The reference draws the rule at the heading line box's
+                // bottom; the engines place the same glyphs at different heights
+                // inside an identical box (TextKit clamps from the descent side,
+                // Chromium centres the strut), so the rule hangs off the line's real
+                // baseline — captured by the layout delegate — by the reference's
+                // own baseline→rule distance (`baselineGap`). Missing capture falls
+                // back to the old anchor; the dump comparison flags it.
+                let strutY = view.markerHider.baselines[lineCharRange.location].map {
+                    lineRect.minY + $0 + baselineGap
+                } ?? lineRect.maxY - EditorMetrics.hairline
+                // The reference's border follows an inline code box down when the
+                // heading carries one — see `headingRuleY`.
+                let chipRects: [CGRect]
+                if let storage = view.textStorage,
+                    let manager = view.layoutManager, let container = view.textContainer {
+                    chipRects = inlineCodeChipRuns(
+                        theme: theme,
+                        storage: storage, manager: manager, container: container,
+                        lineCharRange: lineCharRange
+                    ).map { $0.rect.offsetBy(dx: inset.width, dy: inset.height) }
+                } else {
+                    chipRects = []
+                }
+                let ruleY = headingRuleY(strutY: strutY, chipRects: chipRects)
                 context.setFillColor(color.cgColor)
                 context.fill(
                     CGRect(
-                        x: lineRect.minX, y: lineRect.maxY - EditorMetrics.hairline,
+                        x: lineRect.minX, y: ruleY,
                         width: lineRect.width, height: EditorMetrics.hairline
                     )
                 )

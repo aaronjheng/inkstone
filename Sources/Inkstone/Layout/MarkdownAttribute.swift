@@ -78,6 +78,15 @@ enum MarkdownAttribute {
     /// `code, tt` chrome: horizontal padding and the 1px border.
     static let codeRun = NSAttributedString.Key("md.codeRun")
 
+    /// `md.headingRuleGap` - a ruled heading's baseline→rule distance (see
+    /// `DecorationPlan.headingRule`), carried on the heading's text so the
+    /// layout delegate can recognize its rows and correct the after-spacing
+    /// for the faces actually on the line (`MarkerHider
+    /// .lineSpacingAfterGlyphAt`; the style shrinks by the CJK fallback's
+    /// descent model, a Latin-only row hands the difference back). The value
+    /// is the build-time `CGFloat` the rule hangs by.
+    static let headingRuleGap = NSAttributedString.Key("md.headingRuleGap")
+
     /// Reads the hidden flag at `location` in an O(1)-amortised way.
     static func isHidden(_ text: NSAttributedString, at location: Int) -> Bool {
         guard location >= 0, location < text.length else { return false }
