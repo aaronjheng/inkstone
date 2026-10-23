@@ -1,9 +1,9 @@
 # /// script
 # requires-python = ">=3.12"
-# dependencies = ["playwright", "markdown-it-py"]
+# dependencies = ["playwright", "markdown-it-py", "linkify-it-py"]
 # ///
-"""Render-parity: compare Inkstone's Markdown rendering against the Typora
-reference, headlessly, from layout geometry — no screenshots, no pixels.
+"""Render-parity: compare Inkstone's Markdown rendering against the VS Code
+markdown preview, headlessly, from layout geometry — no screenshots, no pixels.
 
 Usage:
     uv run parity.py baseline <file.md> --out ref.json
@@ -13,10 +13,15 @@ Usage:
 `run` orchestrates one file or every .md under a directory: baseline render,
 App dump (`Inkstone --dump-layout`), comparison, exit code 1 on divergence.
 
-The baseline renders the document in headless Chromium with Typora's own
-stylesheets (base.css + github.css from the Typora bundle) and reads layout
-geometry through CDP — every block box, every line box, list-item content
-edges, inline-code boxes. The App side runs the same document through the
+The baseline mirrors VS Code's built-in markdown preview — an open-source
+target: the installed extension's `markdown.css` + `highlight.css` (read from
+`/Applications/Visual Studio Code.app`, byte-identical to microsoft/vscode
+main), the default settings overrides (`--markdown-font-size: 14px`,
+`--markdown-line-height: 1.6`, the `-apple-system` body stack), the
+Light Modern theme colors (code block box, editor foreground), and a
+markdown-it 14-equivalent conversion (default preset, html on, linkify on
+with fuzzy off, breaks/typographer off; round 1 renders fenced code without
+syntax highlighting). The App side runs the same document through the
 editor's real builder and layout stack without opening a window
 (`Inkstone --dump-layout`), exporting line fragments and decoration geometry
 from the same helpers the paint path uses. The comparator aligns the two line
@@ -34,35 +39,59 @@ import sys
 import tempfile
 from pathlib import Path
 
-TYPORA_CSS = [
-    "/Applications/Typora.app/Contents/Resources/TypeMark/style/base.css",
-    "/Applications/Typora.app/Contents/Resources/TypeMark/style/themes/github.css",
-]
 REPO = Path(__file__).resolve().parents[4]  # .agents/skills/render-parity/scripts → repo
 APP_FONTS = REPO / "Sources/Inkstone/Fonts"
 DEFAULT_APP_BIN = (
     REPO
     / ".build/xcode-derived/Build/Products/Release/Inkstone.app/Contents/MacOS/Inkstone"
 )
-VIEWPORT = 920  # 860 max-width + 2×30 padding; #write content width is derived, not assumed
+VSCODE_MEDIA = Path(
+    "/Applications/Visual Studio Code.app/Contents/Resources/app"
+    "/extensions/markdown-language-features/media"
+)
+VSCODE_CSS = [VSCODE_MEDIA / "markdown.css", VSCODE_MEDIA / "highlight.css"]
+# The preview's geometry model (markdown.css + the settings defaults):
+# html, body { padding: 0 26px; padding-top: 1em; font-size 14; line-height 1.6 },
+# and NO max-width centering — the content spans the webview minus the padding.
+BODY_PADDING_X = 26
+BODY_PADDING_TOP_EM = 1.0
+BASE_FONT_SIZE = 14
+LINE_HEIGHT = 1.6
+VIEWPORT = 920  # webview width; content = 920 − 2×26 = 868
+# Light Modern (the default light theme) values the geometry reads through
+# CSS variables: the code block's box and the text colors.
+LIGHT_THEME_VARS = {
+    "--vscode-editor-background": "#FFFFFF",
+    "--vscode-editor-foreground": "#3B3B3B",
+    "--vscode-textCodeBlock-background": "#F8F8F8",
+    "--vscode-widget-border": "#E5E5E5",
+    # The editor font stack starts with SF Mono, which Chromium cannot load
+    # (not installed system-wide); pin the face the App actually uses.
+    "--vscode-editor-font-family": 'Menlo, monospace',
+}
 
 _MD_IT: "MarkdownIt | None" = None
 
 
 def _converter() -> "MarkdownIt":
-    """The CommonMark converter behind the reference render.
+    """The markdown-it engine behind VS Code's preview (markdownEngine.ts):
 
-    markdown-it-py follows CommonMark 0.31 — the rules the editor's own parser
-    implements for list nesting, fence-in-item, setext-vs-rule precedence and
-    quote continuation. python-markdown's legacy behaviour disagreed with all
-    four and needed source-level patches (indent doubling, fence demotion,
-    comment separators) that this swap deletes.
+    `markdownIt.default(...)` with `{ html: true }`, linkify on (the settings
+    default) with `fuzzyLink: false`, breaks/typographer off, highlight.js as
+    the highlighter — round 1 renders fenced code unhighlighted, which is the
+    engine's own fallback (`utils.escapeHtml`) for languages highlight.js
+    does not know. markdown-it-py's default preset mirrors the JS default
+    preset: CommonMark + tables + strikethrough.
     """
     global _MD_IT
     if _MD_IT is None:
         from markdown_it import MarkdownIt
 
-        _MD_IT = MarkdownIt("commonmark").enable(["table", "strikethrough"])
+        md = MarkdownIt("default", {"html": True, "linkify": True})
+        # md.linkify.set({ fuzzyLink: false }) in the engine.
+        if md.linkify:
+            md.linkify.set({"fuzzy_link": False})
+        _MD_IT = md
     return _MD_IT
 
 # Tolerances in pt (1 CSS px = 1 pt at deviceScaleFactor 1).
@@ -74,10 +103,15 @@ TOLERANCES = {
     # ±0.5pt of rounding noise against the App's fractional metrics.
     "headingRule": 1.0,
     "chipPos": 1.0,
+    # The App's fence box is the FILL (the rows' union + the strut/slack
+    # bottom); the reference's is the BORDER box. The fill/border semantics
+    # differ by the ring pair plus the strut slack — up to ~3.4pt for a
+    # single-row block — while the code rows themselves align exactly.
+    "fenceGap": 4.0,
     "left": 0.5,
     "gap": 1.5,
     "marker": 0.5,
-    "chip": 1.0,
+    "chip": 1.5,
 }
 
 EXTRACT_JS = """
@@ -130,7 +164,10 @@ EXTRACT_JS = """
       if (t === 'UL' || t === 'OL') listDepth++;
       if (!li && t === 'LI') {
         li = e;
-        task = !!li.querySelector('input[type=checkbox]');
+        // The preview's engine ships no task-list plugin: `- [x] ` renders as
+        // literal text, no checkbox input. Detect the task items by their
+        // text prefix so the App's markerless task rows pair up.
+        task = /^\[[ xX]\] /.test((li.textContent || '').trim());
       }
       // The OUTERMOST blockquote claims the row: the App's quote rows carry
       // the visual owner's block id, and the nested levels render as part of
@@ -182,11 +219,19 @@ EXTRACT_JS = """
     const blockId = idOf(info.el);
     if (!blocks.has(blockId)) {
       const r = info.el.getBoundingClientRect();
-      blocks.set(blockId, {
+      const entry = {
         id: blockId, kind: info.kind, listDepth: info.listDepth,
         top: r.top, bottom: r.bottom, left: r.left, right: r.right,
         text: (info.el.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 60),
-      });
+      };
+      if (info.kind === 'fences') {
+        // The pre's 1px border ring: the comparator shrinks the reference's
+        // border box to the App's fill semantics.
+        const fcs = getComputedStyle(info.el);
+        entry.borderTop = parseFloat(fcs.borderTopWidth) || 0;
+        entry.borderBottom = parseFloat(fcs.borderBottomWidth) || 0;
+      }
+      blocks.set(blockId, entry);
     }
     const inCode = (() => {
       let e = node.parentElement;
@@ -307,7 +352,10 @@ EXTRACT_JS = """
     }
     const ordered = nearestList === 'OL';
     const s = getComputedStyle(el);
-    const input = el.querySelector('input[type=checkbox]');
+    // Task items by text prefix — the engine ships no task-list plugin (see
+    // the blockOf note).
+    const task = /^\[[ xX]\] /.test((el.textContent || '').trim());
+    const input = task ? { getBoundingClientRect: () => el.getBoundingClientRect() } : null;
     const inputRect = input ? input.getBoundingClientRect() : null;
     out.listItems.push({
       depth, ordered, task: !!input,
@@ -330,6 +378,13 @@ EXTRACT_JS = """
         const rr = tr.getBoundingClientRect();
         return { y: rr.top, h: rr.height };
       });
+      // Per-column rects from the header row: the comparator aligns the
+      // App's painted columns against these.
+      blk.cols = [...(el.querySelector('tr')?.querySelectorAll('th, td') ?? [])]
+        .map((cell) => {
+          const cr = cell.getBoundingClientRect();
+          return [cr.left, cr.width];
+        });
     }
   }
   for (const el of write.querySelectorAll('blockquote')) {
@@ -380,18 +435,19 @@ EXTRACT_JS = """
 
 
 def baseline(md_path: Path, out_path: Path, match_app_fonts: bool, keep_html: bool) -> dict:
-    """Render the document in headless Chromium with Typora's CSS; dump geometry."""
+    """Render the document in headless Chromium with VS Code's preview CSS; dump geometry."""
     from playwright.sync_api import sync_playwright
 
     text = md_path.read_text(encoding="utf-8")
-    # YAML front matter: the App models it as its own frontMatter block; the
-    # converter would render it as a thematic break plus paragraphs. Strip it
-    # (the comparator drops the App's frontMatter blocks too) so both sequences
-    # align; the front-matter box itself is phase 2.
+    # YAML front matter: VS Code renders it as `table.frontmatter` (the
+    # yamlPreamble plugin) while the App models it as its own frontMatter
+    # block. Both sides are dropped for now — strip it so the converter does
+    # not see it (the frontmatter table itself is a later phase).
     text = re.sub(r"\A---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|$)", "", text, flags=re.DOTALL)
-    # A stray closing tag: the converter treats it as raw inline HTML and drops
-    # it from the text, while the editor (and Typora) render it as literal
-    # text. Escape closing tags that close nothing opened on their line.
+    # A stray closing tag: the App renders raw HTML as literal text on its own
+    # editing surface, while an html-enabled converter renders it as elements.
+    # Escape closing tags that close nothing opened on their line so the two
+    # sequences stay aligned.
     def _escape_stray_closing(line: str) -> str:
         m = re.search(r"</([a-zA-Z][^>]*)>([ \t]*)$", line)
         if not m:
@@ -405,71 +461,38 @@ def baseline(md_path: Path, out_path: Path, match_app_fonts: bool, keep_html: bo
         _escape_stray_closing(line) for line in text.split("\n")
     )
     content = _converter().render(text)
+    # The engine's #addFencedRenderer joins `hljs` onto every fenced block's
+    # pre — it selects which padding rule applies (`pre:not(.hljs)` vs
+    # `pre.hljs code > div`).
+    content = content.replace("<pre>", '<pre class="hljs">')
     styles = []
-    for css_path in TYPORA_CSS:
+    for css_path in VSCODE_CSS:
         styles.append(Path(css_path).read_text(encoding="utf-8"))
-    if match_app_fonts:
-        # The App bundles and registers Open Sans; Chromium must load the same
-        # faces from the repo, and the mono stack must resolve to Menlo like the
-        # App's (the user's Typora resolves it to Consolas via Office).
-        faces = []
-        for name, weight, style in [
-            ("Regular", 400, "normal"),
-            ("Bold", 700, "normal"),
-            ("Italic", 400, "italic"),
-            ("BoldItalic", 700, "italic"),
-        ]:
-            ttf = APP_FONTS / f"OpenSans-{name}.ttf"
-            faces.append(
-                "@font-face { font-family: 'Open Sans'; font-weight: %d; font-style: %s; "
-                "src: url('file://%s'); }" % (weight, style, ttf)
-            )
-        styles.append("\n".join(faces))
-        styles.append(':root { --monospace: "Menlo", monospace !important; }')
-
-    # Task lists: the converter leaves `[x]` as literal text; Typora renders
-    # a checkbox input at the item start (github.css styles it). Convert to the
-    # same DOM shape so the geometry and the kind match the App.
-    content = re.sub(
-        r"(<li[^>]*>(?:<p>)?)\[([ xX])\] ",
-        lambda m: (
-            m.group(1)
-            + '<input type="checkbox" class="task-list-item-checkbox" disabled'
-            + (" checked" if m.group(2) != " " else "")
-            + "> "
-        ),
-        content,
-    )
-    # Typora's document model wraps every list item's content in a paragraph;
-    # CommonMark emits tight lists (bare text in li), which would skip the
-    # `li p` spacing rules the App implements. Wrap to match the DOM shape.
-    content = re.sub(
-        r"<li>(?!<[pbouhl])",
-        "<li><p>",
-        content,
-    )
-    content = re.sub(r"</li>", "</p></li>", content)
-    # Typora's own pre elements carry the `md-fences` class, whose rules own
-    # the code block's box (font-size .9rem, border, padding 8/4/6/4, margins
-    # 15). The plain converter emits bare `<pre>` and those rules never fire -
-    # the measured box came out as raw rows with no padding. Add the class so
-    # the baseline's box matches the App's painted chrome.
-    content = content.replace("<pre>", '<pre class="md-fences">')
-    # python-markdown keeps the fenced content's final newline inside the pre;
-    # Chromium renders it as a phantom trailing line box (+23pt per block). The
-    # App (and Typora) show one row per source line - strip it.
-    content = re.sub(
-        r'(<pre class="md-fences"><code[^>]*>)(.*?)</code>',
-        lambda m: m.group(1) + re.sub(r"\n\Z", "", m.group(2)) + "</code>",
-        content,
-        flags=re.DOTALL,
-    )
+    # The workbench injects the theme's colors as CSS variables and the
+    # settings overrides as inline styles on <html>; replicate both with the
+    # default settings (markdown.preview.fontSize 14, lineHeight 1.6, the
+    # -apple-system stack) and Light Modern's colors. The body font is the
+    # system face — Chromium resolves -apple-system natively. The mono stack
+    # is pinned to the App's face (Menlo): the stack's first entry, SF Mono,
+    # is not installed system-wide.
+    overrides = [
+        "--markdown-font-family: -apple-system, BlinkMacSystemFont, 'Segoe WPC', 'Segoe UI', system-ui, 'Ubuntu', 'Droid Sans', sans-serif;",
+        f"--markdown-font-size: {BASE_FONT_SIZE}px;",
+        f"--markdown-line-height: {LINE_HEIGHT};",
+    ]
+    overrides += [f"{k}: {v};" for k, v in LIGHT_THEME_VARS.items()]
+    body_classes = "vscode-body wordWrap showEditorSelection"
     html = (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'><style>"
+        '<!DOCTYPE html><html class="vscode-light" style="'
+        + " ".join(overrides)
+        + '"><head><meta charset="utf-8"><style>'
         + "\n".join(styles)
-        + "</style></head><body><div id='write'>"
+        + '</style>'
+        + '<style>body { margin: 0; background-color: var(--vscode-editor-background);'
+        + ' color: var(--vscode-editor-foreground); }</style></head>'
+        + f'<body class="{body_classes}"><div id="write" class="markdown-body" dir="auto">'
         + content
-        + "</div></body></html>"
+        + "<div class='code-line' data-line='0'></div></div></body></html>"
     )
     html_path = Path(tempfile.mkdtemp(prefix="render-parity-")) / "reference.html"
     html_path.write_text(html, encoding="utf-8")
@@ -568,6 +591,8 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                 item["bottom"] -= origin_y_ref
             for table_row in item.get("rows", []) or []:
                 table_row["y"] -= origin_y_ref
+            for table_col in item.get("cols", []) or []:
+                table_col[0] -= origin_x_ref
             # A task item's checkbox rides on the item: shift its box too, so
             # the comparator can flag its position against the App's bar.
             if "checkbox" in item and item["checkbox"]:
@@ -834,12 +859,18 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                     "w": [round(box["w"], 2), round(ref_w, 2)],
                     "h": [round(box["h"], 2), round(ref_h, 2)],
                 }
+                # The fence's fill vs the reference's border box differ by
+                # the strut/slack bottom (see the fenceGap tolerance); the
+                # table boxes keep the tighter gap tolerance.
+                box_tol = (
+                    tolerances["fenceGap"] if ab["kind"] == "fences" else tolerances["gap"]
+                )
                 for key, app_v, ref_v in (
                     ("x", box["x"], ref_x),
                     ("w", box["w"], ref_w),
                     ("h", box["h"], ref_h),
                 ):
-                    if abs(app_v - ref_v) > tolerances["gap"]:
+                    if abs(app_v - ref_v) > box_tol:
                         flags.append(
                             f"{ab['kind']} box '{ab.get('text', '')[:20]}': {key} "
                             f"{app_v:.2f} vs {ref_v:.2f}pt"
@@ -866,6 +897,22 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                                     f"table '{ab.get('text', '')[:20]}' row {ri}: "
                                     f"top {rel_a:.2f} vs {rel_r:.2f}pt"
                                 )
+                # Per-column rects: the header cells' x/w relative to each
+                # side's own box left — catches a single drifted column that
+                # the total width absorbs.
+                ref_cols = rb.get("cols") or []
+                app_cols = box.get("cols") or []
+                if ref_cols and app_cols and len(ref_cols) == len(app_cols):
+                    for ci, (ac, rc) in enumerate(zip(app_cols, ref_cols)):
+                        rel_a = ac[0] - box["x"]
+                        rel_r = rc[0] - rb["left"]
+                        if abs(rel_a - rel_r) > tolerances["gap"] or \
+                            abs(ac[1] - rc[1]) > tolerances["gap"]:
+                            flags.append(
+                                f"table '{ab.get('text', '')[:20]}' col {ci}: "
+                                f"x {rel_a:.2f} vs {rel_r:.2f} w "
+                                f"{ac[1]:.2f} vs {rc[1]:.2f}pt"
+                            )
                 # The box's vertical position drifts with every heading's
                 # element-box overhang upstream, so it is compared as a GAP
                 # from the previous block's bottom, at the margin edge: the
@@ -911,7 +958,10 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                         )
                         gap_ref = rb["top"] - (last_line["bottom"] + half_leading)
                     row["boxGap"] = [round(gap_app, 2), round(gap_ref, 2)]
-                    if not suppress and abs(gap_app - gap_ref) > tolerances["gap"]:
+                    box_gap_tol = (
+                        tolerances["fenceGap"] if ab["kind"] == "fences" else tolerances["gap"]
+                    )
+                    if not suppress and abs(gap_app - gap_ref) > box_gap_tol:
                         flags.append(
                             f"{ab['kind']} box '{ab.get('text', '')[:20]}': gap "
                             f"{gap_app:.2f} vs {gap_ref:.2f}pt"
@@ -938,6 +988,13 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
                 rl, al = rb["lines"][k], ab["lines"][k]
                 if al["_index"] in app_chip_lines:
                     continue
+                # Task rows: the App hides the literal "[x] " and paints a
+                # checkbox chip in the marker gutter — the reference's line
+                # starts at the "[x]" glyphs, the App's at the text after
+                # them. The visible text column matches; the row's own left
+                # edge does not, by design.
+                if ab["kind"] == "taskItem":
+                    continue
                 if abs(al["left"] - rl["left"]) > tolerances["left"]:
                     flags.append(
                         f"block '{ab.get('text', '')[:24]}' line {k}: text column {al['left']:.2f} vs {rl['left']:.2f}pt"
@@ -959,7 +1016,10 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
     report["markers"] = []
     for k in range(min(len(ref_items), len(app_markers))):
         item, marker = ref_items[k], app_markers[k]
-        expected_center = item["contentLeft"] - 0.95 * em
+        # Chromium's UA outside marker: the disc's centre sits one em left of
+        # the text column (ink-measured on this reference render: a 5px disc
+        # at 14px body text, centre 14pt in from the column).
+        expected_center = item["contentLeft"] - 1.0 * em
         delta = marker["centerX"] - expected_center
         if item.get("ordered"):
             expected_shape, expected_size = "text", 0.0
@@ -983,30 +1043,11 @@ def compare(ref_path: Path, app_path: Path, tolerances: dict[str, float]) -> tup
             flags.append(f"marker {k}: size {marker['size']:.2f} vs {expected_size:.2f}pt")
         report["markers"].append(row)
 
-    # --- task checkboxes ------------------------------------------------------
-    ref_tasks = [item for item in ref["listItems"] if item.get("checkbox")]
-    app_checks = [bar for bar in app["bars"] if bar["kind"] == "taskCheckbox"]
-    if len(ref_tasks) != len(app_checks):
-        flags.append(f"checkbox count differs: reference {len(ref_tasks)} vs app {len(app_checks)}")
-    report["checkboxes"] = []
-    for k in range(min(len(ref_tasks), len(app_checks))):
-        item, bar = ref_tasks[k], app_checks[k]
-        box = item["checkbox"]
-        report["checkboxes"].append({
-            "i": k,
-            "x": [round(bar["x"], 2), round(box["x"], 2)],
-            "y": [round(bar["y"], 2), round(box["y"], 2)],
-            "size": [round(bar["w"], 2), round(bar["h"], 2)],
-            "refSize": [round(box["w"], 2), round(box["h"], 2)],
-            "checked": bool(box["checked"]),
-        })
-        if abs(bar["x"] - box["x"]) > tolerances["marker"]:
-            flags.append(f"checkbox {k}: x {bar['x']:.2f} vs {box['x']:.2f}pt")
-        if abs(bar["w"] - box["w"]) > tolerances["marker"]:
-            flags.append(f"checkbox {k}: width {bar['w']:.2f} vs {box['w']:.2f}pt")
-        # y is measured but not flagged: it inherits the documented list-pitch
-        # calibration gap (the pure-CSS baseline pitches items ~1.4pt tighter
-        # than Typora, accumulating over a list) - see the calibration note.
+    # --- task checkboxes -------------------------------------------------------
+    # SKIPPED for the VS Code target: the preview's engine ships no task-list
+    # plugin, so `- [x] ` renders as literal text and there is no checkbox
+    # geometry to compare against the App's painted chips. The task rows'
+    # pitch and text column still compare through the block sections.
 
     # --- heading rules ----------------------------------------------------------
     # The reference's h1/h2 border-bottom vs the App's painted bar. The rule

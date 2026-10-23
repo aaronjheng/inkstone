@@ -114,9 +114,11 @@ enum LayoutDump {
         /// Painted row tops, exported only for `tableBox`: the comparator
         /// checks each row's top against the reference's `tr` rects.
         var rows: [CGFloat]?
+        /// Per-column `[x, w]` rects, exported only for `tableBox`.
+        var cols: [[CGFloat]]?
 
         enum CodingKeys: String, CodingKey {
-            case line, kind, x, y, baseline, rows
+            case line, kind, x, y, baseline, rows, cols
             case width = "w"
             case height = "h"
         }
@@ -127,7 +129,7 @@ enum LayoutDump {
             // swiftlint:disable:next identifier_name
             line: Int, kind: String, x: CGFloat, y: CGFloat,
             width: CGFloat, height: CGFloat, baseline: CGFloat? = nil,
-            rows: [CGFloat]? = nil
+            rows: [CGFloat]? = nil, cols: [[CGFloat]]? = nil
         ) {
             self.line = line
             self.kind = kind
@@ -137,6 +139,7 @@ enum LayoutDump {
             self.height = height
             self.baseline = baseline
             self.rows = rows
+            self.cols = cols
         }
     }
 
@@ -146,6 +149,7 @@ enum LayoutDump {
         var markers: [DumpMarker]
         var chips: [DumpChip]
         var bars: [DumpBar]
+        /// TEMPORARY round-1 debug: every layout fragment, skipped or not.
     }
 
     /// Runs the dump from raw command-line arguments. Returns the exit status.
@@ -161,7 +165,7 @@ enum LayoutDump {
             return arguments[index + 1]
         }
         let width = CGFloat(value("--width").flatMap(Double.init) ?? 860)
-        let themeID = value("--theme") ?? "github"
+        let themeID = value("--theme") ?? "vscode"
         let out = value("--out")
 
         let source: String
@@ -174,7 +178,7 @@ enum LayoutDump {
 
         // Bundled faces must resolve before anything measures text.
         FontRegistration.registerBundledFonts()
-        let theme = BuiltInTheme.theme(named: themeID) ?? BuiltInTheme.github
+        let theme = BuiltInTheme.theme(named: themeID) ?? BuiltInTheme.vscode
         let document = BlockParser.parse(source)
         let context = LayoutContext(
             containerWidth: width,
@@ -190,6 +194,7 @@ enum LayoutDump {
         let markerHider = MarkerHider()
         markerHider.listItemSpacing = theme.listItemSpacing
         markerHider.quoteLevelSpacing = theme.blockMargin
+        markerHider.quoteParagraphSpacing = theme.blockMargin
         manager.delegate = markerHider
         let container = NSTextContainer(
             size: CGSize(width: width, height: CGFloat.greatestFiniteMagnitude)
@@ -311,6 +316,8 @@ enum LayoutDump {
         var markers: [DumpMarker] = []
         var chips: [DumpChip] = []
         var bars: [DumpBar] = []
+        // TEMPORARY round-1 debug: every layout fragment, skipped or not,
+        // with the style numbers the spacing chains depend on.
         // Painted block boxes (fenced code bodies, painted tables): accumulated
         // over the block's fragments with the same geometry the decoration layer
         // paints (`paintCodeBlocks` / `paintTable`), then exported as bars so the
@@ -671,6 +678,15 @@ enum LayoutDump {
             // always apply (the painter gates them on viewport visibility).
             rect.origin.y -= topInset
             rect.size.height += topInset + bottomInset
+            // The same strut/slack bottom the painter grows: the preview's
+            // `pre` content box bottoms out at the inline-block code plus a
+            // 1.39pt descent slack, and never below the strut (body
+            // line-height 1.6) — a single-row block is strut-height, not
+            // code-row-height (measured 22.39 / 39.39 / 58.39 for 1/2/3 rows).
+            rect.size.height = max(
+                rect.height + 1.39,
+                theme.bodyLineHeight * theme.bodyFontSize
+            )
             // The fill's left edge is the container column the fence hangs in:
             // the body rows' head indent minus the code padding. A nested fence
             // (inside a quote or list item) then indents with its container
@@ -685,7 +701,7 @@ enum LayoutDump {
                 // quote's content box carries 1em right padding in the
                 // reference (`blockquote { padding: 0 1em }`) and its pre
                 // paints inside it.
-                let rightInset = box.quoteNested ? theme.bodyFontSize : 0
+                let rightInset = box.quoteNested ? theme.quoteRightPadding : 0
                 let containerRight = rect.maxX - rightInset
                 rect.origin.x = headIndent - (theme.codePaddingLeft ?? theme.codePadding)
                 rect.size.width = containerRight - rect.minX
@@ -711,8 +727,9 @@ enum LayoutDump {
             bars.append(
                 DumpBar(
                     line: box.line, kind: "tableBox", x: box.rect.minX,
-                    y: top, width: box.rect.width,
-                    height: box.grid.totalHeight, rows: rows
+                    y: top, width: box.grid.totalWidth,
+                    height: box.grid.totalHeight, rows: rows,
+                    cols: box.grid.columnRects
                 )
             )
         }
@@ -722,7 +739,7 @@ enum LayoutDump {
                 source: (path as NSString).lastPathComponent, width: width,
                 theme: theme.identifier, generator: "inkstone-dump"
             ),
-            lines: lines, markers: markers, chips: chips, bars: bars
+            lines: lines, markers: markers, chips: chips, bars: bars,
         )
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]

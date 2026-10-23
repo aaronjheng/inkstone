@@ -14,7 +14,7 @@ enum ExportCSS {
         let link = hex(theme.link.nsColor)
         let code = hex(theme.codeText.nsColor)
         let codeBackground = hex(theme.codeBlockBackground.nsColor)
-        let inlineCodeBackground = hex(theme.inlineCodeBackground.nsColor)
+        let inlineCodeBackground = theme.inlineCodeBackground.map { hex($0.nsColor) } ?? "transparent"
         let quoteBar = hex(theme.quoteBar.nsColor)
         let border = hex(theme.tableBorder.nsColor)
         let marker = hex(theme.marker.nsColor)

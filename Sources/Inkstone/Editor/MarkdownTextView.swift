@@ -69,6 +69,7 @@ final class MarkdownTextView: NSTextView {
         self.theme = theme
         hider.listItemSpacing = theme.listItemSpacing
         hider.quoteLevelSpacing = theme.blockMargin
+        hider.quoteParagraphSpacing = theme.blockMargin
         let storage = NSTextStorage()
         let manager = NSLayoutManager()
         let container = NSTextContainer(
@@ -561,6 +562,7 @@ final class MarkdownTextView: NSTextView {
         self.theme = theme
         hider.listItemSpacing = theme.listItemSpacing
         hider.quoteLevelSpacing = theme.blockMargin
+        hider.quoteParagraphSpacing = theme.blockMargin
         // Transparent on purpose: block backgrounds are painted by `BlockDecorator`
         // from `draw(_:)`, *before* `super.draw`, so they sit under the glyphs. An
         // opaque background here would erase them.

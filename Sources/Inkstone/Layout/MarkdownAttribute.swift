@@ -87,6 +87,14 @@ enum MarkdownAttribute {
     /// is the build-time `CGFloat` the rule hangs by.
     static let headingRuleGap = NSAttributedString.Key("md.headingRuleGap")
 
+    /// `md.headingRuleAttrDesc` - the ruled heading's attribute face's
+    /// descender magnitude, carried next to `md.headingRuleGap`: the layout
+    /// delegate's spacing correction compares the row's actual descent
+    /// against the face the style assumed, and the attribute face is not
+    /// reliably recoverable from the row's fonts (the hidden marker runs
+    /// carry their own).
+    static let headingRuleAttrDesc = NSAttributedString.Key("md.headingRuleAttrDesc")
+
     /// Reads the hidden flag at `location` in an O(1)-amortised way.
     static func isHidden(_ text: NSAttributedString, at location: Int) -> Bool {
         guard location >= 0, location < text.length else { return false }

@@ -130,7 +130,8 @@ enum BlockDecorator {
     /// The reference leaves `list-style-type` to the browser, so the outside
     /// marker is the UA ladder - disc, circle, square by depth - and it hangs
     /// like a browser marker: centred a fixed em-gap left of the text column
-    /// (measured 0.95em on a rendered document), not mid-indent, so the gap
+    /// (ink-measured 1.0em on the VS Code reference render), not mid-indent,
+    /// so the gap
     /// stays constant at every nesting level. Drawing the `•` glyph instead
     /// rendered it at ~60% of the reference size and off-centre, which is why
     /// shapes are painted. Exposed for the headless layout dump so the exported
@@ -159,7 +160,11 @@ enum BlockDecorator {
         text: String, width: CGFloat, lineRect: NSRect, theme: EditorTheme
     ) -> ListMarkerGeometry {
         let em = theme.bodyFontSize
-        let center = CGPoint(x: lineRect.minX + width - em * 0.95, y: lineRect.midY)
+        // Chromium's UA outside marker: the disc's centre sits exactly one em
+        // left of the text column (ink-measured on the VS Code reference
+        // render: the 5px disc at 14px body text centres 14pt in from the
+        // column).
+        let center = CGPoint(x: lineRect.minX + width - em, y: lineRect.midY)
         switch text {
         case "•":
             return ListMarkerGeometry(shape: .disc, center: center, size: em * 0.375)
@@ -283,15 +288,21 @@ enum BlockDecorator {
             }
             let absoluteBaseline = bounding.minY + baseline
             let contentCenter = baseline - (font.ascender + font.descender) / 2
-            let padding = EditorMetrics.tiny
+            // The rect is what the decoration layer paints: a padded, ringed
+            // box for themes that chip inline code, and the bare mono font
+            // box for themes that render it as plain text (VS Code) —
+            // exactly what the reference's `code` element rect reports.
+            let painted = theme.inlineCodeBackground != nil
+            let ring: CGFloat = painted ? EditorMetrics.hairline : 0
+            let padding: CGFloat = painted ? EditorMetrics.tiny : 0
             runs.append(
                 ChipRun(
                     rect: CGRect(
-                        x: xStart - padding - EditorMetrics.hairline,
+                        x: xStart - padding - ring,
                         y: bounding.minY + contentCenter - contentHeight / 2
-                            - EditorMetrics.hairline,
-                        width: xEnd - xStart + (padding + EditorMetrics.hairline) * 2,
-                        height: contentHeight + EditorMetrics.hairline * 2
+                            - ring,
+                        width: xEnd - xStart + (padding + ring) * 2,
+                        height: contentHeight + ring * 2
                     ),
                     fontSize: font.pointSize,
                     fontBox: contentHeight,
@@ -439,6 +450,15 @@ enum BlockDecorator {
             if box.sawLast {
                 rect.size.height += bottomInset
             }
+            // The preview's `pre` content box bottoms out at the inline-block
+            // code plus a 1.39pt descent slack, and never below the strut
+            // (body line-height 1.6): a single-row block is strut-height, not
+            // code-row-height (measured 22.39 / 39.39 / 58.39 for 1/2/3
+            // rows). Grow the fill to that at the bottom.
+            rect.size.height = max(
+                rect.height + 1.39,
+                theme.bodyLineHeight * theme.bodyFontSize
+            )
             // The fill's left edge is the container column the fence hangs in:
             // the body rows' head indent minus the code padding. A fence inside
             // a quote or list item then indents with its container exactly like
@@ -454,7 +474,7 @@ enum BlockDecorator {
                 // quote's content box carries 1em right padding in the
                 // reference (`blockquote { padding: 0 1em }`) and its pre
                 // paints inside it.
-                let rightInset = box.quoteNested ? theme.bodyFontSize : 0
+                let rightInset = box.quoteNested ? theme.quoteRightPadding : 0
                 let containerRight = rect.maxX - rightInset
                 rect.origin.x = headIndent - (theme.codePaddingLeft ?? theme.codePadding)
                 rect.size.width = containerRight - rect.minX
@@ -649,7 +669,11 @@ enum BlockDecorator {
                     )
                 )
             case let .inlineCode(background, radius):
-                guard let storage = view.textStorage,
+                // A nil background = the theme renders inline code as bare
+                // text (VS Code): the plan only drives the headless dump's
+                // chip export.
+                guard let background,
+                    let storage = view.textStorage,
                     let manager = view.layoutManager, let container = view.textContainer,
                     !isPainted(lineCharRange, in: view)
                 else { break }
@@ -732,7 +756,7 @@ enum BlockDecorator {
                     ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
                 paintTable(
                     grid, top: lineRect.minY + margin, left: lineRect.minX,
-                    width: lineRect.width, theme: theme, context: context
+                    width: grid.totalWidth, theme: theme, context: context
                 )
             case .emojiGlyph:
                 // Painted from the block's first line only; every fragment of
@@ -910,26 +934,33 @@ enum BlockDecorator {
         context.setFillColor(theme.tableStripe.nsColor.cgColor)
         context.fill(CGRect(x: box.minX, y: box.minY, width: box.width, height: grid.rowHeights.first ?? grid.rowHeight))
 
-        context.setStrokeColor(theme.tableBorder.nsColor.cgColor)
         context.setLineWidth(EditorMetrics.hairline)
-        for separatorY in tops.dropFirst() {
+        for (index, separatorY) in tops.dropFirst().enumerated() {
+            // `tbody tr + tr td { border-top: 1px }` in the preview's gray;
+            // the header's own border-bottom is the darker `th` rule.
+            context.setStrokeColor(
+                (index == 0 ? theme.tableHeaderBorder : theme.tableBorder).nsColor.cgColor
+            )
             context.move(to: CGPoint(x: box.minX, y: separatorY))
             context.addLine(to: CGPoint(x: box.maxX, y: separatorY))
+            context.strokePath()
         }
-        context.strokePath()
-        context.stroke(box.insetBy(dx: 0.5, dy: 0.5))
 
         for (rowIndex, cells) in grid.rows.enumerated() {
             let rowTop = tops[rowIndex]
             let bandHeight = grid.rowHeights[rowIndex]
+            let rowFont = rowIndex == 0 ? grid.headerFont : grid.font
+            let monoFlags = rowIndex < grid.cellMono.count ? grid.cellMono[rowIndex] : []
             for (column, cell) in cells.enumerated() where !cell.isEmpty {
                 guard column < grid.columnCount else { break }
                 let alignment = column < grid.alignments.count ? grid.alignments[column] : .left
                 let style = TableGrid.wrapStyle(lineHeight: grid.rowHeight)
                 style.alignment = alignment
+                let cellFont = column < monoFlags.count && monoFlags[column]
+                    ? grid.monoFont : rowFont
                 let run = NSAttributedString(
                     string: cell,
-                    attributes: [.font: grid.font, .foregroundColor: grid.color, .paragraphStyle: style]
+                    attributes: [.font: cellFont, .foregroundColor: grid.color, .paragraphStyle: style]
                 )
                 let columnWidth = grid.columnWidths[column]
                 let originX = left + grid.columnOffsets[column]

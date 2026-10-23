@@ -157,8 +157,12 @@ final class CodeHighlighter {
             return sub == "operator" ? palette.operator : palette.keyword
         case "string", "embedded":
             return palette.string
-        case "number", "constant", "boolean":
+        case "number":
             return palette.number
+        case "constant", "boolean":
+            // The reference classes `true`/`false`/`null` as `hljs-literal`,
+            // a different colour from `hljs-number`.
+            return palette.literal
         case "comment":
             return palette.comment
         case "tag":
@@ -169,8 +173,12 @@ final class CodeHighlighter {
             return palette.function
         case "constructor", "type":
             return palette.type
-        case "operator", "escape":
+        case "operator":
             return palette.operator
+        case "escape":
+            // The reference leaves escape sequences inside the string's span
+            // (highlight.js's backslash escape carries no class of its own).
+            return palette.string
         case "punctuation", "delimiter":
             return palette.punctuation
         case "variable":
@@ -180,6 +188,13 @@ final class CodeHighlighter {
         default:
             return nil
         }
+    }
+
+    /// Whether a capture renders in the reference's comment style — the static
+    /// highlight.css sets `font-style: italic` on `hljs-comment` (and quote),
+    /// and tree-sitter's `comment` covers both.
+    static func isItalic(capture: String) -> Bool {
+        capture.split(separator: ".").first == "comment"
     }
 
     /// Builds (once) and caches the grammar's language and highlight query.

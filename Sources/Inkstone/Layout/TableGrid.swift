@@ -13,12 +13,19 @@ import AppKit
 struct TableGrid {
     /// Cell text per row, padding trimmed. The delimiter row is not included.
     var rows: [[String]]
+    /// Whether each cell is entirely a code span (mono in the preview).
+    var cellMono: [[Bool]] = []
     var alignments: [NSTextAlignment]
     /// Left edge of every column, in points from the block's left edge.
     var columnOffsets: [CGFloat]
     /// Usable text width of every column, padding excluded.
     var columnWidths: [CGFloat]
     var font: NSFont
+    /// The header row's face: the UA's `th { font-weight: bold }`.
+    var headerFont: NSFont
+    /// The face for cells that are entirely code spans (`code` renders mono
+    /// in the preview).
+    var monoFont: NSFont
     var color: NSColor
     /// Height of one wrapped line, pinned by the layout pass.
     var rowHeight: CGFloat = 0
@@ -28,6 +35,12 @@ struct TableGrid {
     var rowHeights: [CGFloat] = []
     /// Sum of `rowHeights` - the height the painted table occupies.
     var totalHeight: CGFloat = 0
+    /// The shrink-to-fit element width (columns + gutters), clamped to the
+    /// measure.
+    var totalWidth: CGFloat = 0
+    /// Per-column painted rects (x, w) in points from the block's left edge —
+    /// the dump exports them for the comparator's per-column check.
+    var columnRects: [[CGFloat]] = []
     /// Position of the `|---|` row in the buffer, `nil` when the table has none.
     var delimiterIndex: Int?
 
@@ -49,6 +62,63 @@ struct TableGrid {
         TableRecognizer.split(row)
     }
 
+    /// The cell's visible text: the preview renders each cell's inline
+    /// markdown — links show their text, emphasis and code strip their
+    /// markers — so the column widths and the painted cells measure the same
+    /// glyphs the reference does. (Round 1: the common inline constructs;
+    /// raw HTML and images pass through.)
+    /// The cell's inline-markdown strips, in application order: images and
+    /// links render their label, code spans strip to their content, emphasis
+    /// pairs strip their markers, and backslash escapes render their
+    /// character. The preview renders each cell's inline markdown the same
+    /// way, so the column widths and the painted cells measure the same
+    /// glyphs the reference does.
+    private static let cellStrips: [(NSRegularExpression, String)] = {
+        let rules: [(String, String)] = [
+            ("!\\[([^\\]]*)\\]\\([^)]*\\)", "$1"), // images
+            ("\\[([^\\]]*)\\]\\([^)]*\\)", "$1"), // inline links
+            ("\\[([^\\]]+)\\](?:\\[[^\\]]*\\])?", "$1"), // reference links
+            ("`+([^`]+)`+", "$1"), // code spans
+            ("(?:\\*\\*\\*|___)([^*_]+?)(?:\\*\\*\\*|___)", "$1"), // bold-italic
+            ("\\*\\*([^*]+)\\*\\*", "$1"), // bold
+            ("__([^_]+)__", "$1"),
+            ("\\*([^*\n]+)\\*", "$1"), // italic
+            ("_([^_\n]+)_", "$1"),
+            ("~~([^~\n]+)~~", "$1"), // strikethrough
+            ("\\\\([\\\\`*_{}\\[\\]()#+.!~-])", "$1"), // backslash escapes
+        ]
+        // The patterns are static constants above; the force try cannot fire.
+        return rules.compactMap { pattern, template in
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            return (regex, template)
+        }
+    }()
+
+    /// The cell's visible text plus whether the whole cell is one code span
+    /// (the preview's `code { font-family: editor }` renders it mono).
+    static func plainCell(_ cell: String) -> (String, Bool) {
+        let trimmed = cell.trimmingCharacters(in: .whitespaces)
+        if trimmed.first == "`", trimmed.last == "`",
+            let regex = try? NSRegularExpression(pattern: "^`+([^`]+)`+$"),
+            let match = regex.firstMatch(
+                in: trimmed, range: NSRange(trimmed.startIndex..., in: trimmed)
+            )
+        {
+            let inner = match.range(at: 1)
+            let text = (trimmed as NSString).substring(with: inner)
+            return (text, true)
+        }
+        var text = cell
+        for (regex, template) in cellStrips {
+            let range = NSRange(text.startIndex..., in: text)
+            guard regex.firstMatch(in: text, range: range) != nil else { continue }
+            text = regex.stringByReplacingMatches(
+                in: text, range: range, withTemplate: template
+            )
+        }
+        return (text, false)
+    }
+
     /// Reads `:---`, `---:` and `:---:` out of the delimiter row.
     static func alignments(fromDelimiterRow row: String) -> [NSTextAlignment] {
         cells(in: row).map { cell in
@@ -60,20 +130,74 @@ struct TableGrid {
         }
     }
 
+    /// Full-width CJK: han, kana, hangul syllables, CJK punctuation and the
+    /// fullwidth forms — every glyph the reference's cascade lays out at
+    /// exactly 1em (PingFang SC han, Hiragino Sans kana, Apple SD Gothic
+    /// hangul, the fullwidth punctuation).
+    static func isFullwidth(_ scalar: Unicode.Scalar) -> Bool {
+        switch scalar.value {
+        case 0x3000...0x303F, 0x3041...0x30FF, 0x3400...0x4DBF,
+            0x4E00...0x9FFF, 0xAC00...0xD7AF, 0xF900...0xFAFF,
+            0xFF01...0xFF60:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// The visible width of a cell the way the reference lays it out.
+    ///
+    /// `NSString.size` measures the system font's cascade, whose CJK faces
+    /// advance han 0.992em, kana 0.949em, hangul 0.865em (measured) — while
+    /// the reference lays every full-width CJK glyph at exactly 1em. The
+    /// columns are content-sized, so a cell measured from the cascade comes
+    /// out narrow (the alignment table 296.15 against 298.00, the kana
+    /// column 86.43 against 90.00). Full-width CJK measures at the font
+    /// size; the rest keeps the font's own advances.
+    static func visibleWidth(_ text: String, font: NSFont) -> CGFloat {
+        var fullwidth = 0
+        var other = ""
+        for scalar in text.unicodeScalars {
+            if isFullwidth(scalar) {
+                fullwidth += 1
+            } else {
+                other.unicodeScalars.append(scalar)
+            }
+        }
+        let base = other.isEmpty
+            ? 0 : (other as NSString).size(withAttributes: [.font: font]).width
+        return base + CGFloat(fullwidth) * font.pointSize
+    }
+
     init(
         rows: [[String]], alignments: [NSTextAlignment], theme: EditorTheme,
         containerWidth: CGFloat, delimiterIndex: Int? = nil
     ) {
         let font = EditorFont.nsSystem(size: theme.bodyFontSize)
+        // The UA styles `th { font-weight: bold }` and the preview does not
+        // override it — the header row measures and paints bold.
+        let headerFont = NSFont.systemFont(ofSize: theme.bodyFontSize, weight: .bold)
+        // `th, td { padding: 5px 10px }` — vertical padding shapes the row
+        // height, horizontal padding shapes the column gutters.
         let padding = theme.tableCellPadding
+        let paddingX = theme.tableCellPaddingX
         var columnCount = 0
         for row in rows { columnCount = max(columnCount, row.count) }
-        let safeRows = rows.map { $0 + Array(repeating: "", count: max(0, columnCount - $0.count)) }
+        // The cells carry their source markdown; the preview renders each
+        // cell's inline markdown (links show their text, emphasis/code strip
+        // their markers) — measure and paint the same visible glyphs.
+        let safeRows = rows.map {
+            ($0 + Array(repeating: "", count: max(0, columnCount - $0.count)))
+                .map(Self.plainCell)
+        }
+        let mono = EditorFont.nsMono(theme: theme, size: theme.bodyFontSize)
 
         var widths: [CGFloat] = Array(repeating: 0, count: columnCount)
-        for row in safeRows {
-            for (index, cell) in row.enumerated() where !cell.isEmpty {
-                let measured = (cell as NSString).size(withAttributes: [.font: font]).width
+        for (rowIndex, row) in safeRows.enumerated() {
+            let rowFont = rowIndex == 0 ? headerFont : font
+            for (index, entry) in row.enumerated() where !entry.0.isEmpty {
+                let cellFont = entry.1 ? mono : rowFont
+                let measured = Self.visibleWidth(entry.0, font: cellFont)
                 widths[index] = max(widths[index], measured)
             }
         }
@@ -85,8 +209,14 @@ struct TableGrid {
         // of them. Instead every column keeps a floor and the *remaining* width is
         // shared out in proportion to what each column asked for, so a table with one
         // very long cell still has readable cells beside it.
-        let minimum: CGFloat = 44
-        let gutters = padding * 2 * CGFloat(max(1, columnCount))
+        // The preview's `table` carries no `width` rule: the element hugs its
+        // content — every column takes its widest cell (floored at the
+        // minimum) with no proportional fill — and only a table that cannot
+        // fit the measure shares the shortfall out equally.
+        // The preview's tables have no min-width: a column hugs its content
+        // (an empty cell is just the padding pair).
+        let minimum: CGFloat = 0
+        let gutters = paddingX * 2 * CGFloat(max(1, columnCount))
         let available = max(minimum * CGFloat(max(1, columnCount)), containerWidth - gutters)
         let floors = widths.map { max(minimum, $0) }
         let floorTotal = floors.reduce(0, +)
@@ -95,22 +225,19 @@ struct TableGrid {
             let share = available / CGFloat(max(1, columnCount))
             widths = Array(repeating: max(1, share), count: columnCount)
         } else {
-            let extra = available - floorTotal
-            let wants = widths.reduce(0, +)
-            widths = zip(widths, floors).map { want, floor in
-                floor + (wants > 0 ? extra * want / wants : 0)
-            }
+            widths = floors
         }
 
         var offsets: [CGFloat] = []
         var usable: [CGFloat] = []
         var cursor: CGFloat = 0
         for width in widths {
-            offsets.append(cursor + padding)
+            offsets.append(cursor + paddingX)
             usable.append(max(1, width))
-            cursor += width + padding * 2
+            cursor += width + paddingX * 2
         }
-        self.rows = safeRows
+        self.rows = safeRows.map { $0.map(\.0) }
+        self.cellMono = safeRows.map { $0.map(\.1) }
         self.delimiterIndex = delimiterIndex
         let missing = max(0, columnCount - alignments.count)
         let leftFill = Array(repeating: NSTextAlignment.left, count: missing)
@@ -118,8 +245,10 @@ struct TableGrid {
         self.columnOffsets = offsets
         self.columnWidths = usable
         self.font = font
+        self.headerFont = headerFont
+        self.monoFont = EditorFont.nsMono(theme: theme, size: theme.bodyFontSize)
         self.color = theme.text.nsColor
-        // `table th/td { padding: 6px 13px }` + the collapsed 1px row border:
+        // `th, td { padding: 5px 10px }` + the collapsed 1px row border:
         // each painted row is the cell's line box plus its vertical padding
         // and border, exactly as the reference's CSS table lays out.
         self.rowHeight = theme.bodyLineHeight * theme.bodyFontSize
@@ -130,13 +259,32 @@ struct TableGrid {
         // paragraph style of that row.
         self.rowHeights = safeRows.map { cells in
             var lines = 1
-            for (index, cell) in cells.enumerated()
-            where !cell.isEmpty && index < self.columnWidths.count {
-                lines = max(lines, self.wrappedLines(cell, width: self.columnWidths[index]))
+            for (index, entry) in cells.enumerated()
+            where !entry.0.isEmpty && index < self.columnWidths.count {
+                // A code cell renders in the mono face: its wrap points are
+                // the mono face's, not the body's (the `~~文本~~` cell measured
+                // at the body font overflowed its mono-sized column and grew
+                // the row a whole line, 167.00 against 132.56).
+                let cellFont = entry.1 ? self.monoFont : self.font
+                lines = max(
+                    lines,
+                    self.wrappedLines(entry.0, width: self.columnWidths[index], font: cellFont)
+                )
             }
             return CGFloat(lines) * self.rowHeight
         }
         self.totalHeight = rowHeights.reduce(0, +)
+        self.totalWidth = min(
+            containerWidth,
+            widths.reduce(0, +) + paddingX * 2 * CGFloat(max(1, columnCount))
+        )
+        // The cell rects = the padding boxes (content + the horizontal
+        // padding), matching the reference's `th`/`td` border boxes — the
+        // painted text sits at `offset` (content), the cell's own left edge
+        // is `offset − paddingX`.
+        self.columnRects = zip(columnOffsets, columnWidths).map { offset, width in
+            [offset - paddingX, width + paddingX * 2]
+        }
     }
 
     /// The paragraph style the buffer's `index`-th source row has to carry.
@@ -169,8 +317,12 @@ struct TableGrid {
     /// How many line boxes `text` needs inside `width`.
     ///
     /// Measured with the same paragraph style the row is laid out with, so the
-    /// count and the height the layout manager picks cannot drift apart.
-    private func wrappedLines(_ text: String, width: CGFloat) -> Int {
+    /// count and the height the layout manager picks cannot drift apart. A
+    /// cell that fits its column never wraps — the column is content-sized
+    /// from the same measurement, and the widest cell must not round into a
+    /// second line through `boundingRect`'s pixel snapping.
+    private func wrappedLines(_ text: String, width: CGFloat, font: NSFont) -> Int {
+        if Self.visibleWidth(text, font: font) <= width { return 1 }
         let box = (text as NSString).boundingRect(
             with: CGSize(width: max(1, width), height: .greatestFiniteMagnitude),
             options: [.usesLineFragmentOrigin, .usesFontLeading],

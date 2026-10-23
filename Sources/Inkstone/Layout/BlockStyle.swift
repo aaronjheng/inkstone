@@ -51,25 +51,40 @@ struct BlockStyle {
         )
         var after = theme.headingMargin
         if let rule = theme.headingRule(level) {
-            // The reference's baseline→rule distance (see DecorationPlan
-            // .headingRule): `(H − asc − desc)/2` with the font's hhea
-            // metrics — 7.63pt for h1, 6.29pt for h2 at body size 16.
-            let baselineGap = (lineHeight - font.ascender - font.descender) / 2
+            // The ruled heading's after-spacing. The preview's h1/h2 carry
+            // `padding-bottom: 0.3em` above their border-bottom, so the
+            // border sits 0.3em below the content-box (line-box) bottom and
+            // the next content starts one border plus one collapsed margin
+            // below the border. The App anchors the rule to the engine
+            // baseline (see DecorationPlan.headingRule) and lets the layout
+            // delegate trim the after-spacing per row
+            // (`MarkerHider.lineSpacingAfterGlyphAt`): the style applies the
+            // LATIN-strut assumption — the attribute font's descent is the
+            // largest a heading row mixes — and CJK rows, whose fallback face
+            // descends less, hand the difference back additively. The
+            // builder's collapse accounting keeps reporting the plain margin
+            // for the heading, so the extra rides through uniformly: the gap
+            // after the heading is `margin + 1 + padding` minus the
+            // engine/strut baseline delta, exactly the reference's structure.
+            let padding = 0.3 * font.pointSize
+            // The baseline→rule distance (see DecorationPlan.headingRule):
+            // the strut's box-bottom distance `(H − asc − desc)/2` plus the
+            // padding the border sits below the box.
+            let baselineGap = (lineHeight - font.ascender - font.descender) / 2 + padding
             style.decoration.append(
                 .headingRule(color: rule.nsColor, baselineGap: baselineGap)
             )
-            // The rule consumes part of the heading's bottom spacing: it
-            // hangs above the line-box bottom, while the reference's border
-            // sits AT the box bottom and still leaves the collapsed margin
-            // plus its own 1pt below it. The style shrinks by the CJK
-            // fallback's descent model — the larger descent a heading line
-            // mixes (`ruleBottomShrink`); a Latin-only row hands the
-            // difference back through the layout delegate
-            // (`MarkerHider.lineSpacingAfterGlyphAt`). The builder's collapse
-            // accounting keeps reporting the full margin for the heading, or
-            // the reduction would be handed right back to the next block.
             style.base[MarkdownAttribute.headingRuleGap] = baselineGap
-            after -= Self.ruleBottomShrink(fontSize: font.pointSize, baselineGap: baselineGap)
+            // The descent the after-spacing assumes: the mono face at the
+            // heading size — the largest descent a ruled heading row can mix
+            // (the chip's mono run descends past both the text face and its
+            // CJK fallback). The layout delegate trims the difference for
+            // rows whose visible faces descend less.
+            let descentModel = -EditorFont.nsMono(theme: theme, size: font.pointSize).descender
+            style.base[MarkdownAttribute.headingRuleAttrDesc] = descentModel
+            after = baselineGap
+                - descentModel.rounded()
+                + theme.headingMargin + EditorMetrics.hairline
         }
         style.base[.paragraphStyle] = NSParagraphStyle.markdownHeading(
             lineHeight: lineHeight,
@@ -77,28 +92,6 @@ struct BlockStyle {
             after: after
         )
         return style
-    }
-
-    /// The part of a ruled heading's bottom spacing the rule itself consumes.
-    ///
-    /// The rule hangs `δ` above the line-box bottom (see `DecorationPlan
-    /// .headingRule`): `δ = descUsed − baselineGap`, where `descUsed` is the
-    /// descent TextKit clamps the fixed line height with — the largest
-    /// descent among the faces actually on the line, rounded to whole points
-    /// (measured on the engine: 12pt at h1's 36pt and 10pt at h2's 28pt for
-    /// the CJK fallback, whose face descends 0.34em; 11pt and 8pt for
-    /// Open Sans-only rows). This models the CJK fallback — the larger
-    /// descent a heading line mixes, and the common case in CJK documents;
-    /// `MarkerHider` hands the difference back for Latin-only rows at layout
-    /// time, where the row's faces are known. The reference's border leaves
-    /// `margin + 1pt` between the rule and the next content (border 1pt
-    /// inside the element, the collapsed margin below it), so the spacing
-    /// shrinks by `δ − 1` and the rule→content distance matches on both
-    /// sides. Measured at the default body size 16; a scaled theme inherits
-    /// the model (error ≤ 1pt).
-    static func ruleBottomShrink(fontSize: CGFloat, baselineGap: CGFloat) -> CGFloat {
-        let descUsed = (fontSize * 0.34).rounded()
-        return max(0, descUsed - baselineGap - 1)
     }
 
     static func listItem(theme: EditorTheme, ordered: Bool, depth: Int, marker: String) -> BlockStyle {
@@ -144,8 +137,10 @@ struct BlockStyle {
             font: EditorFont.nsMono(theme: theme, size: theme.codeFontSize),
             textColor: theme.codeText.nsColor
         )
+        // `code { line-height: 1.357em }` — the preview's code rows pitch at
+        // the code element's own line height, not the body's.
         let paragraphStyle = NSParagraphStyle.markdownCode(
-            lineHeight: theme.bodyLineHeight * theme.codeFontSize,
+            lineHeight: theme.codeFontSize * 1.357,
             padding: theme.codePaddingLeft ?? theme.codePadding
         )
         // The painted box grows by the padding insets (top 8 / bottom 6); the
@@ -319,7 +314,7 @@ enum DecorationPlan {
         topInset: CGFloat, bottomInset: CGFloat
     )
     case horizontalRule(color: NSColor, height: CGFloat)
-    case inlineCode(background: NSColor, radius: CGFloat)
+    case inlineCode(background: NSColor?, radius: CGFloat)
     case alertBox(title: String, background: NSColor, border: NSColor)
     case tocPlaceholder(color: NSColor)
     /// A live table of contents: one painted row per heading, drawn by the

@@ -1,14 +1,15 @@
 import Foundation
 
-/// The two built-in themes: GitHub for light appearances, Night for dark ones.
+/// The two built-in themes: VS Code for light appearances, Night for dark ones.
 ///
-/// Colours are transcribed from `TypeMark/style/themes/<name>.css`. Themes carry
-/// colours, font families, and spacing; font *sizes* live in `EditorTheme` as one
-/// global type scale (the GitHub reference) that both themes render at. Font
-/// families are the documented substitution: the originals ship as web fonts we
-/// do not bundle - except Open Sans, which github names and we ship in `Fonts/`.
+/// The light theme transcribes VS Code's markdown preview (`markdown.css` +
+/// the Light Modern palette), the open-source alignment target. Themes carry
+/// colours and spacing; font *sizes* live in `EditorTheme` as one global type
+/// scale (the preview's) that both themes render at. The body face is the
+/// system font (`-apple-system`); the mono face is Menlo (the preview stack's
+/// first installed entry).
 enum BuiltInTheme {
-    static let all: [EditorTheme] = [github, night]
+    static let all: [EditorTheme] = [vscode, night]
 
     static func theme(named identifier: String) -> EditorTheme? {
         all.first { $0.identifier == identifier }
@@ -16,12 +17,12 @@ enum BuiltInTheme {
 
     static let identifiers = all.map(\.identifier)
 
-    // MARK: - GitHub
+    // MARK: - VS Code
 
-    static let github = EditorTheme(
-        identifier: "github",
-        displayName: "GitHub",
-        background: DynamicColor(0xFFFFFF, 0x333B44),
+    static let vscode = EditorTheme(
+        identifier: "vscode",
+        displayName: "VS Code",
+        background: DynamicColor(0xFFFFFF, 0x1E1E1E),
         // `.mac-seamless-mode #typora-sidebar { background-color: #fafafa }`.
         sidebarBackground: DynamicColor(0xFAFAFA, 0x212121),
         // `--control-text-color: #777` is the item colour; the dark half
@@ -31,51 +32,55 @@ enum BuiltInTheme {
         // `#eeeeee` row with a `#777` leading bar; text stays the item colour.
         sidebarAccent: DynamicColor(0x777777, 0x777777),
         sidebarSelection: DynamicColor(0xEEEEEE, 0x3E4451),
-        text: DynamicColor(0x333333, 0xCCCCCC),
-        link: DynamicColor(0x4183C4, 0x6CB6FF),
+        text: DynamicColor(0x3B3B3B, 0xBBBBBB),
+        link: DynamicColor(0x006AB1, 0x4DAFF2),
         // `--select-text-bg-color: #B5D6FC` from the original's base style; the
         // theme css does not override it.
         selection: DynamicColor(0xB5D6FC, 0x3E4451),
-        marker: DynamicColor(0xC7C5C5, 0x5A6270),
+        marker: DynamicColor(0x3B3B3B, 0xBBBBBB),
         rawBlockEditingBackground: DynamicColor(0xF5F6F7, 0x2C313A),
         headingChip: DynamicColor(0xDDDDDD, 0x4B5263),
         focusBlur: DynamicColor(0xC8C8C8, 0x4A5058),
-        codeBlockBackground: DynamicColor(0xF8F8F8, 0x2F353D),
-        codeText: DynamicColor(0x333333, 0xD6DEEB),
-        inlineCodeBackground: DynamicColor(0xF3F4F4, 0x31363F),
-        inlineCodeText: DynamicColor(0x333333, 0xD6DEEB),
-        quoteBar: DynamicColor(0xDFE2E5, 0x4B5263),
-        quoteText: DynamicColor(0x777777, 0x9AA4B2),
-        rule: DynamicColor(0xE7E7E7, 0x3A4048),
-        tableBorder: DynamicColor(0xDFE2E5, 0x444C56),
-        tableHeaderBackground: DynamicColor(0xF8F8F8, 0x2F353D),
-        tableStripe: DynamicColor(0xF8F8F8, 0x2B3038),
+        codeBlockBackground: DynamicColor(0xF8F8F8, 0x2A2A2A),
+        codeText: DynamicColor(0x3B3B3B, 0xBBBBBB),
+        inlineCodeBackground: nil,
+        inlineCodeText: DynamicColor(0x3B3B3B, 0xBBBBBB),
+        quoteBar: DynamicColor(0x3B3B3B, 0xBBBBBB),
+        quoteText: DynamicColor(0x3B3B3B, 0xBBBBBB),
+        rule: DynamicColor(0xD1D1D1, 0x3C3C3C),
+        tableBorder: DynamicColor(0xD1D1D1, 0x3C3C3C),
+        tableHeaderBackground: DynamicColor(0xFFFFFF, 0x1E1E1E),
+        tableStripe: DynamicColor(0xFFFFFF, 0x1E1E1E),
         alertBackground: DynamicColor(0xF1F8FF, 0x1F2A37),
         alertBorder: DynamicColor(0x54AEFF, 0x388BFD),
         syntax: SyntaxPalette(
-            // Typora renders fenced code with CodeMirror's stock light palette
-            // (codemirror.css `.cm-s-inner` rules): keyword #708, def #00f,
-            // string #a11, number #164, comment #a50, type reference #05a,
-            // builtin #30a, attribute #00c, operator #981a1a, plain #000 - the
-            // colours sampled off a rendered document, not the github-light
-            // theme this palette was originally modelled on.
-            keyword: DynamicColor(0x770088, 0xFF7B72),
-            string: DynamicColor(0xAA1111, 0xA5D6FF),
-            number: DynamicColor(0x116644, 0x79C0FF),
-            comment: DynamicColor(0xAA5500, 0x8B949E),
-            tag: DynamicColor(0x117700, 0x7EE787),
-            attribute: DynamicColor(0x0000CC, 0xD2A8FF),
-            function: DynamicColor(0x0000FF, 0xD2A8FF),
-            type: DynamicColor(0x0055AA, 0x79C0FF),
-            operator: DynamicColor(0x981A1A, 0xFF7B72),
-            punctuation: DynamicColor(0x000000, 0x8B949E),
-            plain: DynamicColor(0x000000, 0xC9D1D9),
+            // The reference's code colours are the static highlight.css applied
+            // over highlight.js 11.8 token classes: the base rules are the
+            // vs2015 dark style and the `.vscode-light` overrides win for the
+            // light half (keyword #00f, string/attribute/type #a31515, number
+            // #008000, comment #008000 italic, tag #00f, attr #f00, title
+            // #808080). The dark half is the base style. Operators and
+            // punctuation are unclassed in highlight.js and stay the code's
+            // plain colour; literals (`false`, `null`) colour separately from
+            // numbers (`hljs-literal`).
+            keyword: DynamicColor(0x0000FF, 0x569CD6),
+            string: DynamicColor(0xA31515, 0xD69D85),
+            number: DynamicColor(0x008000, 0xB8D7A3),
+            literal: DynamicColor(0xA31515, 0x569CD6),
+            comment: DynamicColor(0x008000, 0x57A64A),
+            tag: DynamicColor(0x0000FF, 0x9B9B9B),
+            attribute: DynamicColor(0xFF0000, 0x9CDCFE),
+            function: DynamicColor(0x808080, 0xDCDCDC),
+            type: DynamicColor(0xA31515, 0x4EC9B0),
+            operator: DynamicColor(0x3B3B3B, 0xBBBBBB),
+            punctuation: DynamicColor(0x3B3B3B, 0xBBBBBB),
+            plain: DynamicColor(0x3B3B3B, 0xBBBBBB),
             marker: DynamicColor(0xD94F8A, 0xFF7B9C)
         ),
-        headingRules: [1: DynamicColor(0xEEEEEE, 0x444C56), 2: DynamicColor(0xEEEEEE, 0x444C56)],
+        headingRules: [1: DynamicColor(0xD1D1D1, 0x3C3C3C), 2: DynamicColor(0xD1D1D1, 0x3C3C3C)],
         // github.css names `"Open Sans"` for body and headings (the four faces are
         // bundled and registered at startup); headings inherit the body family.
-        codeBorder: DynamicColor(0xE7EAED, 0x444C56)
+        codeBorder: DynamicColor(0xE5E5E5, 0x3C3C3C)
     )
 
     // MARK: - Night

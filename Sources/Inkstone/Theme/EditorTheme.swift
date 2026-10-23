@@ -46,7 +46,9 @@ struct EditorTheme: Sendable, Equatable {
 
     var codeBlockBackground: DynamicColor
     var codeText: DynamicColor
-    var inlineCodeBackground: DynamicColor
+    /// `nil` renders inline code as bare mono text — the VS Code preview has
+    /// no `code` background, padding or border.
+    var inlineCodeBackground: DynamicColor?
     var inlineCodeText: DynamicColor
     var quoteBar: DynamicColor
     var quoteText: DynamicColor
@@ -68,85 +70,83 @@ struct EditorTheme: Sendable, Equatable {
     /// Themes colour the document; everything here is shared by both.
 
     /// The user's font-size preference as a multiplier on the reference type
-    /// scale (1 renders body text at 16pt). Set by
+    /// scale (1 renders body text at 14pt). Set by
     /// `SettingsStore.resolvedTheme`; themes never touch it.
     var fontScale: CGFloat = 1
 
-    /// `html { font-size: 16px }` from github.css, the reference transcription.
-    static let baseFontSize: CGFloat = 16
-    /// `code, tt { font-size: 0.9em }` from github.css — fractional on purpose:
-    /// the reference renders 14.4px and rounds, and rounding here shifted every
-    /// code advance (chip widths ~2pt off against the baseline).
-    static let codeFontScale: CGFloat = 0.9
-    /// `h1..h6 { font-size: 2.25em | 1.75em | 1.5em | 1.25em | 1em | 1em }`.
-    static let headingScales: [CGFloat] = [2.25, 1.75, 1.5, 1.25, 1.0, 1.0]
-    /// `h1..h6 { line-height: 1.2 | 1.225 | 1.43 | 1.4 | 1.4 | 1.4 }`.
-    static let headingLineHeights: [CGFloat] = [1.2, 1.225, 1.43, 1.4, 1.4, 1.4]
-    /// github.css sets every heading bold.
-    static let headingWeights: [Font.Weight] = [.bold, .bold, .bold, .bold, .bold, .bold]
-    /// github.css names `"Open Sans"` for body and headings (the four faces are
-    /// bundled and registered at startup).
-    static let bodyFontName = "Open Sans"
-    static let headingFontName = "Open Sans"
-    /// Chromium resolves the theme's `monospace` fallback to Menlo on macOS.
+    /// `markdown.preview.fontSize` default 14 — the VS Code preview's base.
+    static let baseFontSize: CGFloat = 14
+    /// `code { font-size: 1em }` — VS Code's inline and block code render at
+    /// the body size, unlike Typora's 0.9em.
+    static let codeFontScale: CGFloat = 1.0
+    /// `h1..h6 { font-size: 2em | 1.5em | 1.25em | 1em | 0.875em | 0.85em }`.
+    static let headingScales: [CGFloat] = [2.0, 1.5, 1.25, 1.0, 0.875, 0.85]
+    /// `h1..h6 { line-height: 1.25 }`.
+    static let headingLineHeights: [CGFloat] = [1.25, 1.25, 1.25, 1.25, 1.25, 1.25]
+    /// markdown.css sets every heading weight 600.
+    static let headingWeights: [Font.Weight] = [.semibold, .semibold, .semibold, .semibold, .semibold, .semibold]
+    /// The preview body resolves `-apple-system` — the system face. An empty
+    /// name makes `EditorFont.nsBody/nsHeading` fall back to `NSFont.systemFont`.
+    static let bodyFontName = ""
+    static let headingFontName = ""
+    /// The preview's editor font stack pins to Menlo for parity (SF Mono, the
+    /// stack's first entry, is not installed system-wide for Chromium).
     static let codeFontName = "Menlo"
     /// `body { line-height: 1.6 }`.
     var bodyLineHeight: CGFloat = 1.6
 
-    var contentMaxWidth: CGFloat = 860
-    /// Widening breakpoints, matching the theme's `@media` rules.
-    var wideMaxWidth: CGFloat = 1024
-    var widestMaxWidth: CGFloat = 1200
-    var wideBreakpoint: CGFloat = 1400
-    var widestBreakpoint: CGFloat = 1800
-    var contentPadding: CGFloat = 30
-    var contentBottomPadding: CGFloat = 100
-    /// `p, blockquote, ul, ol, dl, table { margin: 0.8em 0 }`
-    var blockMargin: CGFloat = 12.8
-    /// `h1..h6 { margin: 1rem 0 }`
+    var contentMaxWidth: CGFloat = 1_000_000
+    /// The preview centres nothing: the content spans the webview minus the
+    /// body's `padding: 0 26px`, at every width.
+    var wideMaxWidth: CGFloat = 1_000_000
+    var widestMaxWidth: CGFloat = 1_000_000
+    var wideBreakpoint: CGFloat = 1_000_000
+    var widestBreakpoint: CGFloat = 1_000_000
+    var contentPadding: CGFloat = 26
+    var contentBottomPadding: CGFloat = 50
+    /// `p { margin-bottom: 16px; margin-top: 0 }`.
+    var blockMargin: CGFloat = 16
+    /// `h1..h6 { margin-top: 24px; margin-bottom: 16px }` — except `h1
+    /// { margin-top: 0 }`. The top margin rides on `headingMarginTop`, which
+    /// `BlockStyle.heading` zeroes for level 1.
     var headingMargin: CGFloat = 16
-    /// `ul, ol { padding-left: 30px }`, so the text column moves 30pt per level.
-    /// The reference was re-measured against a rendered document after a 26pt
-    /// tightening misfired: the tighter column read heavier than the reference, not
-    /// closer to it, and the marker ladder below hangs the glyph at a fixed gap
-    /// from the column, exactly like a browser's outside marker.
-    var listIndent: CGFloat = 30
-    /// `blockquote { padding: 0 15px }`
-    var quoteIndent: CGFloat = 15
-    var quoteBarWidth: CGFloat = 4
-    /// `.md-fences { padding: 8px 0 6px }` plus the CSS cascade's horizontal
-    /// inset: `.md-fences` 4px + `.CodeMirror-lines` 4px + `pre` 4px = 12.
-    var codePadding: CGFloat = 8
-    /// The code content's left inset measured against the rendered document:
-    /// the reference's content sits 14pt in from the fill edge.
-    var codePaddingLeft: CGFloat? = 11
-    /// Painted insets around a code block's body, from the theme's
-    /// `.md-fences { padding-top: 8px; padding-bottom: 6px }`: the paragraph
-    /// style cannot express per-block top/bottom padding, so the decorator
-    /// grows the first/last body line's background by these amounts.
-    /// The reference's fence pad box = rows + 14pt (padding 8 + 6). The App's
-    /// ink sits ~2pt lower inside its line box (Menlo vs Consolas metrics), so
-    /// the top inset is 2 under the reference's padding and the bottom 2 over:
-    /// the rendered ink lands on the reference's positions and the box height
-    /// still matches the baseline's.
-    var codePaddingTop: CGFloat = 6
-    var codePaddingBottom: CGFloat = 8
-    /// `li p { margin: .5rem 0 }` in the original's base style - the gap between
-    /// consecutive list items (`li { margin: 0 }` itself contributes none). The
-    /// reference renders a 35pt baseline pitch per row (25.6pt line box + 9.4pt),
-    /// measured off a rendered document; the bare `.5rem` (8pt) sat a touch tight
-    /// and drifted ~1.4pt per item against it.
-    var listItemSpacing: CGFloat = 9.4
-    /// `li p, blockquote p { margin: .5rem 0 }` - the margin a collapsed blank
-    /// line inside a quote stands in for, where no other spacing applies. List
-    /// rows get theirs from the marker hider's item spacing instead.
-    var blankLineMargin: CGFloat = 8
-    /// `hr { margin: 16px 0 }` - the space above a thematic break; the block
-    /// after it contributes its own top spacing, as CSS margin collapsing would.
-    var ruleMargin: CGFloat = 16
-    /// `.md-fences { margin: 15px 0 }` - the space around a fenced code block.
-    var fencesMargin: CGFloat = 15
-    var tableCellPadding: CGFloat = 6
+    var headingMarginTop: CGFloat = 24
+    /// `ul, ol { padding-inline-start: 40px }` — the UA default the preview
+    /// leaves in place, so the text column moves 40pt per level.
+    var listIndent: CGFloat = 40
+    /// `blockquote { padding: 0px 16px 0 10px; border-left-width: 5px }` —
+    /// the text column sits `quoteBarWidth + quoteIndent` = 15pt in from the
+    /// quote's left edge (the 5px bar, then the 10px padding).
+    var quoteIndent: CGFloat = 10
+    var quoteBarWidth: CGFloat = 5
+    /// The quote's right padding (`padding: 0px 16px 0 10px`): wrap width and
+    /// nested fills clamp 16pt short of the quote's right edge.
+    var quoteRightPadding: CGFloat = 16
+    /// The fenced block's box carries NO padding in the preview: the padding
+    /// rule (`pre:not(.hljs), pre.hljs code > div`) matches nothing the engine
+    /// produces — every fenced block gets the `hljs` class and no inner div
+    /// (measured on the reference render). The glyphs sit flush against the
+    /// 1px border.
+    var codePadding: CGFloat = 0
+    var codePaddingLeft: CGFloat? = 0
+    var codePaddingTop: CGFloat = 0
+    var codePaddingBottom: CGFloat = 0
+    /// `li p { margin-bottom: 0.7em }` — the gap between consecutive list
+    /// items (li carries no margins of its own).
+    var listItemSpacing: CGFloat = 9.8
+    /// `li p, blockquote p { margin-bottom: 0.7em }` - the margin a collapsed
+    /// blank line inside a quote stands in for.
+    var blankLineMargin: CGFloat = 9.8
+    /// `hr { margin: 0.5em 0 }` — 7pt at the 14px base.
+    var ruleMargin: CGFloat = 7
+    /// `pre { margin: 0 0 1em }` — margin-top is reset, the UA bottom stays.
+    var fencesMargin: CGFloat = 14
+    /// `th, td { padding: 5px 10px }`.
+    var tableCellPadding: CGFloat = 5
+    var tableCellPaddingX: CGFloat = 10
+    /// `th { border-bottom: 1px solid }` — the header's rule is the preview's
+    /// darker `th` colour; body row separators use `tableBorder`.
+    var tableHeaderBorder: DynamicColor = DynamicColor(0x4F4F4F, 0x9E9E9E)
 
     // MARK: Colour (themed)
 
@@ -179,7 +179,9 @@ struct EditorTheme: Sendable, Equatable {
 
     func headingSize(_ level: Int) -> CGFloat {
         let index = min(max(level, 1), Self.headingScales.count) - 1
-        return (Self.baseFontSize * fontScale * Self.headingScales[index]).rounded()
+        // Fractional on purpose: the preview keeps Chromium's fractional sizes
+        // (h5 renders 12.25px), and rounding shifted the line heights.
+        return Self.baseFontSize * fontScale * Self.headingScales[index]
     }
 
     func headingWeight(_ level: Int) -> Font.Weight {
@@ -229,7 +231,7 @@ struct EditorTheme: Sendable, Equatable {
         focusBlur: DynamicColor,
         codeBlockBackground: DynamicColor,
         codeText: DynamicColor,
-        inlineCodeBackground: DynamicColor,
+        inlineCodeBackground: DynamicColor?,
         inlineCodeText: DynamicColor,
         quoteBar: DynamicColor,
         quoteText: DynamicColor,
@@ -242,7 +244,11 @@ struct EditorTheme: Sendable, Equatable {
         syntax: SyntaxPalette,
         headingRules: [Int: DynamicColor] = [:],
         headingTextColor: DynamicColor? = nil,
-        codeBorder: DynamicColor? = nil
+        codeBorder: DynamicColor? = nil,
+        headingMarginTop: CGFloat = 24,
+        tableCellPaddingX: CGFloat = 10,
+        quoteRightPadding: CGFloat = 16,
+        tableHeaderBorder: DynamicColor = DynamicColor(0x4F4F4F, 0x9E9E9E)
     ) {
         self.identifier = identifier
         self.displayName = displayName
@@ -278,6 +284,10 @@ struct EditorTheme: Sendable, Equatable {
         self.headingRules = headingRules
         self.headingTextColor = headingTextColor
         self.codeBorder = codeBorder
+        self.headingMarginTop = headingMarginTop
+        self.tableCellPaddingX = tableCellPaddingX
+        self.quoteRightPadding = quoteRightPadding
+        self.tableHeaderBorder = tableHeaderBorder
     }
 
     /// Typography and spacing scaled by the user's font-size preference.
@@ -289,9 +299,12 @@ struct EditorTheme: Sendable, Equatable {
         copy.contentBottomPadding *= factor
         copy.blockMargin *= factor
         copy.headingMargin *= factor
+        copy.headingMarginTop *= factor
         copy.listIndent *= factor
         copy.quoteIndent *= factor
+        copy.quoteRightPadding *= factor
         copy.tableCellPadding *= factor
+        copy.tableCellPaddingX *= factor
         copy.codePadding *= factor
         copy.codePaddingTop *= factor
         copy.codePaddingBottom *= factor
@@ -308,6 +321,7 @@ struct SyntaxPalette: Sendable, Equatable {
     var keyword: DynamicColor
     var string: DynamicColor
     var number: DynamicColor
+    var literal: DynamicColor
     var comment: DynamicColor
     var tag: DynamicColor
     var attribute: DynamicColor
@@ -321,6 +335,7 @@ struct SyntaxPalette: Sendable, Equatable {
 
     init(
         keyword: DynamicColor, string: DynamicColor, number: DynamicColor,
+        literal: DynamicColor? = nil,
         comment: DynamicColor, tag: DynamicColor, attribute: DynamicColor,
         function: DynamicColor, type: DynamicColor, `operator`: DynamicColor,
         punctuation: DynamicColor, plain: DynamicColor, marker: DynamicColor
@@ -328,6 +343,10 @@ struct SyntaxPalette: Sendable, Equatable {
         self.keyword = keyword
         self.string = string
         self.number = number
+        // Themes modelled on a highlighter that colours literals differently
+        // from numbers (the reference's `hljs-literal`) set this explicitly;
+        // the rest reuse the number slot.
+        self.literal = literal ?? number
         self.comment = comment
         self.tag = tag
         self.attribute = attribute
@@ -397,7 +416,7 @@ struct ThemeOverride: Codable, Sendable {
 
     /// The built-in theme this override applies on top of.
     var base: EditorTheme {
-        BuiltInTheme.theme(named: identifier) ?? BuiltInTheme.github
+        BuiltInTheme.theme(named: identifier) ?? BuiltInTheme.vscode
     }
 
     /// Applies the set fields. Unset fields keep the base theme's value.

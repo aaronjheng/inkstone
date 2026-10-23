@@ -63,6 +63,18 @@ struct AttributedBuilder {
         self.context = context
     }
 
+    /// The preview's `pre` content box = `max(rows × code line height +
+    /// 1.39, strut)`: the inline-block code sits on the strut's baseline
+    /// leaving a 1.39pt descent slack below it, and a single-row block is
+    /// shorter than the strut (body line-height 1.6) which then dominates.
+    /// `codeBlockHeight` is the body rows' union; the painted fill grows to
+    /// the returned height at the bottom. (Measured: 1 row 22.39, 2 rows
+    /// 39.39, 3 rows 58.39, +19 per further row.)
+    static func fenceFillHeight(theme: EditorTheme, codeBlockHeight: CGFloat) -> CGFloat {
+        let strut = theme.bodyLineHeight * theme.bodyFontSize
+        return max(codeBlockHeight + 1.39, strut)
+    }
+
     func build(_ document: MarkdownDocument) -> LayoutOutput {
         let state = BuildState(theme: theme, context: context)
         // The `[TOC]` block renders every heading, wherever it sits, so the
@@ -74,6 +86,12 @@ struct AttributedBuilder {
         // p/quote/list/table, `1rem` for headings and rules).
         var previousKind: BlockKind?
         var previousAppliedAfter: CGFloat = 0
+        // The previous code block's painted fill extends this far below its
+        // last row (the strut/slack bottom, `fenceFillHeight`): the next
+        // block's collapsed spacing starts from the ROWS' bottom, so the
+        // fill's overhang is added on top — a fence→fence gap otherwise came
+        // out short by exactly the overhang (measured 10.61 against 14).
+        var previousFenceExtension: CGFloat = 0
         // The spacing a block has already applied AFTER its last line (its CSS
         // bottom margin — headings carry one, plain blocks don't). Rules apply
         // none either: `markdownRuleLine` sets `paragraphSpacing = 0` and the
@@ -96,16 +114,11 @@ struct AttributedBuilder {
             default: return 0
             }
         }
-        func cssMargin(_ kind: BlockKind) -> CGFloat {
-            switch kind {
-            case .heading: return theme.headingMargin
-            case .hr: return theme.ruleMargin
-            // The indented code block is a bare `pre` in the reference, the
-            // same element a fence renders: the same margin applies.
-            case .fences, .indentedCode: return theme.fencesMargin
-            default: return theme.blockMargin
-            }
-        }
+        // The preview's margins are asymmetric (`p { margin: 0 0 16px }`,
+        // `ul { margin: 0 0 0.7em }`, `blockquote { margin: 0 }`, `h1
+        // { margin-top: 0 }`), so the collapse needs both sides. `top` is the
+        // margin a block brings ABOVE itself, `bottom` the one it leaves
+        // BELOW; the collapsed gap is `max(previous bottom, own top)`.
         for (index, block) in document.blocks.enumerated() {
             var collapsedSpacing: CGFloat?
             if let previousKind {
@@ -114,13 +127,15 @@ struct AttributedBuilder {
                 // line (TextKit 1 sums the two; the reference collapses them).
                 collapsedSpacing =
                     max(
-                        cssMargin(previousKind), cssMargin(block.kind)
-                    ) - previousAppliedAfter
+                        state.cssMarginBottom(
+                            previousKind,
+                            of: index > 0 ? document.blocks[index - 1] : nil
+                        ), state.cssMarginTop(block)
+                    ) - previousAppliedAfter + previousFenceExtension
             } else {
-                // The first block: the reference drops a first child's
-                // margin-top (`#write > :first-child` behaviour — measured:
-                // the h1 box top sits at the content edge, no 16pt inset), so
-                // no leading spacing here either.
+                // The first block: the preview drops a first child's
+                // margin-top (`h1 { margin-top: 0 }` and the body padding
+                // carries the inset), so no leading spacing here either.
                 collapsedSpacing = 0
             }
             let boundaryStart = result.length
@@ -147,7 +162,7 @@ struct AttributedBuilder {
             // indented code block has no delimiter row to carry the padding,
             // so its boundary needs the same ride-on or its fill hangs 6pt
             // into the collapsed margin (measured boxGap 9 against 16).
-            var spacingOverride = collapsedSpacing ?? cssMargin(block.kind)
+            var spacingOverride = collapsedSpacing ?? state.cssMarginTop(block)
             if block.kind == .fences || block.kind == .indentedCode {
                 spacingOverride += theme.codePaddingTop
             }
@@ -164,6 +179,15 @@ struct AttributedBuilder {
                 spacingBefore: spacingOverride
             )
             previousAppliedAfter = appliedSpacingAfter(block.kind)
+            if block.kind == .fences || block.kind == .indentedCode {
+                let codeRows = CGFloat(max(1, splitRawLines(block.source).count - 2))
+                let codeHeight = codeRows * theme.codeFontSize * 1.357
+                previousFenceExtension = AttributedBuilder.fenceFillHeight(
+                    theme: theme, codeBlockHeight: codeHeight
+                ) - codeHeight
+            } else {
+                previousFenceExtension = 0
+            }
             previousKind = block.kind
             // Backfill the boundary runs (separator + leading blank lines) with a
             // collapsed line carrying the block's collapsed margin.
@@ -361,6 +385,57 @@ struct AttributedBuilder {
 
         /// The task item's text column includes the checkbox cell (a 12pt box plus
         /// 4pt gaps on each side, as the reference's inline checkbox lays out).
+        func cssMarginTop(_ block: BlockNode) -> CGFloat {
+            switch block.kind {
+            case .heading:
+                // `h1 { margin-top: 0 }`, the rest 24px.
+                return block.attributes.level == 1 ? 0 : theme.headingMarginTop
+            case .hr: return theme.ruleMargin
+            case .blockquote:
+                // The quote's own margin-top is 0, but its FIRST child's
+                // margin-top collapses through it and sticks out above the
+                // quote: a quote opening with a heading starts the quote's
+                // box one heading margin below the previous block (the
+                // 引用中的标题 h3 measured 25 against the h2's rule with the
+                // collapsed 24 in place, 17 without). The boundary hairline
+                // carries `max(previous bottom, this)` because the quote's
+                // first row glues into it and its own spacing never applies.
+                if let first = block.children.first {
+                    return cssMarginTop(first)
+                }
+                return 0
+            default: return 0
+            }
+        }
+        func cssMarginBottom(_ kind: BlockKind, of block: BlockNode? = nil) -> CGFloat {
+            switch kind {
+            case .heading: return theme.headingMargin
+            case .hr: return theme.ruleMargin
+            // The indented code block is a bare `pre` in the reference, the
+            // same element a fence renders: the same margin applies.
+            case .fences, .indentedCode: return theme.fencesMargin
+            // `ul, ol, table { margin-bottom: 0.7em }`; `blockquote
+            // { margin: 0 }`.
+            case .list, .listItem, .taskItem, .table: return theme.bodyFontSize * 0.7
+            case .blockquote:
+                // The blockquote's own margin is 0, but its last child's
+                // bottom margin collapses through it and sticks out of the
+                // quote: a quote ending in a paragraph leaves the `p`
+                // margin (16) below its last row - measured against the
+                // reference, every gap after a paragraph-ending quote is
+                // 16 (quote→quote, quote→paragraph alike). The quote's own
+                // rows apply no after-spacing (`sa=0`: the between-paragraph
+                // margins ride the blank struts), so nothing subtracts it
+                // back. The recursion covers a quote ending in a nested
+                // quote; a quote ending in a list or fence gets that child's
+                // margin instead of the paragraph's.
+                if let last = block?.children.last {
+                    return cssMarginBottom(last.kind, of: last)
+                }
+                return theme.blockMargin
+            default: return theme.blockMargin
+            }
+        }
         func taskTextColumn(_ indent: CGFloat) -> CGFloat { indent + 20 }
 
         /// `spacingBefore` carries the CSS-collapsed margin for top-level blocks
@@ -790,8 +865,13 @@ struct AttributedBuilder {
                 let mutable = paragraphStyle.mutableCopy()
                     as? NSMutableParagraphStyle
             {
-                mutable.minimumLineHeight = theme.blockMargin
-                mutable.maximumLineHeight = theme.blockMargin
+                // The strut is a hairline: the paragraph margin reaches the
+                // layout through the marker hider's paragraph-boundary
+                // correction (`quoteParagraphSpacing`) — a 16pt-tall strut
+                // here plus the delegate's correction double-counted the
+                // margin (measured 54.4pt pitches).
+                mutable.minimumLineHeight = 0.01
+                mutable.maximumLineHeight = 0.01
                 mutable.paragraphSpacingBefore = 0
                 blankLineStyle = mutable
             }
@@ -976,7 +1056,17 @@ struct AttributedBuilder {
                 strutIsLeading = true
                 lineCursor += 1
             }
-            for child in block.children {
+            for (childIndex, child) in block.children.enumerated() {
+                // The collapsed margin the previous sibling leaves below itself
+                // (the CSS collapse with this fence's zero top margin) — the
+                // strut before a nested fence/indented-code child carries it
+                // (see emitFenceLines).
+                let leadingStrutSpacing: CGFloat? = childIndex > 0
+                    ? cssMarginBottom(
+                        block.children[childIndex - 1].kind,
+                        of: block.children[childIndex - 1]
+                    )
+                    : nil
                 // The blank struts before a code child stand for the
                 // paragraph-to-pre collapsed margin (the reference's 15) plus
                 // the padding-top the fill rides above its first content row;
@@ -985,14 +1075,33 @@ struct AttributedBuilder {
                 if let mutable = blankLineStyle?.mutableCopy()
                     as? NSMutableParagraphStyle
                 {
-                    let strutHeight =
-                        child.kind == .fences || child.kind == .indentedCode
-                        ? theme.fencesMargin + theme.codePaddingTop
-                            + EditorMetrics.hairline * 2
-                        : theme.blockMargin
-                    mutable.minimumLineHeight = strutHeight
-                    mutable.maximumLineHeight = strutHeight
-                    blankLineStyle = mutable
+                    if child.kind == .fences || child.kind == .indentedCode,
+                        let spacing = leadingStrutSpacing
+                    {
+                        // The blank row's hidden `>` is the blank paragraph's
+                        // FIRST character, and NSTextStorage normalizes the
+                        // terminator's style to the paragraph's own on the next
+                        // attribute pass (measured: a 0.01+9.8 terminator
+                        // reverted to the `>` run's 16pt strut, keeping the
+                        // fence gap at 16.00 against the reference's 9.80). The
+                        // strut rides the marker run as a fixed row height —
+                        // a spacingBefore there would belong to the blank
+                        // paragraph, whose first fragment glues into the row
+                        // above, and never apply (measured gap 0.01).
+                        mutable.minimumLineHeight = spacing + 0.01
+                        mutable.maximumLineHeight = spacing + 0.01
+                        mutable.paragraphSpacingBefore = 0
+                        blankLineStyle = mutable
+                    } else {
+                        let strutHeight =
+                            child.kind == .fences || child.kind == .indentedCode
+                            ? theme.fencesMargin + theme.codePaddingTop
+                                + EditorMetrics.hairline * 2
+                            : theme.blockMargin
+                        mutable.minimumLineHeight = strutHeight
+                        mutable.maximumLineHeight = strutHeight
+                        blankLineStyle = mutable
+                    }
                 }
                 // The blank lines before a child stand for the paragraph margin
                 // between the quote's paragraphs. Their bytes are emitted here
@@ -1119,7 +1228,8 @@ struct AttributedBuilder {
                         child, slice, into: result, depth: depth,
                         owner: visualBlock, textColumn: inset,
                         continuationStyle: quoteStyle,
-                        firstLinePreceded: firstLinePreceded && lineCursor == 0
+                        firstLinePreceded: firstLinePreceded && lineCursor == 0,
+                        leadingStrutSpacing: leadingStrutSpacing
                     )
                 }
                 lineCursor = end
@@ -1357,11 +1467,25 @@ struct AttributedBuilder {
                     // The marker half of line 0 is already in the buffer.
                     slice[0] = line0Rest
                 }
+                // The collapsed margin the previous sibling leaves below itself.
+                // Inside an item a paragraph is a `li p` (0.7em = the item
+                // spacing), not the body `p` margin the top-level collapse
+                // models - measured against the reference's in-item fence gap
+                // (10.49 with the half-leading reconstruction, 9.8 flat).
+                let leadingStrutSpacing: CGFloat? = index > 0
+                    ? {
+                        let previous = block.children[index - 1]
+                        return previous.kind == .paragraph
+                            ? theme.listItemSpacing
+                            : cssMarginBottom(previous.kind, of: previous)
+                    }()
+                    : nil
                 emitChildContent(
                     child, slice, into: result, depth: depth + 1,
                     owner: visualBlock, textColumn: textColumn,
                     continuationStyle: continuationStyle,
-                    firstLinePreceded: ownsLine0
+                    firstLinePreceded: ownsLine0,
+                    leadingStrutSpacing: leadingStrutSpacing
                 )
                 lineCursor = end
             }
@@ -1402,7 +1526,8 @@ struct AttributedBuilder {
         private func emitChildContent(
             _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
             depth: Int, owner: BlockNode, textColumn: CGFloat,
-            continuationStyle: BlockStyle, firstLinePreceded: Bool
+            continuationStyle: BlockStyle, firstLinePreceded: Bool,
+            leadingStrutSpacing: CGFloat? = nil
         ) {
             let savedBlockOverride = renderedBlockOverride
             let savedSubBlock = renderedSubBlock
@@ -1475,6 +1600,21 @@ struct AttributedBuilder {
                     style: quoteStyle, firstLinePreceded: firstLinePreceded
                 )
             case .fences:
+                // The separator newline the list's beginLine just emitted lays
+                // out at the default row height (~16pt measured); the
+                // reference's gap is the `li p` margin (9.8pt) — collapse the
+                // separator to a hairline carrying that margin.
+                let separatorRange = NSRange(location: result.length - 1, length: 1)
+                if result.length > 0,
+                    (result.string as NSString).substring(from: result.length - 1) == "\n",
+                    result.attribute(.paragraphStyle, at: separatorRange.location, effectiveRange: nil) == nil
+                {
+                    let collapsed = NSMutableParagraphStyle()
+                    collapsed.minimumLineHeight = 0.01
+                    collapsed.maximumLineHeight = 0.01
+                    collapsed.paragraphSpacingBefore = theme.listItemSpacing
+                    result.addAttribute(.paragraphStyle, value: collapsed, range: separatorRange)
+                }
                 let base = BlockStyle.codeFence(theme: theme)
                 let codeStyle = BlockStyle(
                     font: base.font,
@@ -1501,7 +1641,8 @@ struct AttributedBuilder {
                 )
                 emitFenceLines(
                     child, raw, into: result, depth: depth, block: owner,
-                    style: codeStyle, firstLinePreceded: firstLinePreceded
+                    style: codeStyle, firstLinePreceded: firstLinePreceded,
+                    leadingStrutSpacing: leadingStrutSpacing
                 )
             case .heading where child.attributes.isSetext:
                 emitPlainLines(
@@ -1550,9 +1691,26 @@ struct AttributedBuilder {
                 }
                 if commonIndent == Int.max { commonIndent = 0 }
                 var lastCodeStyle = codeStyle.base[.paragraphStyle] as? NSParagraphStyle
+                // The collapsed sibling margin rides the separator that opens the
+                // first real code row - the row's hidden indent glues onto it, so
+                // its style is the row's height (the reference's li p margin, 9.8;
+                // an unstyled separator kept a 16pt default row, measured 18.00
+                // against 10.49). The row itself is all-hidden glyphs, so the
+                // hairline height is safe here.
+                var pendingLeadingStrut = leadingStrutSpacing
                 for (index, line) in raw.enumerated() {
                     if index > 0 || !firstLinePreceded {
-                        if let style = lastCodeStyle {
+                        let strutHere = pendingLeadingStrut != nil && !isBlankLine(line)
+                        if strutHere, let spacing = pendingLeadingStrut {
+                            let range = NSRange(location: result.length, length: 1)
+                            result.append(NSAttributedString(string: "\n"))
+                            let strutStyle = NSMutableParagraphStyle()
+                            strutStyle.paragraphSpacingBefore = spacing
+                            strutStyle.minimumLineHeight = 0.01
+                            strutStyle.maximumLineHeight = 0.01
+                            result.addAttribute(.paragraphStyle, value: strutStyle, range: range)
+                            pendingLeadingStrut = nil
+                        } else if let style = lastCodeStyle {
                             result.append(
                                 NSAttributedString(string: "\n", attributes: [.paragraphStyle: style])
                             )
@@ -1730,12 +1888,14 @@ struct AttributedBuilder {
                     let content = String(rest.dropFirst(markerLength))
                     if markerLength > 0, content.trimmingCharacters(in: .whitespaces).isEmpty {
                         // A bare `>` line: the quote continues over a blank row.
-                        // The reference renders no row (the paragraphs' margins
-                        // collapse), so the row collapses onto its hidden mark-
-                        // ers and carries the paragraph margin nothing else
-                        // provides (quote rows have no item spacing).
+                        // The reference renders no row; the paragraphs' `p
+                        // { margin-bottom }` reaches the layout through the
+                        // marker hider's paragraph-boundary correction
+                        // (`quoteParagraphSpacing`) — a spacingBefore here is
+                        // dropped by the glued boundary when it would matter,
+                        // and DOUBLE-counts when it is not (both measured).
                         let collapsedStyle = NSMutableParagraphStyle()
-                        collapsedStyle.paragraphSpacingBefore = theme.blankLineMargin
+                        collapsedStyle.paragraphSpacingBefore = 0
                         collapsedStyle.minimumLineHeight = 0.01
                         collapsedStyle.maximumLineHeight = 0.01
                         if markerLength > 0 {
@@ -1769,10 +1929,21 @@ struct AttributedBuilder {
         /// with the container indentation hidden ahead of each line.
         private func emitFenceLines(
             _ child: BlockNode, _ raw: [String], into result: NSMutableAttributedString,
-            depth: Int, block: BlockNode, style: BlockStyle, firstLinePreceded: Bool
+            depth: Int, block: BlockNode, style: BlockStyle, firstLinePreceded: Bool,
+            leadingStrutSpacing: CGFloat? = nil
         ) {
             let collapsed = BlockStyle.collapsed(from: style, theme: theme)
             let lines = splitRawLines(child.source)
+            // The collapsed margin the container's blank row stands in for (the
+            // previous sibling's bottom margin collapsed with the pre's zero
+            // top margin). It rides the separator that opens the fence's first
+            // delimiter row: the row's own glyphs (hidden indent + delimiter)
+            // glue onto that separator, so the row's height reads from its
+            // style - the only place the gap can live. Without it the
+            // separator keeps whatever the container's strut chain left there
+            // (a 16pt quote strut or a default row), measured 16.00/16.01
+            // against the reference's 9.80/10.49.
+            var pendingLeadingStrut = leadingStrutSpacing
             // The delimiter rows render no glyphs; their line boxes stand for
             // the reference's border + padding chrome above and below the code
             // (the top-level emitter does the same - a full-height delimiter row
@@ -1797,14 +1968,16 @@ struct AttributedBuilder {
                 // fill's union to equal the content rows plus the painted
                 // insets - full-height rows grew every container fence's box by
                 // whole lines (measured 83.12 against 60.09).
+                // The delimiter rows stand for the reference's border ring
+                // (1pt each): the fill's insets are 0 in this theme.
                 if let mutable = openDelimiterStyle?.mutableCopy() as? NSMutableParagraphStyle {
-                    mutable.minimumLineHeight = 0.01
-                    mutable.maximumLineHeight = 0.01
+                    mutable.minimumLineHeight = theme.codePaddingTop + EditorMetrics.hairline
+                    mutable.maximumLineHeight = theme.codePaddingTop + EditorMetrics.hairline
                     openDelimiterStyle = mutable
                 }
                 if let mutable = closeDelimiterStyle?.mutableCopy() as? NSMutableParagraphStyle {
-                    mutable.minimumLineHeight = 0.01
-                    mutable.maximumLineHeight = 0.01
+                    mutable.minimumLineHeight = theme.codePaddingBottom + EditorMetrics.hairline
+                    mutable.maximumLineHeight = theme.codePaddingBottom + EditorMetrics.hairline
                     closeDelimiterStyle = mutable
                 }
             }
@@ -1832,6 +2005,11 @@ struct AttributedBuilder {
             var collapseNextSeparator = false
             for (index, rawLine) in raw.enumerated() {
                 if index > 0 || !firstLinePreceded {
+                    // The strut rides the separator that opens the fence's
+                    // first real row (a blank line in the slice keeps it
+                    // pending - its own separator stays a plain delimiter
+                    // hairline).
+                    let strutHere = pendingLeadingStrut != nil && !isBlankLine(rawLine)
                     if collapseNextSeparator {
                         // The blank line ahead of the opening delimiter stands
                         // for the paragraph-to-pre collapsed margin (the
@@ -1841,10 +2019,26 @@ struct AttributedBuilder {
                         // against 15.00).
                         appendCollapsedNewline(
                             into: result,
-                            spacingBefore: theme.fencesMargin + theme.codePaddingTop
-                                + EditorMetrics.hairline * 2
+                            spacingBefore: strutHere
+                                ? (pendingLeadingStrut ?? 0)
+                                : theme.fencesMargin + theme.codePaddingTop
+                                    + EditorMetrics.hairline * 2
                         )
                         collapseNextSeparator = false
+                        if strutHere { pendingLeadingStrut = nil }
+                    } else if strutHere, let spacing = pendingLeadingStrut {
+                        // Fixed row height, zero spacing: the spacingBefore of
+                        // this terminator belongs to the blank paragraph (its
+                        // first fragment glues into the row above) and never
+                        // applies — the row height carries the margin instead,
+                        // matching the marker run's strut (see appendQuote).
+                        let range = NSRange(location: result.length, length: 1)
+                        result.append(NSAttributedString(string: "\n"))
+                        let strutStyle = NSMutableParagraphStyle()
+                        strutStyle.minimumLineHeight = spacing + 0.01
+                        strutStyle.maximumLineHeight = spacing + 0.01
+                        result.addAttribute(.paragraphStyle, value: strutStyle, range: range)
+                        pendingLeadingStrut = nil
                     } else {
                         // The first row's own glyphs (the hidden indent and the
                         // delimiter run) glue backwards, so its line fragment
@@ -2016,6 +2210,13 @@ struct AttributedBuilder {
             }
         }
 
+        /// The preview's `pre` content box = `max(strut, rows × code line
+        /// height) + 1.39`: the inline-block code sits on the strut's
+        /// baseline leaving a descent slack below, and a single-row block is
+        /// shorter than the strut (body line-height 1.6) which then
+        /// dominates. The painted fill grows by the difference at the bottom
+        /// so the box matches the reference at every row count. (Measured:
+        /// 1 row 22.4, 2 rows 39.39, 3 rows 58.39, +19 per further row.)
         private func appendFences(_ block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
             let source = block.source
             let lines = splitRawLines(source)
@@ -2178,12 +2379,28 @@ struct AttributedBuilder {
                             for: ranges[index].name, palette: theme.syntax
                         )
                     {
-                        result.addAttribute(
-                            .foregroundColor, value: color.nsColor,
-                            range: NSRange(
-                                location: clipped.location + shift, length: clipped.length
-                            )
+                        let target = NSRange(
+                            location: clipped.location + shift, length: clipped.length
                         )
+                        result.addAttribute(.foregroundColor, value: color.nsColor, range: target)
+                        // The reference's comment style is italic (`font-style:
+                        // italic` on `hljs-comment`); the italic face of the
+                        // row's mono font carries it. CJK fallback faces have
+                        // no italic — the glyphs stay upright, like the text
+                        // they stand in for.
+                        if CodeHighlighter.isItalic(capture: ranges[index].name),
+                            let existing = result.attribute(
+                                .font, at: target.location, effectiveRange: nil
+                            ) as? NSFont
+                        {
+                            result.addAttribute(
+                                .font,
+                                value: NSFontManager.shared.convert(
+                                    existing, toHaveTrait: .italicFontMask
+                                ),
+                                range: target
+                            )
+                        }
                     }
                 }
                 index += 1
@@ -2601,10 +2818,13 @@ struct AttributedBuilder {
                     override: InlineStyle.code(theme: theme, base: style),
                     hiddenPayloadPadding: codePadding(of: node)
                 )
+                // Registered even when the theme renders inline code as
+                // bare text (VS Code): the plan drives the headless dump's
+                // chip export, and the painter skips a nil background.
                 register(
                     [
                         .inlineCode(
-                            background: theme.inlineCodeBackground.nsColor,
+                            background: theme.inlineCodeBackground?.nsColor,
                             radius: EditorMetrics.radiusSmall
                         )
                     ],

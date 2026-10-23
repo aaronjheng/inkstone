@@ -306,7 +306,7 @@ final class SettingsStore {
         let useDark =
             settings.themeStyle == .dark
             || (settings.themeStyle == .system && isDark)
-        let base = useDark ? BuiltInTheme.night : BuiltInTheme.github
+        let base = useDark ? BuiltInTheme.night : BuiltInTheme.vscode
         return base.scaled(by: settings.fontScale)
     }
 }

@@ -46,6 +46,12 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
     /// one paragraph, so the margin between them reaches the layout through
     /// this delegate - same trick as the item spacing.
     var quoteLevelSpacing: CGFloat = 0
+    /// The quote paragraph's bottom margin (`p { margin-bottom: 16px }`):
+    /// the blank strut between a quote's paragraphs glues away its own margin
+    /// (measured: the paragraphs land contiguously), so the paragraph margin
+    /// reaches the layout through this delegate — same trick as the item
+    /// spacing.
+    var quoteParagraphSpacing: CGFloat = 0
 
     /// The layout engine's own baseline offset, per line fragment, keyed by
     /// the line's first character location.
@@ -155,22 +161,23 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
         guard let storage = layoutManager.textStorage,
             storage.length > 0
         else { return 0 }
-        // A ruled heading's rows (see `BlockStyle.ruleBottomShrink`): the
-        // style's after-spacing assumes the CJK fallback's descent — the
-        // larger of the descents a heading line can mix. A row whose faces
-        // descend less (a Latin-only heading: Open Sans only) gets the
-        // difference handed back here, so the rule→content distance stays the
-        // reference's `margin + 1` (the collapsed margin below the border)
-        // for every heading regardless of script. Additive-only by engine
-        // constraint — TextKit clamps negative returns (measured) — which is
-        // why the style shrinks by the CJK amount and this corrects upward.
-        // The row's fonts are read instead of the captured baseline: this
-        // delegate fires BEFORE `shouldSetLineFragmentRect` for the same row
-        // (measured), so the baseline map is empty here — but glyph
-        // generation has already substituted the fallback face into the
-        // storage's font attribute, which is exactly what the descent depends
-        // on. Only the row before other blocks gets it: a wrapped heading's
-        // earlier rows must not space themselves apart.
+        // A ruled heading's rows (see `BlockStyle.heading`): the style's
+        // after-spacing assumes the attribute face's descent — the largest a
+        // heading row mixes on the system stack. A row whose first visible
+        // glyph's face descends less (a CJK heading: the substituted
+        // PingFang UI face) gets the difference handed back here, so the
+        // rule→content distance stays the preview's `margin + 1` (the
+        // collapsed margin below the border) for every heading regardless of
+        // script. Additive-only by engine constraint — TextKit clamps
+        // negative returns (measured) — which is why the style assumes the
+        // larger descent and this corrects upward. The row's fonts are read
+        // instead of the captured baseline: this delegate fires BEFORE
+        // `shouldSetLineFragmentRect` for the same row (measured), so the
+        // baseline map is empty here — but glyph generation has already
+        // substituted the fallback face into the storage's font attribute,
+        // which is exactly what the descent depends on. Only the row before
+        // other blocks gets it: a wrapped heading's earlier rows must not
+        // space themselves apart.
         if let rowChars = ruledHeadingRowChars(layoutManager, glyphIndex: glyphIndex, storage: storage) {
             // A later row of the same heading follows: no spacing between them.
             let next = NSMaxRange(rowChars)
@@ -180,24 +187,45 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
                 return 0
             }
             guard
-                let style = storage.attribute(
-                    .paragraphStyle, at: rowChars.location, effectiveRange: nil
-                ) as? NSParagraphStyle,
-                let baselineGap = storage.attribute(
+                storage.attribute(
                     MarkdownAttribute.headingRuleGap, at: rowChars.location, effectiveRange: nil
-                ) as? CGFloat
+                ) != nil
             else { return 0 }
-            var maxDescent: CGFloat = 0
-            storage.enumerateAttribute(.font, in: rowChars, options: []) { value, _, _ in
-                if let font = value as? NSFont {
-                    maxDescent = max(maxDescent, -font.descender)
+            // The engine clamps the fixed line height with the descent of the
+            // row's first visible glyph's face — the CJK fallback face when
+            // the row opens with CJK (glyph generation has already
+            // substituted it into the font attribute), the attribute face
+            // otherwise. The style's after-spacing assumed the attribute
+            // face; hand back the difference when the actual face descends
+            // less, so the rule→content distance stays `margin + 1` for
+            // every script. Additive-only: TextKit clamps negative returns
+            // (measured), and the attribute face is the stack's largest
+            // descent, so the correction only ever adds.
+            // The engine clamps the fixed line height with the LARGEST
+            // descent among the row's visible runs (the hidden markers do not
+            // count — measured across pure-CJK, Latin and chip-bearing
+            // heading rows).
+            var visibleDesc: CGFloat = 0
+            storage.enumerateAttribute(.font, in: rowChars, options: []) { value, range, _ in
+                guard let font = value as? NSFont else { return }
+                if storage.attribute(
+                    MarkdownAttribute.hidden, at: range.location, effectiveRange: nil
+                ) as? Bool != true {
+                    visibleDesc = max(visibleDesc, -font.descender)
                 }
             }
-            guard maxDescent > 0 else { return 0 }
-            // The engine rounds the clamped line's descent to whole points.
-            let descUsed = maxDescent.rounded()
-            let needed = style.paragraphSpacingBefore + 1 - (descUsed - baselineGap)
-            return max(0, needed - style.paragraphSpacing)
+            let firstVisibleDesc: CGFloat? = visibleDesc > 0 ? visibleDesc : nil
+            // The attribute face's descent rides the row's own attributes (the
+            // hidden marker runs carry the heading's base, so the first
+            // character has it): reconstructing it from the row's fonts would
+            // drag in substituted/chip faces instead.
+            let attrDesc = storage.attribute(
+                MarkdownAttribute.headingRuleAttrDesc,
+                at: rowChars.location, effectiveRange: nil
+            ) as? CGFloat
+            guard let firstVisibleDesc, firstVisibleDesc > 0, let attrDesc, attrDesc > 0
+            else { return 0 }
+            return max(0, attrDesc.rounded() - firstVisibleDesc.rounded())
         }
         guard listItemSpacing > 0 else { return 0 }
         func kind(at location: Int) -> String? {
@@ -311,7 +339,38 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
                 }
                 lookahead += 1
             }
-            if handover != nil, rowBreaks == 1 { return quoteLevelSpacing }
+            if handover != nil, rowBreaks == 1 {
+                return quoteLevelSpacing
+            }
+            // A paragraph boundary inside the quote level: the blank strut
+            // between the paragraphs glues away its own margin (measured: the
+            // paragraphs land contiguously), so the paragraphs' `p
+            // { margin-bottom }` reaches the layout here — two row breaks
+            // (the boundary blank) and then the same scope again. A single
+            // break is a soft-wrapped row of the same paragraph: no spacing;
+            // a different block after the breaks is the quote's end (its own
+            // zero bottom margin handles it).
+            if handover == nil, rowKind == BlockKind.blockquote.rawValue {
+                var boundaryBreaks = 0
+                var boundaryLookahead = 1
+                var boundaryLog: [String] = []
+                while boundaryLookahead <= 16, glyphIndex + boundaryLookahead < storage.length {
+                    let at = glyphIndex + boundaryLookahead
+                    if let block = blockID(at: at), block != ownBlock {
+                        boundaryLog.append("block\(block)@\(at)")
+                        break
+                    }
+                    let chOpt = character(at: at)
+                    if chOpt == "\n" { boundaryBreaks += 1 }
+                    let subAt = subBlock(at: at)
+                    let ch = chOpt.map(String.init) ?? "?"
+                    boundaryLog.append("ch\(ch)sub=\(subAt ?? -1)b\(boundaryBreaks)")
+                    if boundaryBreaks >= 2, let sub = subBlock(at: at), sub == own {
+                        return quoteParagraphSpacing
+                    }
+                    boundaryLookahead += 1
+                }
+            }
         }
         guard
             [min(glyphIndex, storage.length - 1), glyphIndex - 1].contains(where: {
@@ -328,25 +387,34 @@ final class MarkerHider: NSObject, NSLayoutManagerDelegate {
         return listItemSpacing
     }
 
+    /// TEMPORARY round-1 debug: the ruled-heading correction path, appended
+    /// to /tmp/ruled-debug.txt during parity iterations.
     /// The character range of this row when it belongs to a ruled heading
-    /// (carries `md.headingRuleGap`), else nil. The row's glyph range comes
-    /// out with `withoutAdditionalLayout` — this fires mid-layout, and a
-    /// plain query could re-enter it.
+    /// (carries `md.headingRuleGap`), else nil.
+    ///
+    /// The row's characters are walked straight off the storage text — back
+    /// from the row's last glyph to the previous line terminator — because
+    /// this fires mid-layout, where `characterRange(forGlyphRange:)` answers
+    /// from a fragment cache that is still in flux and hands back ranges that
+    /// span whole paragraphs (measured: `{0, 64}` for an 8-character heading).
     private func ruledHeadingRowChars(
         _ layoutManager: NSLayoutManager, glyphIndex: Int, storage: NSTextStorage
     ) -> NSRange? {
-        var rowGlyphs = NSRange()
-        layoutManager.lineFragmentRect(
-            forGlyphAt: min(glyphIndex, storage.length - 1),
-            effectiveRange: &rowGlyphs, withoutAdditionalLayout: true
-        )
-        let rowChars = layoutManager.characterRange(
-            forGlyphRange: rowGlyphs, actualGlyphRange: nil
-        )
-        guard rowChars.length > 0, rowChars.location < storage.length,
-            storage.attribute(
-                MarkdownAttribute.headingRuleGap, at: rowChars.location, effectiveRange: nil
-            ) != nil
+        let ns = storage.string as NSString
+        let last = min(glyphIndex, storage.length - 1)
+        guard ns.character(at: last) != 0x0A, ns.character(at: last) != 0x0D else {
+            return nil
+        }
+        var start = last
+        while start > 0 {
+            let previous = ns.character(at: start - 1)
+            if previous == 0x0A || previous == 0x0D { break }
+            start -= 1
+        }
+        let rowChars = NSRange(location: start, length: last - start + 1)
+        guard storage.attribute(
+            MarkdownAttribute.headingRuleGap, at: rowChars.location, effectiveRange: nil
+        ) != nil
         else { return nil }
         return rowChars
     }
