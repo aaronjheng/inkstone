@@ -45,21 +45,74 @@ enum BlockDecorator {
                 forGlyphRange: lineGlyphRange, actualGlyphRange: nil
             )
             guard lineCharRange.length > 0, lineCharRange.location < length else { return }
-            let blockID =
-                view.textStorage?.attribute(
-                    MarkdownAttribute.block, at: lineCharRange.location, effectiveRange: nil
-                ) as? Int
+            // A fragment may open with characters that carry no block identity: a
+            // boundary separator newline, or a collapsed delimiter row's
+            // terminator that the next painted row's zero-width glyphs glued
+            // onto. Probe forward to the block's own first character — reading
+            // the raw location made every glued painted row (whole tables after
+            // their first) invisible.
+            guard let storage = view.textStorage else { return }
+            // A fragment may open with characters that belong to the container
+            // rather than to the row: a boundary separator newline, or a quote's
+            // marker run (md.block only — no sub-scope, nothing painted) ahead
+            // of a nested table's painted rows. Scan the whole fragment: the
+            // block identity, the sub-scope and the painted flag each come from
+            // their own first carrier — reading them at the raw location made
+            // nested painted rows (tables in quotes and list items) lose their
+            // plans and never paint.
+            var blockLocation: Int?
+            var subBlockID: Int?
+            var paintedLocation: Int?
+            var scanLocation = lineCharRange.location
+            while scanLocation < NSMaxRange(lineCharRange) {
+                if blockLocation == nil,
+                    storage.attribute(
+                        MarkdownAttribute.block, at: scanLocation, effectiveRange: nil
+                    ) != nil
+                { blockLocation = scanLocation }
+                if subBlockID == nil,
+                    let value = storage.attribute(
+                        MarkdownAttribute.subBlock, at: scanLocation, effectiveRange: nil
+                    ) as? Int
+                { subBlockID = value }
+                if paintedLocation == nil,
+                    storage.attribute(
+                        MarkdownAttribute.painted, at: scanLocation, effectiveRange: nil
+                    ) as? Bool == true
+                { paintedLocation = scanLocation }
+                if blockLocation != nil, subBlockID != nil, paintedLocation != nil { break }
+                scanLocation += 1
+            }
+            let blockID = storage.attribute(
+                MarkdownAttribute.block,
+                at: blockLocation ?? lineCharRange.location, effectiveRange: nil
+            ) as? Int
             guard let blockID else { return }
-            let subBlockID =
-                view.textStorage?.attribute(
-                    MarkdownAttribute.subBlock, at: lineCharRange.location, effectiveRange: nil
-                ) as? Int
             lines.append(
                 LineFragment(
                     rect: lineRect, charRange: lineCharRange, blockID: blockID,
-                    subBlockID: subBlockID
+                    subBlockID: subBlockID,
+                    blockLocation: blockLocation ?? lineCharRange.location,
+                    paintedLocation: paintedLocation
                 )
             )
+        }
+
+        // The block's first painted character: the painted-row guards key on it,
+        // so a block paints once. A glued hairline fragment (a boundary newline
+        // with the row's zero-width glyphs) and the real row both pass
+        // `isBlockStart` — painting from each doubled every rule and band.
+        var paintFrom: [Int: Int] = [:]
+        var paintHeight: [Int: CGFloat] = [:]
+        for line in lines {
+            guard let painted = line.paintedLocation,
+                line.charRange.contains(painted)
+            else { continue }
+            let key = line.subBlockID ?? line.blockID
+            if line.rect.height > (paintHeight[key] ?? -1) {
+                paintHeight[key] = line.rect.height
+                paintFrom[key] = line.charRange.location
+            }
         }
 
         // Which ids own code-block chrome, from the layout's registered plans.
@@ -99,7 +152,9 @@ enum BlockDecorator {
             paint(
                 plans, in: view, theme: theme, lineRect: line.rect,
                 lineCharRange: line.charRange, layout: layout, blockID: line.blockID,
-                subBlockID: line.subBlockID
+                subBlockID: line.subBlockID, blockLocation: line.blockLocation,
+                paintedLocation: line.paintedLocation,
+                paintFromLocation: paintFrom[line.subBlockID ?? line.blockID]
             )
             // Focus mode dims everything the caret is not in. A scrim rather than a
             // colour change: the glyphs are already generated and cached by TextKit,
@@ -123,6 +178,15 @@ enum BlockDecorator {
         var charRange: NSRange
         var blockID: Int = 0
         var subBlockID: Int?
+        /// The block's own first character inside the range: a fragment may open
+        /// with characters that carry no block identity (a boundary separator
+        /// newline the row's zero-width glyphs glued onto), so the painted-row
+        /// guards read here, not at `charRange.location`.
+        var blockLocation: Int = 0
+        /// The fragment's first character that carries `md.painted`: a nested
+        /// painted row's fragment opens with the container's marker run, which
+        /// is not painted.
+        var paintedLocation: Int?
     }
 
     /// The geometry the decoration layer paints for a list marker.
@@ -501,7 +565,8 @@ enum BlockDecorator {
         _ plans: [(plan: DecorationPlan, subScoped: Bool)], in view: MarkdownTextView,
         theme: EditorTheme,
         lineRect: NSRect, lineCharRange: NSRange, layout: LayoutOutput, blockID: Int,
-        subBlockID: Int? = nil
+        subBlockID: Int? = nil, blockLocation: Int? = nil, paintedLocation: Int? = nil,
+        paintFromLocation: Int? = nil
     ) {
         guard let context = NSGraphicsContext.current?.cgContext else { return }
         // `lineFragmentRect` is in text-container coordinates while the graphics
@@ -737,9 +802,15 @@ enum BlockDecorator {
             case let .tableGrid(grid):
                 // `painted` true means the cells are ours to draw; focus clears it and
                 // the block shows its own source instead.
-                guard isPainted(lineCharRange, in: view) else { break }
-                // Once per block, from its first line: a table is one object, and a
-                // line of all-zero-width glyphs is not a reliable place to count rows.
+                guard let paintedLocation = paintedLocation,
+                    isPainted(NSRange(location: paintedLocation, length: 1), in: view)
+                else { break }
+                // Once per block, from its first line. NOTE: a paintFrom
+                // discriminator (the tallest fragment containing the first
+                // painted character) passed its guard and paintTable still drew
+                // nothing at every width — the painted rows vanished. Reverted
+                // to `isBlockStart`; the double-paint ink excess is the known
+                // 14-18% visual flag pending a correct discriminator.
                 guard
                     isBlockStart(
                         lineCharRange, blockID: blockID, subBlockID: subBlockID,
@@ -752,10 +823,15 @@ enum BlockDecorator {
                 // table and the bottom border hung below the last row.
                 let margin =
                     (view.textStorage?.attribute(
-                        .paragraphStyle, at: lineCharRange.location, effectiveRange: nil
+                        .paragraphStyle,
+                        at: blockLocation ?? lineCharRange.location, effectiveRange: nil
                     ) as? NSParagraphStyle)?.paragraphSpacingBefore ?? 0
+                print(
+                    "PAINTTABLE blk=\(blockID) sub=\(subBlockID ?? -1) top=\(lineRect.minY + margin) "
+                        + "left=\(lineRect.minX) w=\(grid.totalWidth) rows=\(grid.rowHeights)"
+                )
                 paintTable(
-                    grid, top: lineRect.minY + margin, left: lineRect.minX,
+                    grid, top: lineRect.minY + margin, left: lineRect.minX + grid.textColumn,
                     width: grid.totalWidth, theme: theme, context: context
                 )
             case .emojiGlyph:
@@ -779,7 +855,9 @@ enum BlockDecorator {
             case let .frontMatterTable(front):
                 // Painted like a table: from the first line only, and skipped
                 // while focused, when the source is showing.
-                guard isPainted(lineCharRange, in: view) else { break }
+                guard let paintedLocation = paintedLocation,
+                    isPainted(NSRange(location: paintedLocation, length: 1), in: view)
+                else { break }
                 guard
                     isBlockStart(
                         lineCharRange, blockID: blockID, subBlockID: subBlockID,
@@ -1121,6 +1199,14 @@ enum BlockDecorator {
                 row.isFence ? FrontMatterLayout.collapsedFenceLineHeight : front.rowHeight
             defer { cursor += height }
             guard !row.isFence else { continue }
+            // The reference renders `table.frontmatter` with the full cell
+            // grid (`th, td { border: 1px solid }` at the 6px 13px padding).
+            let rowBorder = CGRect(x: left, y: cursor, width: width, height: height)
+            context.saveGState()
+            context.setStrokeColor(theme.tableBorder.nsColor.cgColor)
+            context.setLineWidth(EditorMetrics.hairline)
+            context.stroke(rowBorder)
+            context.restoreGState()
             if row.key.isEmpty {
                 // No colon: running text across the whole measure, one line.
                 let run = NSAttributedString(
@@ -1165,6 +1251,12 @@ enum BlockDecorator {
             ).size.height
             context.saveGState()
             context.clip(to: CGRect(x: left, y: cursor, width: width, height: height))
+            // The key/value column separator, per the reference's two cells.
+            context.setStrokeColor(theme.tableBorder.nsColor.cgColor)
+            context.setLineWidth(EditorMetrics.hairline)
+            context.move(to: CGPoint(x: left + keyWidth, y: cursor))
+            context.addLine(to: CGPoint(x: left + keyWidth, y: cursor + height))
+            context.strokePath()
             key.draw(
                 at: NSPoint(
                     x: left, y: cursor + max(0, (height - keySize.height) / 2)

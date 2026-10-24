@@ -153,6 +153,143 @@ enum LayoutDump {
     }
 
     /// Runs the dump from raw command-line arguments. Returns the exit status.
+    /// TEMPORARY: the live revealPaintedBlock's style table, replicated for the
+    /// --painted dump mode.
+    private static func paintedStyles(
+        for blockID: Int, rows: Int, revealed: Bool,
+        layout: LayoutOutput, theme: EditorTheme
+    ) -> [NSParagraphStyle]? {
+        guard let plans = layout.decorations[blockID] else { return nil }
+        for plan in plans {
+            if case let .tableGrid(grid) = plan {
+                return (0..<rows).map { index in
+                    grid.paragraphStyle(
+                        forSourceRow: index, revealed: revealed,
+                        spacing: index == 0 ? theme.blockMargin : 0
+                    )
+                }
+            }
+        }
+        return nil
+    }
+
+    /// TEMPORARY: the live newlineFreeSpans, replicated for the --painted mode.
+    private static func newlineFreeSpans(of range: NSRange, in storage: NSTextStorage) -> [NSRange] {
+        let ns = storage.string as NSString
+        var spans: [NSRange] = []
+        var cursor = range.location
+        let end = NSMaxRange(range)
+        while cursor < end {
+            let line = ns.lineRange(for: NSRange(location: cursor, length: 0))
+            var lineEnd = min(NSMaxRange(line), end)
+            if lineEnd > cursor && ns.character(at: lineEnd - 1) == 10 { lineEnd -= 1 }
+            if lineEnd > cursor { spans.append(NSRange(location: cursor, length: lineEnd - cursor)) }
+            var next = lineEnd
+            while next < end && ns.character(at: next) == 10 { next += 1 }
+            cursor = max(next, cursor + 1)
+        }
+        return spans
+    }
+
+    /// TEMPORARY headless render: the live editor path (MarkdownTextView +
+    /// BlockDecorator.draw) into a PNG, so painted-block regressions surface
+    /// without a window.
+    /// The entry InkstoneApp calls for `--render` (assumes the main actor).
+    static func runRender(_ arguments: [String]) -> Int32 {
+        MainActor.assumeIsolated {
+            render(arguments: arguments)
+        }
+    }
+
+    @MainActor
+    private static func render(arguments: [String]) -> Int32 {
+        func value(_ flag: String) -> String? {
+            guard let index = arguments.firstIndex(of: flag), index + 1 < arguments.count
+            else { return nil }
+            return arguments[index + 1]
+        }
+        guard let path = value("--render"),
+            let source = try? String(contentsOfFile: path, encoding: .utf8)
+        else {
+            fputs("usage: Inkstone --render <file.md> [--width N] [--theme id] [--out png]\n", stderr)
+            return 2
+        }
+        let width = CGFloat(value("--width").flatMap(Double.init) ?? 860)
+        let themeID = value("--theme") ?? "vscode"
+        let theme = BuiltInTheme.theme(named: themeID) ?? BuiltInTheme.vscode
+        FontRegistration.registerBundledFonts()
+        // The dynamic colours resolve against the process appearance; without a
+        // running app that is the system's, which may be dark. Pin light.
+        let aqua = NSAppearance(named: .aqua)
+        NSApplication.shared.appearance = aqua
+        NSAppearance.current = aqua
+        defer { NSAppearance.current = nil }
+        let view = MarkdownTextView(theme: theme)
+        view.appearance = aqua
+        // The page background is filled by the harness below (before the
+        // draw): the text view's own background fill runs AFTER the decorator
+        // inside `draw(_:)` and would paint over every painted table.
+        view.drawsBackground = false
+        view.frame = NSRect(x: 0, y: 0, width: width, height: 600)
+        view.load(markdown: source)
+        view.layoutSubtreeIfNeeded()
+        let contentHeight = max(
+            CGFloat(source.split(separator: "\n").count) * 40, view.frame.height
+        ) + 80
+        view.frame = NSRect(x: 0, y: 0, width: width, height: contentHeight)
+        view.layoutSubtreeIfNeeded()
+        let scale = 2
+        guard
+            let rep = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: Int(width) * scale,
+                pixelsHigh: Int(contentHeight) * scale, bitsPerSample: 8, samplesPerPixel: 4,
+                hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                bytesPerRow: 0, bitsPerPixel: 0
+            )
+        else { return 1 }
+        rep.size = NSSize(width: width, height: contentHeight)
+        // `cacheDisplay` is the one offscreen path that honours the view's
+        // flippedness without mirroring glyphs; a hand-rolled `draw(_:)` call
+        // either reverses the content order or mirrors every glyph.
+        guard let context = NSGraphicsContext(bitmapImageRep: rep) else { return 1 }
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = context
+        context.cgContext.setFillColor(theme.background.nsColor.cgColor)
+        context.cgContext.fill(view.bounds)
+        view.cacheDisplay(in: view.bounds, to: rep)
+        NSGraphicsContext.restoreGraphicsState()
+        var output = rep
+        let image = NSImage(size: rep.size)
+        image.addRepresentation(rep)
+        if let flipped = NSBitmapImageRep(
+                bitmapDataPlanes: nil, pixelsWide: rep.pixelsWide, pixelsHigh: rep.pixelsHigh,
+                bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0
+            )
+        {
+            flipped.size = rep.size
+            NSGraphicsContext.saveGraphicsState()
+            if let flippedContext = NSGraphicsContext(bitmapImageRep: flipped) {
+                NSGraphicsContext.current = flippedContext
+                image.draw(
+                    in: NSRect(x: 0, y: 0, width: rep.size.width, height: rep.size.height)
+                )
+                NSGraphicsContext.current = nil
+            }
+            NSGraphicsContext.restoreGraphicsState()
+            output = flipped
+        }
+        let out = value("--out") ?? "/tmp/render.png"
+        guard let data = output.representation(using: .png, properties: [:]) else { return 1 }
+        do {
+            try data.write(to: URL(fileURLWithPath: out))
+        } catch {
+            fputs("cannot write \(out): \(error)\n", stderr)
+            return 1
+        }
+        return 0
+    }
+
     static func run(_ arguments: [String]) -> Int32 {
         guard let path = arguments.firstIndex(of: "--dump-layout").map({ arguments[$0 + 1] })
         else {
@@ -187,6 +324,52 @@ enum LayoutDump {
         let output = AttributedBuilder(theme: theme, context: context).build(document)
 
         let storage = NSTextStorage(attributedString: output.attributed)
+        // TEMPORARY painted-flow reproduction: the live editor's
+        // revealPaintedBlock rewrites painted blocks' paragraph styles and hides
+        // their spans; the dump otherwise never runs that pass, so table
+        // regressions only surface in the app. Focus = nil (nothing focused).
+        if CommandLine.arguments.contains("--painted") {
+            storage.beginEditing()
+            for candidate in output.blocks {
+                let probe = min(candidate.range.location, storage.length - 1)
+                guard storage.attribute(
+                    MarkdownAttribute.painted, at: probe, effectiveRange: nil
+                ) != nil
+                else { continue }
+                let start = min(candidate.range.location, storage.length)
+                let length = max(0, min(candidate.range.length, storage.length - start))
+                guard length > 0 else { continue }
+                let blockRange = NSRange(location: start, length: length)
+                let spans = Self.newlineFreeSpans(of: blockRange, in: storage)
+                let isPaintedNow = true
+                let wasPainted = storage.attribute(
+                    MarkdownAttribute.painted, at: probe, effectiveRange: nil
+                ) as? Bool
+                let styles = wasPainted == isPaintedNow
+                    ? nil : Self.paintedStyles(
+                        for: candidate.id, rows: spans.count, revealed: !isPaintedNow,
+                        layout: output, theme: theme
+                    )
+                for span in spans {
+                    storage.addAttribute(MarkdownAttribute.painted, value: isPaintedNow, range: span)
+                    storage.addAttribute(MarkdownAttribute.hidden, value: isPaintedNow, range: span)
+                }
+                guard let styles else { continue }
+                for index in spans.indices where index < styles.count {
+                    storage.addAttribute(.paragraphStyle, value: styles[index], range: spans[index])
+                }
+                let ns = storage.string as NSString
+                for index in spans.indices where index + 1 < spans.count {
+                    let at = NSMaxRange(spans[index])
+                    guard at < storage.length, ns.character(at: at) == 10 else { continue }
+                    guard index + 1 < styles.count else { continue }
+                    storage.addAttribute(
+                        .paragraphStyle, value: styles[index + 1], range: NSRange(location: at, length: 1)
+                    )
+                }
+            }
+            storage.endEditing()
+        }
         let manager = NSLayoutManager()
         // The marker hider is what makes hidden syntax zero-advance, exactly as
         // in the live editor — without it every hidden run advances and the
@@ -368,9 +551,16 @@ enum LayoutDump {
             else { continue }
             // A quote's zero-width blank row (the bare `>` line between the
             // quote's children) is the paragraph margin, not a rendered row -
-            // the reference has no row there either.
+            // the reference has no row there either. Rows scoped to a child
+            // that owns a painted table ARE the table's rendered rows (the
+            // painter draws the grid over them) and must survive the filter.
             if used.width <= 0.5, fragment.rawKind == BlockKind.blockquote.rawValue {
-                continue
+                let paintsTable = fragment.subBlockID.flatMap { output.decorations[$0] }?
+                    .contains { plan in
+                        if case .tableGrid = plan { return true }
+                        return false
+                    } ?? false
+                if !paintsTable { continue }
             }
             let style =
                 storage.attribute(
@@ -726,7 +916,7 @@ enum LayoutDump {
             }
             bars.append(
                 DumpBar(
-                    line: box.line, kind: "tableBox", x: box.rect.minX,
+                    line: box.line, kind: "tableBox", x: box.rect.minX + box.grid.textColumn,
                     y: top, width: box.grid.totalWidth,
                     height: box.grid.totalHeight, rows: rows,
                     cols: box.grid.columnRects

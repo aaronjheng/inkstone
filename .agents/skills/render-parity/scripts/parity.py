@@ -1157,6 +1157,144 @@ def run(paths: list[Path], app_bin: Path, out_dir: Path, tolerances: dict[str, f
     return 1 if total_flags else 0
 
 
+
+# ---------------------------------------------------------------------------
+# Visual parity: render both sides to PNG and diff their ink-band structure.
+# The geometry comparator observes the builder's model; painted-block bugs
+# (tables drawn by BlockDecorator, strut collapses) only exist in the view's
+# own paint pass. This renders the live path and the reference browser and
+# compares the horizontal ink bands, which is what "obvious at a glance" sees.
+
+def _ink_bands(png: Path) -> list:
+    import numpy as np
+    from PIL import Image
+    arr = np.asarray(Image.open(png).convert("RGB")).astype(np.int32)
+    h, w, _ = arr.shape
+    sample = arr[::4, ::8].reshape(-1, 3)
+    bg = np.median(sample, axis=0)
+    ink = (np.abs(arr - bg).sum(axis=2) > 90).sum(axis=1)
+    threshold = max(1, int(w * 0.002))
+    bands: list = []
+    y = 0
+    while y < h:
+        if ink[y] > threshold:
+            y0 = y
+            while y < h and ink[y] > threshold:
+                y += 1
+            bands.append({"y0": y0, "y1": y, "h": y - y0, "ink": int(ink[y0:y].sum())})
+        else:
+            y += 1
+    return bands
+
+
+def _band_signature(band: dict) -> tuple:
+    return (round(band["h"] / 6), round(band["ink"] / 20000))
+
+
+def visual_one(md: Path, app_bin: Path, out_dir: Path) -> list:
+    import difflib
+    import subprocess
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = md.stem if md.stem != "README" else "README"
+    ref_json = out_dir / f"{stem}.ref.json"
+    baseline(md, ref_json, True, keep_html=True)
+    meta = json.loads(ref_json.read_text()).get("meta", {})
+    width = meta["viewport"]
+    html_path = ref_json.with_suffix(".html")
+
+    ref_png = out_dir / f"{stem}.ref.png"
+    app_png = out_dir / f"{stem}.app.png"
+
+    # Reference screenshot: the same html the geometry baseline renders.
+    html = html_path.read_text(encoding="utf-8")
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        try:
+            browser = p.chromium.launch(channel="chrome")
+        except Exception:
+            browser = p.chromium.launch()
+        page = browser.new_page(
+            viewport={"width": VIEWPORT, "height": 1400}, device_scale_factor=1
+        )
+        page.set_content(html, wait_until="networkidle")
+        page.wait_for_timeout(100)
+        page.screenshot(path=str(ref_png), full_page=True)
+        browser.close()
+
+    # App screenshot: the live paint path into a bitmap.
+    render = subprocess.run(
+        [str(app_bin), "--render", str(md), "--width", str(width), "--out", str(app_png)],
+        capture_output=True, text=True,
+    )
+    if render.returncode != 0 or not app_png.exists():
+        return [f"app render failed (exit {render.returncode}): {render.stderr.strip()[:200]}"]
+    app_scale = 2  # the render harness draws at 2x
+    ref_bands = _ink_bands(ref_png)
+    app_scale = 2  # the render harness draws at 2x
+    app_bands = _ink_bands(app_png) if app_png.exists() else []
+    for b in app_bands:
+        b["y0"] /= app_scale
+        b["y1"] /= app_scale
+
+    # Cumulative-ink curves: merge/split invariant, so line-gap rendering
+    # differences cannot wedge the comparison. Each curve is sampled over its
+    # own height; a small shift search absorbs the total-height difference and
+    # the worst remaining deviation is the divergence. A whole block missing
+    # from one side (a table never painted) shows up as a large plateau.
+    import numpy as np
+
+    def curve(bands: list, height: float, n: int = 240) -> "np.ndarray":
+        ys: list = [0.0]
+        vals: list = [0.0]
+        cum = 0.0
+        for b in bands:
+            ys += [b["y0"], b["y1"]]
+            vals += [cum, cum + b["ink"]]
+            cum += b["ink"]
+        ys.append(height)
+        vals.append(cum)
+        total = max(1.0, cum)
+        grid = np.linspace(0.0, height, n)
+        return np.interp(grid, ys, vals) / total
+
+    ref_height = max([b["y1"] for b in ref_bands] + [1])
+    app_height = max([b["y1"] for b in app_bands] + [1])
+    ref_curve = curve(ref_bands, ref_height)
+    app_curve = curve(app_bands, app_height)
+    grid = np.linspace(0.0, 1.0, 240)
+    best = (float("inf"), 0.0)
+    for i in range(-6, 7):
+        shift = i * 0.005
+        shifted = np.interp(
+            grid, grid + shift, ref_curve, left=ref_curve[0], right=ref_curve[-1]
+        )
+        deviation = float(np.abs(shifted - app_curve).max())
+        if deviation < best[0]:
+            best = (deviation, shift)
+    deviation, shift = best
+    flags: list = []
+    if deviation > 0.10:
+        flags.append(
+            f"ink structure diverges: worst cumulative deviation "
+            f"{deviation * 100:.0f}% of the document ink at shift {shift * 100:.0f}%"
+        )
+    return flags
+
+
+def run_visual(paths: list, app_bin: Path, out_dir: Path) -> int:
+    total = 0
+    for path in paths:
+        files = sorted(path.rglob("*.md")) if path.is_dir() else [path]
+        for md in files:
+            flags = visual_one(md, app_bin, out_dir)
+            print(f"== {md}")
+            for flag in flags:
+                print(f"   - {flag}")
+                total += 1
+    print(f"\n{total} visual divergence(s); renders in {out_dir}")
+    return 1 if total else 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -1173,6 +1311,13 @@ def main() -> int:
     p_cmp.add_argument("--out", type=Path, default=None)
     for name, default in TOLERANCES.items():
         p_cmp.add_argument(f"--tol-{name}", type=float, default=default)
+
+    p_vis = sub.add_parser(
+        "visual", help="render both sides to PNG and diff ink-band structure"
+    )
+    p_vis.add_argument("paths", type=Path, nargs="+")
+    p_vis.add_argument("--app", type=Path, default=DEFAULT_APP_BIN)
+    p_vis.add_argument("--out", type=Path, default=None)
 
     p_run = sub.add_parser("run", help="baseline + app dump + compare")
     p_run.add_argument("paths", type=Path, nargs="+")
@@ -1197,6 +1342,11 @@ def main() -> int:
             print(f"- {flag}")
         print(f"\n{len(flags)} divergence(s); report: {out}")
         return 1 if flags else 0
+    if args.command == "visual":
+        out_dir = args.out or Path(
+            tempfile.mkdtemp(prefix="render-parity-visual-")
+        )
+        return run_visual(args.paths, args.app, out_dir)
     if args.command == "run":
         tolerances = {
             name: getattr(args, f"tol_{name}") for name in TOLERANCES

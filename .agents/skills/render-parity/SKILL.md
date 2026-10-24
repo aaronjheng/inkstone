@@ -91,6 +91,21 @@ uv run .agents/skills/render-parity/scripts/parity.py run \
 Intermediate JSON/report files land in a temp work dir (printed at the end);
 pass `--out dir` to keep them next to the document for inspection.
 
+## Seeing what the App paints
+
+The geometry dump exercises the builder and a headless layout manager, but not
+the view's own painting pass — painted-block regressions (tables drawn by
+`BlockDecorator`) only surface in the app. A headless render covers that gap:
+
+```bash
+.build/xcode-derived/Build/Products/Release/Inkstone.app/Contents/MacOS/Inkstone \
+  --render <file.md> --width 816 --out /tmp/render.png
+```
+
+It runs the live path (`MarkdownTextView.load` → `BlockDecorator.draw`) into a
+PNG without opening a window. `--painted` (for `--dump-layout`) additionally
+applies the painted-block paragraph-style rewrite before dumping.
+
 ## Reading the report
 
 - `lines[]` — per aligned line: `height`/`pitch`/`gap`/`left` as

@@ -1056,6 +1056,8 @@ struct AttributedBuilder {
                 strutIsLeading = true
                 lineCursor += 1
             }
+            var childFenceExtension: CGFloat = 0
+            var previousChild: BlockNode?
             for (childIndex, child) in block.children.enumerated() {
                 // The collapsed margin the previous sibling leaves below itself
                 // (the CSS collapse with this fence's zero top margin) — the
@@ -1091,6 +1093,22 @@ struct AttributedBuilder {
                         mutable.minimumLineHeight = spacing + 0.01
                         mutable.maximumLineHeight = spacing + 0.01
                         mutable.paragraphSpacingBefore = 0
+                        blankLineStyle = mutable
+                    } else if child.kind == .table {
+                        // The table's header row glues onto this strut (its own
+                        // glyphs are zero-width), so the strut must be as tall as
+                        // that row — a blockMargin strut shrank the header to the
+                        // margin alone. The p-to-table collapsed margin rides the
+                        // spacing before, like the top-level boundary does.
+                        mutable.minimumLineHeight = theme.bodyLineHeight
+                            * theme.bodyFontSize + theme.tableCellPadding * 2 + 1
+                        mutable.maximumLineHeight = mutable.minimumLineHeight
+                        // The p-to-table collapsed margin plus the previous
+                        // fence's fill extension — the same accounting the
+                        // top-level boundary does (`previousFenceExtension`).
+                        mutable.paragraphSpacingBefore = max(
+                            previousChild.map { cssMarginBottom($0.kind, of: $0) } ?? 0, 0
+                        ) + childFenceExtension
                         blankLineStyle = mutable
                     } else {
                         let strutHeight =
@@ -1233,6 +1251,16 @@ struct AttributedBuilder {
                     )
                 }
                 lineCursor = end
+                if child.kind == .fences || child.kind == .indentedCode {
+                    let codeRows = CGFloat(max(1, splitRawLines(child.source).count - 2))
+                    let codeHeight = codeRows * theme.codeFontSize * 1.357
+                    childFenceExtension = AttributedBuilder.fenceFillHeight(
+                        theme: theme, codeBlockHeight: codeHeight
+                    ) - codeHeight
+                } else {
+                    childFenceExtension = 0
+                }
+                previousChild = child
             }
             // Lines no child claimed are still bytes in the file.
             while lineCursor < rawLines.count {
@@ -1667,6 +1695,12 @@ struct AttributedBuilder {
                     child, raw, into: result, depth: depth, style: headingStyle,
                     firstLinePreceded: firstLinePreceded
                 )
+            case .table:
+                // A table nested in a container paints like a top-level one: the
+                // same grid and painted rows over the container text column.
+                // The default fallback below renders the source pipes verbatim,
+                // which left every table inside a quote or list item unpainted.
+                emitTable(child, into: result, depth: depth, textColumn: textColumn)
             case .indentedCode:
                 let base = BlockStyle.codeFence(theme: theme)
                 register(base.decoration, for: child.id)
@@ -2436,6 +2470,19 @@ struct AttributedBuilder {
         }
 
         private func appendTable(_ block: BlockNode, into result: NSMutableAttributedString, depth: Int) {
+            emitTable(block, into: result, depth: depth, textColumn: 0)
+        }
+
+        /// Emits a table as painted rows: the top-level path (`appendTable`) and
+        /// the container path (`emitChildContent`'s `.table` case — a table
+        /// inside a quote or list item used to fall into the raw-text fallback
+        /// and render its pipes). `textColumn` is the container's own inset: the
+        /// rows indent by it so the painted grid lands on the container's
+        /// column, and the grid's fit measure shrinks by it.
+        private func emitTable(
+            _ block: BlockNode, into result: NSMutableAttributedString, depth: Int,
+            textColumn: CGFloat
+        ) {
             var style = BlockStyle.table(theme: theme)
             var rows = splitRawLines(block.source)
             // The block's own trailing newline shows up as a final empty component.
@@ -2454,8 +2501,9 @@ struct AttributedBuilder {
 
             let grid = TableGrid(
                 rows: paintedRows, alignments: alignments,
-                theme: theme, containerWidth: context.containerWidth,
-                delimiterIndex: delimiterIndex
+                theme: theme,
+                containerWidth: max(120, context.containerWidth - textColumn),
+                delimiterIndex: delimiterIndex, textColumn: textColumn
             )
             style.decoration.append(.tableGrid(grid))
             register(style.decoration, for: block.id)
@@ -2475,10 +2523,25 @@ struct AttributedBuilder {
             // It stays out of the painted run - a newline may never carry
             // `md.hidden`, or its glyph is dropped and the line never breaks.
             for (index, row) in rows.enumerated() {
-                let paragraph = grid.paragraphStyle(
-                    forSourceRow: index, revealed: false,
-                    spacing: index == 0 ? theme.blockMargin : 0
+                // The delimiter row renders nothing: its glyphs are zero-width and
+                // glue into the header's fragment. Its paragraph style must equal
+                // the row it PRECEDES — the next row's own glyphs glue onto the
+                // delimiter's terminator, and the collapsed strut that used to
+                // ride there shrank the first data row to a hairline (every
+                // table's laid-out height lost a full row and the painted grid
+                // slid out of the layout).
+                let styleIndex = index == delimiterIndex ? index + 1 : index
+                var paragraph = grid.paragraphStyle(
+                    forSourceRow: styleIndex, revealed: false,
+                    spacing: index == 0 && textColumn == 0 ? theme.blockMargin : 0
                 )
+                if textColumn > 0,
+                    let mutable = paragraph.mutableCopy() as? NSMutableParagraphStyle
+                {
+                    mutable.headIndent = textColumn
+                    mutable.firstLineHeadIndent = textColumn
+                    paragraph = mutable
+                }
                 if index > 0 {
                     result.append(
                         NSAttributedString(

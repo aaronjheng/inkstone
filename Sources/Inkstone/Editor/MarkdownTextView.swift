@@ -656,6 +656,30 @@ final class MarkdownTextView: NSTextView {
         }
         MarkerVisibility(storage: textStorage ?? NSTextStorage(), layout: built)
             .apply(for: selectedRange())
+        // The storage's edit pass drops the painted rows' attributes on front
+        // matter (observed: the builder emits painted+hidden rows, the storage
+        // reads neither after the replace) — the source then renders on top of
+        // the painted key/value table. Re-assert the built attributes.
+        if let storage = textStorage, storage.length == built.attributed.length {
+            let whole = NSRange(location: 0, length: storage.length)
+            storage.beginEditing()
+            built.attributed.enumerateAttribute(
+                MarkdownAttribute.painted, in: whole, options: []
+            ) { value, range, _ in
+                guard (value as? Bool) == true else { return }
+                if storage.attribute(
+                    MarkdownAttribute.painted, at: range.location, effectiveRange: nil
+                ) as? Bool != true {
+                    storage.addAttributes(
+                        built.attributed.attributes(
+                            at: range.location, effectiveRange: nil
+                        ),
+                        range: range
+                    )
+                }
+            }
+            storage.endEditing()
+        }
         needsDisplay = true
     }
 

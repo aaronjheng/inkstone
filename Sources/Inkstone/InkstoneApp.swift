@@ -16,6 +16,14 @@ struct InkstoneApp {
             FontRegistration.registerBundledFonts()
             exit(LayoutDump.run(CommandLine.arguments))
         }
+        // TEMPORARY headless render: draw the live editor path into a PNG.
+        if CommandLine.arguments.contains("--render") {
+            FontRegistration.registerBundledFonts()
+            let code = MainActor.assumeIsolated {
+                LayoutDump.runRender(CommandLine.arguments)
+            }
+            exit(code)
+        }
         // Theme fonts have to resolve before the first window is built.
         FontRegistration.registerBundledFonts()
         let application = NSApplication.shared

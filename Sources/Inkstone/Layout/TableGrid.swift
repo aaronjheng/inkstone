@@ -169,10 +169,16 @@ struct TableGrid {
         return base + CGFloat(fullwidth) * font.pointSize
     }
 
+    /// The container's own inset for a nested table: the painted grid offsets
+    /// by it (`paintTable`'s left edge), since the rows' line fragments still
+    /// start at the container edge.
+    var textColumn: CGFloat = 0
+
     init(
         rows: [[String]], alignments: [NSTextAlignment], theme: EditorTheme,
-        containerWidth: CGFloat, delimiterIndex: Int? = nil
+        containerWidth: CGFloat, delimiterIndex: Int? = nil, textColumn: CGFloat = 0
     ) {
+        self.textColumn = textColumn
         let font = EditorFont.nsSystem(size: theme.bodyFontSize)
         // The UA styles `th { font-weight: bold }` and the preview does not
         // override it — the header row measures and paints bold.
