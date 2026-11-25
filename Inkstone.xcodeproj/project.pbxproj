@@ -466,7 +466,7 @@
 			repositoryURL = "https://github.com/tree-sitter/tree-sitter-c-sharp";
 			requirement = {
 				kind = upToNextMajorVersion;
-				minimumVersion = 0.23.5;
+				minimumVersion = 0.24.0;
 			};
 		};
 		/* 0.25.0 gates scanner.c behind a FileManager check that Xcode's
